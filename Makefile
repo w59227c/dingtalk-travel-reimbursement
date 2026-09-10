@@ -6,7 +6,7 @@
 	dev dev-backend dev-frontend \
 	dev-dingtalk dev-dingtalk-backend dev-dingtalk-frontend \
 	dev-dingtalk-prod dev-dingtalk-prod-backend dev-dingtalk-prod-frontend \
-	deploy up logs down
+	deploy up logs down images-build images-check
 
 backend-install:
 	cd backend && uv sync --frozen --extra dev --extra ocr
@@ -15,7 +15,8 @@ backend-test:
 	cd backend && uv run --frozen --extra dev pytest
 
 backend-lint:
-	cd backend && uv run --frozen --extra dev ruff check app tests migrations
+	cd backend && uv run --frozen --extra dev ruff check app tests migrations scripts \
+		../scripts/render-production-env.py ../scripts/dispatch-deploy.py
 
 backend-format:
 	cd backend && uv run --frozen --extra dev ruff format app tests migrations
@@ -98,6 +99,14 @@ up:
 
 deploy: deploy-check
 	docker compose up --build --detach --wait
+
+# Self-contained production images; these checks use only disposable containers.
+images-build:
+	docker build --platform linux/amd64 -t expense-backend:check backend
+	docker build --platform linux/amd64 -f frontend/Dockerfile -t expense-web:check .
+
+images-check:
+	bash scripts/smoke-images.sh expense-backend:check expense-web:check
 
 logs:
 	docker compose logs --follow --tail=200

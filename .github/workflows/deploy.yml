@@ -1,0 +1,71 @@
+name: Deploy production
+
+on:
+  workflow_call:
+    inputs:
+      backend_image:
+        type: string
+        required: true
+      web_image:
+        type: string
+        required: true
+      revision:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      backend_image:
+        description: Backend image from the release manifest (image@sha256 digest)
+        type: string
+        required: true
+      web_image:
+        description: Web image from the same release manifest (image@sha256 digest)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # Configure production's tag restrictions before enabling this repository variable.
+    if: startsWith(github.ref, 'refs/tags/v') && github.ref_protected && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    concurrency:
+      group: dingtalk-expense-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check release identity
+        env:
+          RELEASE_REVISION: ${{ inputs.revision || github.sha }}
+        run: test "$RELEASE_REVISION" = "$GITHUB_SHA"
+      - name: Render configuration and deploy over verified SSH
+        env:
+          BACKEND_IMAGE: ${{ inputs.backend_image }}
+          WEB_IMAGE: ${{ inputs.web_image }}
+          DEPLOY_REVISION: ${{ inputs.revision || github.sha }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '/opt/dingtalk-expense' }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DINGTALK_CLIENT_ID: ${{ vars.DINGTALK_CLIENT_ID }}
+          DINGTALK_CLIENT_SECRET: ${{ secrets.DINGTALK_CLIENT_SECRET }}
+          DINGTALK_CORP_ID: ${{ vars.DINGTALK_CORP_ID }}
+          DINGTALK_AGENT_ID: ${{ vars.DINGTALK_AGENT_ID }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          ADMIN_USER_IDS: ${{ vars.ADMIN_USER_IDS }}
+          APP_BIND_ADDRESS: ${{ vars.APP_BIND_ADDRESS || '127.0.0.1' }}
+          APP_PORT: ${{ vars.APP_PORT || '8080' }}
+          SESSION_COOKIE_SECURE: ${{ vars.SESSION_COOKIE_SECURE || 'false' }}
+          DINGTALK_OA_WORKER_ENABLED: ${{ vars.DINGTALK_OA_WORKER_ENABLED || 'false' }}
+          DINGTALK_APPROVAL_DETAIL_URL_TEMPLATE: ${{ vars.DINGTALK_APPROVAL_DETAIL_URL_TEMPLATE }}
+          BACKEND_MEMORY_LIMIT: ${{ vars.BACKEND_MEMORY_LIMIT || '3g' }}
+          REIMBURSEMENT_STAGING_MAX_BYTES: ${{ vars.REIMBURSEMENT_STAGING_MAX_BYTES || '4294967296' }}
+        run: python3 scripts/dispatch-deploy.py

@@ -34,6 +34,7 @@ outputs/
 *.private.json
 production-oa-*.json
 backend/models/*
+backend/models.zip
 !backend/models/README.md
 *.db
 *.db-shm

@@ -1,5 +1,9 @@
 # 本地 OCR 模型挂载点
 
+正式发布镜像现在在构建阶段自动下载并校验模型，使用 `compose.production.yml` 时无需宿主
+模型目录，见 [GitHub Actions 部署说明](../../docs/GITHUB_ACTIONS_SETUP.md)。下面的目录布局
+仍用于本机开发和原有 `docker-compose.yml` 的显式模型挂载。
+
 此目录不提交模型二进制。macOS arm64 本地测试和 Linux 生产部署都需要先在受控流程中取得并
 校验 `PP-OCRv6_small_det`、`PP-OCRv6_small_rec` 制品的来源和 SHA-256。
 

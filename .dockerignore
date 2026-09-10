@@ -1,0 +1,15 @@
+# The root context is used only for the Web image. Keep it an allowlist.
+**
+!frontend/
+!frontend/**
+!nginx/
+!nginx/default.conf
+!nginx/expense-proxy.conf
+frontend/node_modules
+frontend/dist
+frontend/coverage
+frontend/.vite
+**/.env
+**/.env.*
+**/.git
+**/.DS_Store

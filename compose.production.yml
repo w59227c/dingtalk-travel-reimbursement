@@ -1,27 +1,26 @@
-name: dingtalk-travel-reimbursement
+# Image-only production deployment. Use scripts/deploy-production.sh for upgrades.
+name: ${COMPOSE_PROJECT_NAME:-dingtalk-travel-reimbursement}
 
 services:
   backend:
-    platform: ${TARGET_PLATFORM:-linux/amd64}
-    build:
-      context: ./backend
-      args:
-        INSTALL_OCR: ${INSTALL_OCR:-true}
+    platform: linux/amd64
+    image: ${BACKEND_IMAGE:?Set BACKEND_IMAGE to an immutable registry digest}
     environment:
-      APP_ENV: ${APP_ENV:?Set APP_ENV explicitly to development or production}
+      APP_ENV: production
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      DATABASE_URL: ${DATABASE_URL:-sqlite:////app/data/app.db}
-      TEMP_DIR: ${TEMP_DIR:-/tmp/expense}
+      # The deployment backup/restore contract supports this fixed SQLite path.
+      DATABASE_URL: sqlite:////app/data/app.db
+      TEMP_DIR: /tmp/expense
       # The volume target is intentionally fixed: overriding this inside Compose
       # would redirect durable files onto the container's read-only root.
       REIMBURSEMENT_STAGING_DIR: /app/staging
       REIMBURSEMENT_STAGING_MAX_BYTES: ${REIMBURSEMENT_STAGING_MAX_BYTES:-4294967296}
       REIMBURSEMENT_DRAFT_TTL_DAYS: ${REIMBURSEMENT_DRAFT_TTL_DAYS:-30}
-      EXCEL_TEMPLATE_PATH: ${EXCEL_TEMPLATE_PATH:-/app/app/templates/expense_template.xlsx}
-      DINGTALK_CLIENT_ID: ${DINGTALK_CLIENT_ID:-}
-      DINGTALK_CLIENT_SECRET: ${DINGTALK_CLIENT_SECRET:-}
-      DINGTALK_CORP_ID: ${DINGTALK_CORP_ID:-}
-      DINGTALK_AGENT_ID: ${DINGTALK_AGENT_ID:-}
+      EXCEL_TEMPLATE_PATH: /app/app/templates/expense_template.xlsx
+      DINGTALK_CLIENT_ID: ${DINGTALK_CLIENT_ID:?Set DINGTALK_CLIENT_ID in the production environment}
+      DINGTALK_CLIENT_SECRET: ${DINGTALK_CLIENT_SECRET:?Set DINGTALK_CLIENT_SECRET in the production environment}
+      DINGTALK_CORP_ID: ${DINGTALK_CORP_ID:?Set DINGTALK_CORP_ID in the production environment}
+      DINGTALK_AGENT_ID: ${DINGTALK_AGENT_ID:?Set DINGTALK_AGENT_ID in the production environment}
       DINGTALK_STORAGE_UPLOAD_TIMEOUT_SECONDS: ${DINGTALK_STORAGE_UPLOAD_TIMEOUT_SECONDS:-120}
       DINGTALK_STORAGE_UPLOAD_HOST_SUFFIXES: ${DINGTALK_STORAGE_UPLOAD_HOST_SUFFIXES:-trans.dingtalk.com}
       # Keep false until migrations, templates, permissions, and one acceptance run are verified.
@@ -33,16 +32,13 @@ services:
       DINGTALK_OA_WORKER_RETRY_MAX_SECONDS: ${DINGTALK_OA_WORKER_RETRY_MAX_SECONDS:-300}
       DINGTALK_OA_WORKER_RECONCILIATION_SECONDS: ${DINGTALK_OA_WORKER_RECONCILIATION_SECONDS:-900}
       DINGTALK_APPROVAL_DETAIL_URL_TEMPLATE: ${DINGTALK_APPROVAL_DETAIL_URL_TEMPLATE:-}
-      SESSION_SECRET: ${SESSION_SECRET:-}
-      ADMIN_USER_IDS: ${ADMIN_USER_IDS:-}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in the production environment}
+      ADMIN_USER_IDS: ${ADMIN_USER_IDS:?Set ADMIN_USER_IDS in the production environment}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-expense_session}
       SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-480}
       SESSION_CLEANUP_INTERVAL_SECONDS: ${SESSION_CLEANUP_INTERVAL_SECONDS:-300}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
-      AUTH_MOCK_ENABLED: ${AUTH_MOCK_ENABLED:-false}
-      AUTH_MOCK_USER_ID: ${AUTH_MOCK_USER_ID:-mock-user}
-      AUTH_MOCK_USER_NAME: ${AUTH_MOCK_USER_NAME:-开发测试用户}
-      AUTH_MOCK_DEPARTMENTS: ${AUTH_MOCK_DEPARTMENTS:-100:测试部门}
+      AUTH_MOCK_ENABLED: "false"
       OCR_MODE: local
       UPLOAD_TTL_MINUTES: ${UPLOAD_TTL_MINUTES:-30}
       TEMP_CLEANUP_INTERVAL_SECONDS: ${TEMP_CLEANUP_INTERVAL_SECONDS:-600}
@@ -73,23 +69,26 @@ services:
       WORKER_FILE_SIZE_LIMIT_BYTES: ${WORKER_FILE_SIZE_LIMIT_BYTES:-67108864}
       WORKER_OPEN_FILES_LIMIT: ${WORKER_OPEN_FILES_LIMIT:-128}
       WORKER_CPU_SECONDS: ${WORKER_CPU_SECONDS:-180}
-      OCR_ENABLED: ${OCR_ENABLED:-true}
-      OCR_FAKE_ENABLED: ${OCR_FAKE_ENABLED:-false}
+      OCR_ENABLED: "true"
+      OCR_FAKE_ENABLED: "false"
       OCR_CONCURRENCY: ${OCR_CONCURRENCY:-1}
       OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-120}
       OCR_CPU_THREADS: ${OCR_CPU_THREADS:-4}
       OCR_ENGINE: paddle_static
       PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "1"
       PADDLE_PDX_CACHE_HOME: /tmp/expense/.paddlex
-      OCR_DETECTION_MODEL_DIR: ${OCR_DETECTION_MODEL_DIR:-/opt/expense/models/PP-OCRv6_small_det}
-      OCR_RECOGNITION_MODEL_DIR: ${OCR_RECOGNITION_MODEL_DIR:-/opt/expense/models/PP-OCRv6_small_rec}
+      OCR_DETECTION_MODEL_DIR: /opt/expense/models/PP-OCRv6_small_det
+      OCR_RECOGNITION_MODEL_DIR: /opt/expense/models/PP-OCRv6_small_rec
     volumes:
       - sqlite_data:/app/data
       - reimbursement_staging:/app/staging
-      - ./backend/app/templates/expense_template.xlsx:/app/app/templates/expense_template.xlsx:ro
-      # Production OCR models are externally verified deployment inputs and mounted read-only.
-      - ${OCR_MODEL_HOST_DIR:-./backend/models}:/opt/expense/models:ro
+    user: "10001:10001"
     read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 180s
     mem_limit: ${BACKEND_MEMORY_LIMIT:-3g}
     pids_limit: ${BACKEND_PIDS_LIMIT:-128}
     tmpfs:
@@ -103,7 +102,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      start_period: 10s
+      start_period: 30s
     logging:
       driver: json-file
       options:
@@ -112,10 +111,8 @@ services:
     restart: unless-stopped
 
   web:
-    platform: ${TARGET_PLATFORM:-linux/amd64}
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
+    platform: linux/amd64
+    image: ${WEB_IMAGE:?Set WEB_IMAGE to an immutable registry digest}
     depends_on:
       backend:
         condition: service_healthy
@@ -123,9 +120,6 @@ services:
       # Loopback is the safe default. Change APP_BIND_ADDRESS when clients need
       # to access this HTTP port directly or through an HTTP/HTTPS reverse proxy.
       - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:8080"
-    volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/expense-proxy.conf:/etc/nginx/conf.d/expense-proxy.inc:ro
     user: "101:101"
     read_only: true
     mem_limit: ${WEB_MEMORY_LIMIT:-128m}
@@ -152,4 +146,6 @@ services:
 
 volumes:
   sqlite_data:
+    name: ${COMPOSE_PROJECT_NAME:-dingtalk-travel-reimbursement}_sqlite_data
   reimbursement_staging:
+    name: ${COMPOSE_PROJECT_NAME:-dingtalk-travel-reimbursement}_reimbursement_staging

@@ -5,4 +5,12 @@ __pycache__
 tests
 data
 *.db*
-
+.env
+.env.*
+**/.env
+**/.env.*
+.git
+models
+models.zip
+models*.tar*
+staging
