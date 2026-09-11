@@ -10,6 +10,8 @@
 | `main` push | 完成相同门禁后，向 GHCR 推送不可变的 `sha-<完整 commit SHA>`，并更新稳定入口 `main` |
 | 受保护的 `v*` tag | 除 SHA 标签外，再推送同名版本标签；未受保护的版本标签会失败 |
 
+仅修改 `docs/**` 或 Markdown 文件不会触发该工作流。镜像发布时，同一仓库的 SHA、`main` 或版本标签会合并到一次上传操作中。
+
 镜像名直接根据 GitHub 的 `<owner>/<repository>` 自动生成并转为小写，不需要人工维护：
 
 ```text
