@@ -60,9 +60,37 @@ def _configured_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+def selectable_departments(
+    departments: tuple[DepartmentIdentity, ...],
+) -> tuple[DepartmentIdentity, ...]:
+    """Return ordered, unambiguous departments available to reimbursement users."""
+
+    result: list[DepartmentIdentity] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    for department in departments:
+        department_id = department.id.strip()
+        department_name = department.name.strip()
+        if (
+            not department_id
+            or not department_name
+            or department_name.startswith("其他")
+            or department_id in seen_ids
+            or department_name in seen_names
+        ):
+            continue
+        seen_ids.add(department_id)
+        seen_names.add(department_name)
+        result.append(DepartmentIdentity(department_id, department_name))
+    return tuple(result)
+
+
 def serialize_departments(departments: tuple[DepartmentIdentity, ...]) -> str:
     return json.dumps(
-        [{"id": item.id, "name": item.name} for item in departments],
+        [
+            {"id": item.id, "name": item.name}
+            for item in selectable_departments(departments)
+        ],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -71,10 +99,12 @@ def serialize_departments(departments: tuple[DepartmentIdentity, ...]) -> str:
 def deserialize_departments(raw: str) -> tuple[DepartmentIdentity, ...]:
     try:
         values = json.loads(raw)
-        return tuple(
-            DepartmentIdentity(id=str(item["id"]), name=str(item["name"]))
-            for item in values
-            if isinstance(item, dict) and item.get("id") and item.get("name")
+        return selectable_departments(
+            tuple(
+                DepartmentIdentity(id=str(item["id"]), name=str(item["name"]))
+                for item in values
+                if isinstance(item, dict) and item.get("id") and item.get("name")
+            )
         )
     except (TypeError, ValueError, KeyError):
         return ()
@@ -118,6 +148,13 @@ def create_session(
     identity: DingTalkIdentity,
     existing_cookie: str | None,
 ) -> tuple[UserSession, str, str]:
+    departments = selectable_departments(identity.departments)
+    if not departments:
+        raise ApiError(
+            "DINGTALK_PERMISSION_MISSING",
+            "未找到可用于报销的所属部门，请联系管理员",
+            502,
+        )
     if existing_cookie:
         existing = database.get(
             UserSession,
@@ -129,14 +166,14 @@ def create_session(
     session_token = random_token()
     csrf_token = random_token()
     now = utc_now()
-    selected = identity.departments[0] if len(identity.departments) == 1 else None
+    selected = departments[0] if len(departments) == 1 else None
     record = UserSession(
         session_id_hash=token_hash(session_token, settings.session_secret),
         dingtalk_user_id=identity.user_id,
         dingtalk_union_id=identity.union_id,
         name=identity.name,
         corp_id=settings.dingtalk_corp_id,
-        departments_json=serialize_departments(identity.departments),
+        departments_json=serialize_departments(departments),
         current_department_id=selected.id if selected else None,
         current_department_name=selected.name if selected else None,
         csrf_token_hash=token_hash(csrf_token, settings.session_secret),
@@ -217,11 +254,20 @@ def get_current_session(
     if (now - record.last_seen_at).total_seconds() >= 300:
         record.last_seen_at = now
         changed = True
-    if changed:
-        database.commit()
     departments = deserialize_departments(record.departments_json)
     if not departments:
         raise ApiError("UNAUTHORIZED", "登录身份数据无效，请重新进入", 401)
+    selected_is_valid = any(
+        item.id == record.current_department_id
+        and item.name == record.current_department_name
+        for item in departments
+    )
+    if (record.current_department_id or record.current_department_name) and not selected_is_valid:
+        record.current_department_id = None
+        record.current_department_name = None
+        changed = True
+    if changed:
+        database.commit()
     return CurrentSession(record=record, departments=departments)
 
 

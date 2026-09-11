@@ -324,19 +324,51 @@ async def test_selection_rejects_different_companies_even_with_same_travel_type(
     assert error.value.code == "TRAVEL_APPROVAL_ACCOUNTING_MISMATCH"
 
 
-def test_query_window_defaults_to_120_calendar_days_and_rejects_a_larger_span() -> None:
+def test_query_window_defaults_to_180_calendar_days_and_rejects_a_larger_span() -> None:
     window = requested_query_window(None, None, today=date(2026, 9, 4))
 
-    assert window.from_date == date(2026, 5, 8)
+    assert window.from_date == date(2026, 3, 9)
     assert window.to_date == date(2026, 9, 4)
-    assert window.end_time_ms - window.start_time_ms < 120 * 24 * 60 * 60 * 1000
+    assert window.end_time_ms - window.start_time_ms < 180 * 24 * 60 * 60 * 1000
 
     with pytest.raises(ApiError) as caught:
-        TravelApprovalQueryWindow.from_dates(date(2026, 5, 7), date(2026, 9, 4))
+        TravelApprovalQueryWindow.from_dates(date(2026, 3, 8), date(2026, 9, 4))
     assert caught.value.code == "TRAVEL_APPROVAL_QUERY_WINDOW_INVALID"
 
     with pytest.raises(ApiError):
         requested_query_window(date(2026, 9, 1), None)
+
+
+@pytest.mark.asyncio
+async def test_listing_splits_a_180_day_window_into_dingtalk_safe_requests() -> None:
+    class WindowWorkflow(FakeWorkflow):
+        async def list_process_instance_ids(self, **kwargs):
+            self.list_calls.append(kwargs)
+            instance_id = "older" if len(self.list_calls) == 1 else "newer"
+            return WorkflowInstanceIdPage((instance_id,), None)
+
+    workflow = WindowWorkflow(
+        {},
+        {"older": _instance("older"), "newer": _instance("newer")},
+    )
+    window = requested_query_window(None, None, today=date(2026, 9, 4))
+
+    candidates = await list_current_user_travel_approvals(
+        workflow,
+        _catalog(_profile("domestic", "PROC-A")),
+        current_user_id="employee-1",
+        query_window=window,
+    )
+
+    assert {item.instance.instance_id for item in candidates} == {"older", "newer"}
+    assert len(workflow.list_calls) == 2
+    first, second = workflow.list_calls
+    assert [first["next_token"], second["next_token"]] == [0, 0]
+    assert first["end_time"] + 1 == second["start_time"]
+    assert all(
+        call["end_time"] - call["start_time"] < 120 * 24 * 60 * 60 * 1000
+        for call in workflow.list_calls
+    )
 
 
 @pytest.mark.asyncio

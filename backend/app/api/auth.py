@@ -24,6 +24,7 @@ from app.services.sessions import (
     get_current_session,
     require_csrf,
     rotate_csrf,
+    selectable_departments,
     session_payload,
 )
 from app.services.temp_files import delete_session_files
@@ -72,7 +73,10 @@ def _login_response(
     _set_session_cookie(response, settings, session_token)
     return success(
         session_payload(
-            CurrentSession(record=record, departments=identity.departments),
+            CurrentSession(
+                record=record,
+                departments=selectable_departments(identity.departments),
+            ),
             csrf_token,
         )
     )

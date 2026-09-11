@@ -41,8 +41,12 @@ def test_public_config_exposes_authoritative_upload_limits(
     assert "secret-must-stay-server-side" not in response.text
 
 
-def success_transport(department_ids: list[int] | None = None):
+def success_transport(
+    department_ids: list[int] | None = None,
+    department_names: dict[int, str] | None = None,
+):
     department_ids = department_ids or [10]
+    department_names = department_names or {}
     calls: list[tuple[str, str, dict[str, object], dict[str, str]]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -78,7 +82,14 @@ def success_transport(department_ids: list[int] | None = None):
         assert body == {"dept_id": department_id, "language": "zh_CN"}
         return httpx.Response(
             200,
-            json={"errcode": 0, "result": {"name": f"部门-{department_id}"}},
+            json={
+                "errcode": 0,
+                "result": {
+                    "name": department_names.get(
+                        department_id, f"部门-{department_id}"
+                    )
+                },
+            },
         )
 
     return httpx.MockTransport(handler), calls
@@ -190,6 +201,84 @@ def test_multiple_departments_require_authoritative_selection(client_factory) ->
         "id": "20",
         "name": "部门-20",
     }
+
+
+def test_login_filters_other_departments_and_deduplicates_remaining_names(
+    client_factory,
+) -> None:
+    transport, _calls = success_transport(
+        [10, 20, 30, 40, 50, 60],
+        {
+            10: "其他1",
+            20: "技术管理中心",
+            30: "技术管理中心",
+            40: "其他2",
+            50: "产品开发部",
+            60: "其他xxx",
+        },
+    )
+    client = client_factory(transport=transport)
+
+    login = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"})
+    data = login.json()["data"]
+
+    assert data["selectedDepartment"] is None
+    assert data["departments"] == [
+        {"id": "20", "name": "技术管理中心"},
+        {"id": "50", "name": "产品开发部"},
+    ]
+
+
+def test_login_rejects_identity_when_all_departments_start_with_other(
+    client_factory,
+) -> None:
+    transport, _calls = success_transport(
+        [10, 20, 30],
+        {10: "其他1", 20: "其他2", 30: "其他xxx"},
+    )
+    client = client_factory(transport=transport)
+
+    login = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"})
+
+    assert login.status_code == 502
+    assert login.json()["error"]["code"] == "DINGTALK_PERMISSION_MISSING"
+    assert "expense_session" not in client.cookies
+
+
+def test_existing_session_departments_are_filtered_and_deduplicated(
+    client_factory,
+) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    login = client.post("/api/auth/mock")
+    session_hash = token_hash(
+        client.cookies["expense_session"],
+        client.app.state.settings.session_secret,
+    )
+    with client.app.state.database_session_factory() as database:
+        record = database.get(UserSession, session_hash)
+        assert record is not None
+        record.departments_json = json.dumps(
+            [
+                {"id": "10", "name": "其他1"},
+                {"id": "20", "name": "技术管理中心"},
+                {"id": "30", "name": "技术管理中心"},
+                {"id": "40", "name": "其他xxx"},
+                {"id": "50", "name": "产品开发部"},
+            ]
+        )
+        record.current_department_id = "30"
+        record.current_department_name = "技术管理中心"
+        database.commit()
+
+    me = client.get("/api/me")
+
+    assert me.status_code == 200
+    assert me.json()["data"]["departments"] == [
+        {"id": "20", "name": "技术管理中心"},
+        {"id": "50", "name": "产品开发部"},
+    ]
+    assert me.json()["data"]["selectedDepartment"] is None
+    assert login.json()["data"]["selectedDepartment"] is not None
 
 
 def test_expired_and_forged_sessions_return_401(client_factory) -> None:

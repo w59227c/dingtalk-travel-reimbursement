@@ -21,7 +21,8 @@ _PAGE_SIZE = 20
 _MAX_LISTED_IDS = 200
 _MAX_PAGES_PER_PROFILE = 50
 _DETAIL_CONCURRENCY = 5
-_MAX_WINDOW_DAYS = 120
+_MAX_WINDOW_DAYS = 180
+_DINGTALK_MAX_QUERY_DAYS = 120
 
 
 class ReimbursementTemplateLike(Protocol):
@@ -63,7 +64,7 @@ class TravelApprovalQueryWindow:
         if to_date < from_date or (to_date - from_date).days >= _MAX_WINDOW_DAYS:
             raise ApiError(
                 "TRAVEL_APPROVAL_QUERY_WINDOW_INVALID",
-                "出差审批查询范围必须为连续且不超过 120 天",
+                "出差审批查询范围必须为连续且不超过 180 天",
                 422,
             )
         start = datetime.combine(from_date, time.min, tzinfo=_DINGTALK_TIME_ZONE)
@@ -368,55 +369,77 @@ async def _list_approval_references(
 ) -> dict[str, ListedTravelApproval]:
     listed: dict[str, ListedTravelApproval] = {}
     for profile in profiles:
-        next_token = 0
-        for _page_number in range(_MAX_PAGES_PER_PROFILE):
-            page = await workflow.list_process_instance_ids(
-                process_code=profile.process_code,
-                start_time=query_window.start_time_ms,
-                end_time=query_window.end_time_ms,
-                next_token=next_token,
-                max_results=_PAGE_SIZE,
-                user_ids=(current_user_id,),
-                statuses=("COMPLETED",),
-            )
-            for instance_id in page.instance_ids:
-                existing = listed.get(instance_id)
-                if existing is not None:
-                    code = (
-                        "TRAVEL_APPROVAL_SOURCE_AMBIGUOUS"
-                        if existing.source_process_code != profile.process_code
-                        else "TRAVEL_APPROVAL_LIST_INVALID"
-                    )
-                    raise ApiError(
-                        code,
-                        "钉钉返回的出差审批来源不唯一，请联系管理员检查模板配置",
-                        409,
-                    )
-                if len(listed) >= _MAX_LISTED_IDS:
+        page_count = 0
+        for upstream_window in _dingtalk_query_windows(query_window):
+            next_token = 0
+            while True:
+                if page_count >= _MAX_PAGES_PER_PROFILE:
                     raise _result_limit_error()
-                listed[instance_id] = ListedTravelApproval(
-                    instance_id=instance_id,
-                    expected_originator_user_id=current_user_id,
-                    profile_key=profile.profile_key,
-                    profile_display_name=profile.display_name,
-                    source_process_code=profile.process_code,
-                    schema_fingerprint=profile.schema.fingerprint,
-                    travel_type_option=profile.travel_type_option,
-                    start_date_component_id=profile.start_date_component_id,
-                    end_date_component_id=profile.end_date_component_id,
-                    query_window=query_window,
-                    source_schema=profile.schema,
-                    company_component_id=travel_source_component_id(profile, "company"),
-                    budget_code_component_id=travel_source_component_id(profile, "budgetCode"),
-                    travel_type_component_id=getattr(profile, "travel_type_component_id", None),
-                    travel_type_mappings=getattr(profile, "travel_type_mappings", None),
+                page_count += 1
+                page = await workflow.list_process_instance_ids(
+                    process_code=profile.process_code,
+                    start_time=upstream_window.start_time_ms,
+                    end_time=upstream_window.end_time_ms,
+                    next_token=next_token,
+                    max_results=_PAGE_SIZE,
+                    user_ids=(current_user_id,),
+                    statuses=("COMPLETED",),
                 )
-            if page.next_token is None:
-                break
-            next_token = page.next_token
-        else:
-            raise _result_limit_error()
+                for instance_id in page.instance_ids:
+                    existing = listed.get(instance_id)
+                    if existing is not None:
+                        code = (
+                            "TRAVEL_APPROVAL_SOURCE_AMBIGUOUS"
+                            if existing.source_process_code != profile.process_code
+                            else "TRAVEL_APPROVAL_LIST_INVALID"
+                        )
+                        raise ApiError(
+                            code,
+                            "钉钉返回的出差审批来源不唯一，请联系管理员检查模板配置",
+                            409,
+                        )
+                    if len(listed) >= _MAX_LISTED_IDS:
+                        raise _result_limit_error()
+                    listed[instance_id] = ListedTravelApproval(
+                        instance_id=instance_id,
+                        expected_originator_user_id=current_user_id,
+                        profile_key=profile.profile_key,
+                        profile_display_name=profile.display_name,
+                        source_process_code=profile.process_code,
+                        schema_fingerprint=profile.schema.fingerprint,
+                        travel_type_option=profile.travel_type_option,
+                        start_date_component_id=profile.start_date_component_id,
+                        end_date_component_id=profile.end_date_component_id,
+                        query_window=query_window,
+                        source_schema=profile.schema,
+                        company_component_id=travel_source_component_id(profile, "company"),
+                        budget_code_component_id=travel_source_component_id(profile, "budgetCode"),
+                        travel_type_component_id=getattr(
+                            profile, "travel_type_component_id", None
+                        ),
+                        travel_type_mappings=getattr(
+                            profile, "travel_type_mappings", None
+                        ),
+                    )
+                if page.next_token is None:
+                    break
+                next_token = page.next_token
     return listed
+
+
+def _dingtalk_query_windows(
+    query_window: TravelApprovalQueryWindow,
+) -> tuple[TravelApprovalQueryWindow, ...]:
+    windows: list[TravelApprovalQueryWindow] = []
+    from_date = query_window.from_date
+    while from_date <= query_window.to_date:
+        to_date = min(
+            from_date + timedelta(days=_DINGTALK_MAX_QUERY_DAYS - 1),
+            query_window.to_date,
+        )
+        windows.append(TravelApprovalQueryWindow.from_dates(from_date, to_date))
+        from_date = to_date + timedelta(days=1)
+    return tuple(windows)
 
 
 async def _resolve_details(

@@ -111,7 +111,10 @@ class FakeWorkflow:
         assert self.database is not None
         assert self.database.rollback_calls == 1
         self.list_calls.append(kwargs)
-        return WorkflowInstanceIdPage(("instance-1",), None)
+        return WorkflowInstanceIdPage(
+            ("instance-1",) if len(self.list_calls) == 1 else (),
+            None,
+        )
 
     async def get_process_instance(self, instance_id: str):
         self.detail_calls.append(instance_id)
@@ -241,7 +244,7 @@ def test_travel_list_ignores_claimed_identity_and_process_code(monkeypatch) -> N
     ]
 
 
-def test_travel_list_defaults_to_latest_120_calendar_dates(monkeypatch) -> None:
+def test_travel_list_defaults_to_latest_180_calendar_dates(monkeypatch) -> None:
     workflow = FakeWorkflow()
     with _client(monkeypatch, workflow=workflow) as client:
         response = client.get("/api/oa/travel-approvals")
@@ -250,7 +253,7 @@ def test_travel_list_defaults_to_latest_120_calendar_dates(monkeypatch) -> None:
     query_window = response.json()["data"]["queryWindow"]
     assert (
         date.fromisoformat(query_window["to"]) - date.fromisoformat(query_window["from"])
-    ).days == 119
+    ).days == 179
 
 
 def test_invalid_window_is_rejected_before_workflow(monkeypatch) -> None:
@@ -262,7 +265,7 @@ def test_invalid_window_is_rejected_before_workflow(monkeypatch) -> None:
         )
         too_large = client.get(
             "/api/oa/travel-approvals",
-            params={"from": "2026-05-01", "to": "2026-08-29"},
+            params={"from": "2026-03-01", "to": "2026-09-01"},
         )
 
     assert missing_endpoint.status_code == 422
