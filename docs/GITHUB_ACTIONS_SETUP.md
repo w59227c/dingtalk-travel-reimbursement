@@ -62,4 +62,4 @@ python3 backend/scripts/download-ocr-models.py --output /tmp/expense-ocr-models
 
 Apple Silicon 上会通过 Docker 模拟 `linux/amd64`，适合构建检查；正式运行仍要求原生 Linux/amd64 和支持 AVX 的 CPU。实际服务器如何拉取镜像、保存 `.env`、挂载持久数据及升级回滚，由部署环境单独管理。
 
-设计依据见 [方案](GITHUB_ACTIONS_DOCKER_DESIGN.md) 和 [官方资料核对](research/github-actions-docker-sources.md)。
+服务器使用方法见 [部署指南](deployment/README.md)。设计依据见 [方案](GITHUB_ACTIONS_DOCKER_DESIGN.md) 和 [官方资料核对](research/github-actions-docker-sources.md)。

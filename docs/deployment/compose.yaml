@@ -1,0 +1,75 @@
+name: dingtalk-travel-reimbursement
+
+services:
+  backend:
+    image: ghcr.io/w59227c/dingtalk-travel-reimbursement-backend:${IMAGE_TAG:-main}
+    platform: linux/amd64
+    env_file: .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: sqlite:////app/data/app.db
+      TEMP_DIR: /tmp/expense
+      REIMBURSEMENT_STAGING_DIR: /app/staging
+      AUTH_MOCK_ENABLED: "false"
+      OCR_ENABLED: "true"
+      OCR_FAKE_ENABLED: "false"
+    volumes:
+      - sqlite_data:/app/data
+      - reimbursement_staging:/app/staging
+    read_only: true
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-3g}
+    pids_limit: ${BACKEND_PIDS_LIMIT:-128}
+    tmpfs:
+      - /tmp/expense:uid=10001,gid=10001,mode=0700,size=1073741824
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=5).read()
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  web:
+    image: ghcr.io/w59227c/dingtalk-travel-reimbursement-web:${IMAGE_TAG:-main}
+    platform: linux/amd64
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:8080"
+    user: "101:101"
+    read_only: true
+    mem_limit: ${WEB_MEMORY_LIMIT:-128m}
+    pids_limit: ${WEB_PIDS_LIMIT:-64}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /var/cache/nginx:uid=101,gid=101,mode=0700,size=33554432
+      - /var/run:uid=101,gid=101,mode=0700,size=1048576
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+volumes:
+  sqlite_data:
+  reimbursement_staging:
