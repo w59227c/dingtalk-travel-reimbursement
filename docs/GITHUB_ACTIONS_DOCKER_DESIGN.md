@@ -31,7 +31,7 @@ Dockerfile 把模型下载放在独立 stage 中。该层只依赖 manifest、�
 
 PR 使用 `pull_request` 事件，不使用可让不受信任代码接触高权限上下文的 `pull_request_target`。第三方 Actions 固定到完整 commit SHA。前后端使用独立 GitHub Actions cache scope。
 
-`main` 发布 `sha-<完整 commit SHA>`。受保护的 `v*` tag 额外发布版本标签。工作流记录两份远程镜像 digest、源码 commit 和模型 manifest hash 到 `release.json` artifact，便于后续人工或外部部署系统选用准确产物。
+`main` 发布不可变的 `sha-<完整 commit SHA>`，并把同一份已验证镜像更新为 `main` 标签，便于服务器用固定 Compose 配置拉取最新主线版本。受保护的 `v*` tag 额外发布版本标签。工作流记录两份远程镜像 digest、源码 commit 和模型 manifest hash 到 `release.json` artifact，便于后续人工或外部部署系统选用准确产物及精确回滚。
 
 ## `.env` 设计
 

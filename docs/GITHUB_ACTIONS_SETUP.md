@@ -7,19 +7,19 @@
 | 事件 | 执行动作 |
 | --- | --- |
 | Pull request | 后端与前端测试、Lint、生产构建、Nginx 检查、两份 Docker 镜像构建及冒烟验证；不推送镜像 |
-| `main` push | 完成相同门禁后，向 GHCR 推送 `sha-<完整 commit SHA>` 镜像 |
+| `main` push | 完成相同门禁后，向 GHCR 推送不可变的 `sha-<完整 commit SHA>`，并更新稳定入口 `main` |
 | 受保护的 `v*` tag | 除 SHA 标签外，再推送同名版本标签；未受保护的版本标签会失败 |
 
-镜像名按仓库 owner 自动生成并转为小写：
+镜像名直接根据 GitHub 的 `<owner>/<repository>` 自动生成并转为小写，不需要人工维护：
 
 ```text
-ghcr.io/<owner>/dingtalk-expense-backend
-ghcr.io/<owner>/dingtalk-expense-web
+ghcr.io/<owner>/dingtalk-travel-reimbursement-backend
+ghcr.io/<owner>/dingtalk-travel-reimbursement-web
 ```
 
 推送 job 使用 GitHub 自动提供的临时 `GITHUB_TOKEN`，权限限制为 `contents: read` 和 `packages: write`，无需配置长期 GHCR PAT。首次发布后应在 GitHub Packages 中确认镜像与仓库的关联及所需可见性。
 
-每次成功推送还会上传 `release.json` artifact，其中记录源码 commit、模型清单 hash，以及经过测试并实际推送的两份镜像 digest。它只用于确认构建产物，不会触发部署。
+每次成功推送还会上传 `release.json` artifact，其中记录源码 commit、模型清单 hash，以及经过测试并实际推送的两份镜像 digest。它只用于确认构建产物，不会触发部署。服务器可以长期使用 `:main` 并在升级时执行 `docker compose pull`；需要精确回滚或审计时使用 SHA 标签或 `release.json` 中的 digest。
 
 ## OCR 模型
 

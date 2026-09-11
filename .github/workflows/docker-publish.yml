@@ -134,9 +134,9 @@ jobs:
             [[ "$REF_PROTECTED" == true ]] || { echo 'Version tags must be protected by a repository ruleset.' >&2; exit 1; }
             [[ "$REF_NAME" =~ ^v[A-Za-z0-9_.-]{0,127}$ ]] || { echo 'Version tag is not a valid Docker tag.' >&2; exit 1; }
           fi
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          printf 'backend=ghcr.io/%s/dingtalk-expense-backend\n' "$owner" >> "$GITHUB_OUTPUT"
-          printf 'web=ghcr.io/%s/dingtalk-expense-web\n' "$owner" >> "$GITHUB_OUTPUT"
+          repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          printf 'backend=ghcr.io/%s-backend\n' "$repository" >> "$GITHUB_OUTPUT"
+          printf 'web=ghcr.io/%s-web\n' "$repository" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Add excluded environment canaries
         run: |
@@ -191,6 +191,10 @@ jobs:
             if [[ "$service" == backend ]]; then repository="$BACKEND_REPOSITORY"; else repository="$WEB_REPOSITORY"; fi
             docker tag "expense-$service:ci" "$repository:sha-$GITHUB_SHA"
             docker push "$repository:sha-$GITHUB_SHA"
+            if [[ "$REF_TYPE" == branch && "$REF_NAME" == main ]]; then
+              docker tag "expense-$service:ci" "$repository:main"
+              docker push "$repository:main"
+            fi
             if [[ "$REF_TYPE" == tag ]]; then
               docker tag "expense-$service:ci" "$repository:$REF_NAME"
               docker push "$repository:$REF_NAME"
