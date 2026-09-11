@@ -8,7 +8,6 @@ import {
   loginWithDingTalk,
   loginWithMock,
   logout as logoutRequest,
-  selectDepartment as selectDepartmentRequest,
   selectDepartmentFromTravelApproval as selectDepartmentFromTravelApprovalRequest,
 } from '@/api/auth'
 import { setCsrfToken, setUnauthorizedHandler } from '@/api/http'
@@ -130,15 +129,6 @@ export const useAuthStore = defineStore('auth', () => {
     }
   }
 
-  async function selectDepartment(departmentId: string): Promise<void> {
-    if (!session.value) return
-    useExpenseStore().reset()
-    useReimbursementDraftStore().reset()
-    useReimbursementSubmissionStore().reset()
-    session.value.selectedDepartment = await selectDepartmentRequest(departmentId)
-    status.value = 'authenticated'
-  }
-
   async function selectDepartmentFromTravelApproval(
     selection: ReimbursementRelatedApprovalSelection,
   ): Promise<void> {
@@ -181,7 +171,6 @@ export const useAuthStore = defineStore('auth', () => {
     refreshMe,
     refreshPublicConfig,
     useDevelopmentMock,
-    selectDepartment,
     selectDepartmentFromTravelApproval,
     logout,
   }

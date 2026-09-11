@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import CheckConstraint, text
@@ -160,27 +160,57 @@ def new_ready_upload(
     storage_suffix: str | None = None,
 ) -> ReimbursementUpload:
     suffix = storage_suffix or str(sort_order)
+    is_pdf = role is ReimbursementUploadRole.GENERATED_PDF
     return ReimbursementUpload(
         submission_id=submission.id,
         draft_id=submission.draft_id,
         source_draft_file_id=source.id if source is not None else None,
         role=role.value,
         sort_order=sort_order,
-        local_storage_key=f"generated/{submission.id}/{suffix}.xlsx",
+        local_storage_key=f"generated/{submission.id}/{suffix}.{'pdf' if is_pdf else 'xlsx'}",
         local_part_storage_key=None,
         local_status=ReimbursementUploadLocalStatus.READY.value,
         reserved_bytes=123,
         reservation_expires_at=None,
-        file_name="差旅费报销单.xlsx",
-        file_type="xlsx",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        file_name="票据汇总.pdf" if is_pdf else "差旅费报销单.xlsx",
+        file_type="pdf" if is_pdf else "xlsx",
+        media_type=(
+            "application/pdf"
+            if is_pdf
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
         size_bytes=123,
         sha256=_HASH_A,
         upload_status=ReimbursementUploadStatus.PENDING.value,
     )
 
 
-def test_create_all_installs_the_same_immutable_history_guards_as_migration(
+def add_linked_generated_manifest(
+    database: Session,
+    submission: ReimbursementSubmission,
+    *,
+    now: datetime,
+) -> tuple[ReimbursementUpload, ReimbursementUpload]:
+    pdf = new_ready_upload(
+        submission,
+        sort_order=0,
+        role=ReimbursementUploadRole.GENERATED_PDF,
+    )
+    excel = new_ready_upload(
+        submission,
+        sort_order=1,
+        role=ReimbursementUploadRole.GENERATED_EXCEL,
+    )
+    for label, upload in (("pdf", pdf), ("excel", excel)):
+        upload.upload_status = ReimbursementUploadStatus.LINKED.value
+        upload.space_id = f"space-{label}"
+        upload.file_id = f"file-{label}"
+        upload.linked_at = now
+    database.add_all([pdf, excel])
+    return pdf, excel
+
+
+def test_create_all_installs_current_immutable_guards(
     database: Session,
 ) -> None:
     trigger_names = set(
@@ -191,7 +221,7 @@ def test_create_all_installs_the_same_immutable_history_guards_as_migration(
     assert _SUBMITTED_MANIFEST_TRIGGER_NAMES <= trigger_names
 
 
-def test_submission_terminal_fields_match_published_migration_contract() -> None:
+def test_submission_terminal_fields_match_current_model_contract() -> None:
     checks = {
         constraint.name: str(constraint.sqltext)
         for constraint in ReimbursementSubmission.__table__.constraints
@@ -711,16 +741,7 @@ def test_submitted_reconciling_and_orphan_checkpoints_can_be_persisted(
 
     database.add_all([submitted, reconciling, orphan])
     database.flush()
-    generated = new_ready_upload(
-        submitted,
-        sort_order=0,
-        role=ReimbursementUploadRole.GENERATED_EXCEL,
-    )
-    generated.upload_status = ReimbursementUploadStatus.LINKED.value
-    generated.space_id = "space-submitted"
-    generated.file_id = "file-submitted"
-    generated.linked_at = now
-    database.add(generated)
+    add_linked_generated_manifest(database, submitted, now=now)
     database.flush()
     submitted.status = ReimbursementSubmissionStatus.SUBMITTED.value
     submitted.business_id = "business-1"
@@ -734,7 +755,7 @@ def test_submitted_reconciling_and_orphan_checkpoints_can_be_persisted(
 
 
 @pytest.mark.parametrize("transition", ["insert", "update"])
-def test_submitted_submission_requires_a_generated_excel_manifest(
+def test_submitted_submission_requires_the_current_generated_manifest(
     database: Session,
     transition: str,
 ) -> None:
@@ -781,16 +802,14 @@ def test_submitted_submission_rejects_any_upload_that_is_not_linked(
     submission.process_instance_id = f"instance-{upload_status.value.lower()}"
     database.add(submission)
     database.flush()
-    generated = new_ready_upload(
-        submission,
-        sort_order=0,
-        role=ReimbursementUploadRole.GENERATED_EXCEL,
-    )
+    _, generated = add_linked_generated_manifest(database, submission, now=now)
     generated.upload_status = upload_status.value
+    generated.linked_at = None
+    generated.space_id = None
+    generated.file_id = None
     if upload_status is ReimbursementUploadStatus.COMMITTED:
         generated.space_id = "space-committed"
         generated.file_id = "file-committed"
-    database.add(generated)
     database.commit()
 
     submission.status = ReimbursementSubmissionStatus.SUBMITTED.value
@@ -816,16 +835,7 @@ def test_all_uploads_must_be_linked_before_submit_and_no_upload_can_be_added_aft
     submission.process_instance_id = "instance-complete"
     database.add_all([source, submission])
     database.flush()
-    generated = new_ready_upload(
-        submission,
-        sort_order=0,
-        role=ReimbursementUploadRole.GENERATED_EXCEL,
-    )
-    generated.upload_status = ReimbursementUploadStatus.LINKED.value
-    generated.space_id = "space-excel"
-    generated.file_id = "file-excel"
-    generated.linked_at = now
-    database.add(generated)
+    _, generated = add_linked_generated_manifest(database, submission, now=now)
     database.flush()
 
     submission.status = ReimbursementSubmissionStatus.SUBMITTED.value
@@ -836,7 +846,7 @@ def test_all_uploads_must_be_linked_before_submit_and_no_upload_can_be_added_aft
 
     late_upload = new_ready_upload(
         submission,
-        sort_order=1,
+        sort_order=2,
         role=ReimbursementUploadRole.ORIGINAL,
         source=source,
     )

@@ -49,12 +49,6 @@ class DingTalkLoginRequest(BaseModel):
     auth_code: str = Field(alias="authCode", min_length=1, max_length=1024)
 
 
-class DepartmentSelectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    department_id: str = Field(alias="departmentId", min_length=1, max_length=128)
-
-
 def _set_session_cookie(response: Response, settings: Settings, token: str) -> None:
     response.set_cookie(
         key=settings.session_cookie_name,
@@ -163,24 +157,6 @@ def me(
     settings: Settings = request.app.state.settings
     csrf_token = rotate_csrf(database, settings, current.record)
     return success(session_payload(current, csrf_token))
-
-
-@router.post("/me/department")
-def select_department(
-    body: DepartmentSelectionRequest,
-    database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
-) -> dict[str, object]:
-    selected = next(
-        (item for item in current.departments if item.id == body.department_id),
-        None,
-    )
-    if selected is None:
-        raise ApiError("INVALID_DEPARTMENT", "只能选择当前用户所属的部门", 400)
-    current.record.current_department_id = selected.id
-    current.record.current_department_name = selected.name
-    database.commit()
-    return success({"selectedDepartment": {"id": selected.id, "name": selected.name}})
 
 
 @router.post("/me/department/from-travel-approval")

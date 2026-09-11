@@ -239,7 +239,7 @@ def test_accounting_resolves_source_option_key_by_exact_label_across_forms() -> 
     assert budget.value == "26007"
 
 
-def test_legacy_source_mapping_requires_one_exact_visible_field_label() -> None:
+def test_unconfigured_source_mapping_requires_one_exact_visible_field_label() -> None:
     profile = _profile("domestic", "PROC-TRAVEL")
     profile.company_component_id = None
     component = SimpleNamespace(

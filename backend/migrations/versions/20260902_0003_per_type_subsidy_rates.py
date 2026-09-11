@@ -16,18 +16,6 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # Preserve the old administrator value for the two types which previously
-    # used subsidy_per_day. Validation remains fail-closed in the application.
-    op.execute(
-        "INSERT OR IGNORE INTO settings (key, value) "
-        "SELECT 'subsidy_business_per_day', value FROM settings "
-        "WHERE key = 'subsidy_per_day'"
-    )
-    op.execute(
-        "INSERT OR IGNORE INTO settings (key, value) "
-        "SELECT 'subsidy_short_term_project_per_day', value FROM settings "
-        "WHERE key = 'subsidy_per_day'"
-    )
     op.execute(
         "INSERT OR IGNORE INTO settings (key, value) VALUES "
         "('subsidy_business_per_day', '100.00'), "

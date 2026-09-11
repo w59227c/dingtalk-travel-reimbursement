@@ -442,167 +442,6 @@ def test_canonical_draft_input_preserves_multiple_subsidy_trips() -> None:
     assert canonical["trips"] == raw["trips"]
 
 
-def test_legacy_draft_save_binds_one_unique_exact_terminal_ocr_match(
-    client_factory,
-    monkeypatch,
-) -> None:
-    _install_catalog(monkeypatch)
-    client = client_factory(auth_mock_enabled=True)
-    login = mock_login(client)
-    headers = {"X-CSRF-Token": login["csrfToken"]}
-    draft_id = _create(client, headers).json()["data"]["id"]
-    file_id = _add_active_file(client, draft_id, record_disposition=False)
-
-    with client.app.state.database_session_factory() as database:
-        draft = database.get(ReimbursementDraft, draft_id)
-        assert draft is not None
-        legacy = json.loads(draft.input_json)
-        legacy.pop("ocrDispositionVersion", None)
-        legacy.pop("dismissedOcrFileIds", None)
-        draft.input_json = json.dumps(
-            legacy,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        database.commit()
-
-    loaded = client.get(f"/api/reimbursements/drafts/{draft_id}")
-    assert loaded.status_code == 200, loaded.text
-    loaded_input = loaded.json()["data"]["input"]
-    assert loaded_input["ocrDispositionVersion"] == 0
-    assert len(loaded_input["items"]) == 1
-    assert loaded.json()["data"]["totals"]["expenseTotal"] == "44.89"
-
-    legacy_request = dict(loaded_input)
-    legacy_request.pop("ocrDispositionVersion")
-    legacy_request.pop("dismissedOcrFileIds")
-    saved = client.put(
-        f"/api/reimbursements/drafts/{draft_id}",
-        json={"expectedRevision": 1, "input": legacy_request},
-        headers=headers,
-    )
-
-    assert saved.status_code == 200, saved.text
-    saved_input = saved.json()["data"]["input"]
-    assert saved_input["ocrDispositionVersion"] == 1
-    assert saved_input["dismissedOcrFileIds"] == []
-    assert len(saved_input["items"]) == 1
-    assert saved_input["items"][0]["sourceFileId"] == file_id
-    assert saved.json()["data"]["totals"]["expenseTotal"] == "44.89"
-
-
-def test_legacy_draft_save_does_not_revive_a_removed_ocr_line(
-    client_factory,
-    monkeypatch,
-) -> None:
-    _install_catalog(monkeypatch)
-    client = client_factory(auth_mock_enabled=True)
-    login = mock_login(client)
-    headers = {"X-CSRF-Token": login["csrfToken"]}
-    draft_id = _create(client, headers).json()["data"]["id"]
-    file_id = _add_active_file(client, draft_id, record_disposition=False)
-
-    with client.app.state.database_session_factory() as database:
-        draft = database.get(ReimbursementDraft, draft_id)
-        assert draft is not None
-        legacy = json.loads(draft.input_json)
-        legacy.pop("ocrDispositionVersion", None)
-        legacy.pop("dismissedOcrFileIds", None)
-        legacy["items"] = []
-        draft.input_json = json.dumps(
-            legacy,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        database.commit()
-
-    unresolved = client.put(
-        f"/api/reimbursements/drafts/{draft_id}",
-        json={"expectedRevision": 1, "input": legacy},
-        headers=headers,
-    )
-
-    assert unresolved.status_code == 200
-    _assert_unresolved_provenance(client, draft_id)
-
-    decided = {**legacy, "ocrDispositionVersion": 1, "dismissedOcrFileIds": [file_id]}
-    saved = client.put(
-        f"/api/reimbursements/drafts/{draft_id}",
-        json={"expectedRevision": 2, "input": decided},
-        headers=headers,
-    )
-    assert saved.status_code == 200, saved.text
-    saved_input = saved.json()["data"]["input"]
-    assert saved_input["ocrDispositionVersion"] == 1
-    assert saved_input["items"] == []
-    assert saved_input["dismissedOcrFileIds"] == [file_id]
-    assert saved.json()["data"]["totals"]["expenseTotal"] == "0.00"
-
-
-def test_legacy_edited_ocr_line_stays_unresolved_until_explicitly_ignored(
-    client_factory,
-    monkeypatch,
-) -> None:
-    _install_catalog(monkeypatch)
-    client = client_factory(auth_mock_enabled=True)
-    login = mock_login(client)
-    headers = {"X-CSRF-Token": login["csrfToken"]}
-    draft_id = _create(client, headers).json()["data"]["id"]
-    file_id = _add_active_file(client, draft_id, record_disposition=False)
-    legacy = _input()
-    legacy.pop("ocrDispositionVersion")
-    legacy.pop("dismissedOcrFileIds")
-    legacy["items"][0]["description"] = "用户修改后的打车费"
-
-    unresolved = client.put(
-        f"/api/reimbursements/drafts/{draft_id}",
-        json={"expectedRevision": 1, "input": legacy},
-        headers=headers,
-    )
-
-    assert unresolved.status_code == 200
-    _assert_unresolved_provenance(client, draft_id)
-    explicit = {
-        **legacy,
-        "ocrDispositionVersion": 1,
-        "dismissedOcrFileIds": [file_id],
-    }
-    saved = client.put(
-        f"/api/reimbursements/drafts/{draft_id}",
-        json={"expectedRevision": 2, "input": explicit},
-        headers=headers,
-    )
-    assert saved.status_code == 200, saved.text
-    assert saved.json()["data"]["input"]["items"][0]["description"] == ("用户修改后的打车费")
-
-
-def test_legacy_duplicate_exact_lines_are_ambiguous_and_not_auto_bound(
-    client_factory,
-    monkeypatch,
-) -> None:
-    _install_catalog(monkeypatch)
-    client = client_factory(auth_mock_enabled=True)
-    login = mock_login(client)
-    headers = {"X-CSRF-Token": login["csrfToken"]}
-    draft_id = _create(client, headers).json()["data"]["id"]
-    _add_active_file(client, draft_id, record_disposition=False)
-    legacy = _input()
-    legacy.pop("ocrDispositionVersion")
-    legacy.pop("dismissedOcrFileIds")
-    legacy["items"].append(dict(legacy["items"][0]))
-
-    unresolved = client.put(
-        f"/api/reimbursements/drafts/{draft_id}",
-        json={"expectedRevision": 1, "input": legacy},
-        headers=headers,
-    )
-
-    assert unresolved.status_code == 200
-    _assert_unresolved_provenance(client, draft_id)
-
-
 def test_autosave_preserves_unresolved_ocr_but_review_requires_disposition(
     client_factory,
     monkeypatch,
@@ -786,7 +625,7 @@ def test_draft_with_a_submission_cannot_be_deleted(
     assert client.get(f"/api/reimbursements/drafts/{draft_id}").status_code == 200
 
 
-def test_draft_owner_is_not_enumerable_and_department_binding_is_rechecked(
+def test_draft_owner_is_not_enumerable(
     client_factory,
     monkeypatch,
 ) -> None:
@@ -794,16 +633,10 @@ def test_draft_owner_is_not_enumerable_and_department_binding_is_rechecked(
     owner = client_factory(
         auth_mock_enabled=True,
         auth_mock_user_id="owner-1",
-        auth_mock_departments="100:财务部,200:项目部",
+        auth_mock_departments="100:财务部",
     )
     owner_login = mock_login(owner)
     owner_headers = {"X-CSRF-Token": owner_login["csrfToken"]}
-    selected = owner.post(
-        "/api/me/department",
-        json={"departmentId": "100"},
-        headers=owner_headers,
-    )
-    assert selected.status_code == 200
     created = _create(owner, owner_headers)
     assert created.status_code == 201, created.text
     draft_id = created.json()["data"]["id"]
@@ -816,18 +649,22 @@ def test_draft_owner_is_not_enumerable_and_department_binding_is_rechecked(
     stranger_login = mock_login(stranger)
     stranger_headers = {"X-CSRF-Token": stranger_login["csrfToken"]}
     assert stranger.get(f"/api/reimbursements/drafts/{draft_id}").status_code == 404
-    hidden_update = stranger.put(
-        f"/api/reimbursements/drafts/{draft_id}",
-        json={"expectedRevision": 1, "input": _input()},
-        headers=stranger_headers,
+    assert (
+        stranger.put(
+            f"/api/reimbursements/drafts/{draft_id}",
+            json={"expectedRevision": 1, "input": _input()},
+            headers=stranger_headers,
+        ).status_code
+        == 404
     )
-    assert hidden_update.status_code == 404
-    hidden_delete = stranger.delete(
-        f"/api/reimbursements/drafts/{draft_id}",
-        params={"expectedRevision": 1},
-        headers=stranger_headers,
+    assert (
+        stranger.delete(
+            f"/api/reimbursements/drafts/{draft_id}",
+            params={"expectedRevision": 1},
+            headers=stranger_headers,
+        ).status_code
+        == 404
     )
-    assert hidden_delete.status_code == 404
 
     other_corp = client_factory(
         auth_mock_enabled=True,
@@ -836,34 +673,15 @@ def test_draft_owner_is_not_enumerable_and_department_binding_is_rechecked(
         dingtalk_corp_id="corp-other",
     )
     other_corp_login = mock_login(other_corp)
-    other_corp_headers = {"X-CSRF-Token": other_corp_login["csrfToken"]}
     assert other_corp.get(f"/api/reimbursements/drafts/{draft_id}").status_code == 404
     assert (
         other_corp.delete(
             f"/api/reimbursements/drafts/{draft_id}",
             params={"expectedRevision": 1},
-            headers=other_corp_headers,
+            headers={"X-CSRF-Token": other_corp_login["csrfToken"]},
         ).status_code
         == 404
     )
-
-    switched = owner.post(
-        "/api/me/department",
-        json={"departmentId": "200"},
-        headers=owner_headers,
-    )
-    assert switched.status_code == 200
-    mismatch = owner.get(f"/api/reimbursements/drafts/{draft_id}")
-    assert mismatch.status_code == 409
-    assert mismatch.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_DEPARTMENT_MISMATCH"
-    delete_mismatch = owner.delete(
-        f"/api/reimbursements/drafts/{draft_id}",
-        params={"expectedRevision": 1},
-        headers=owner_headers,
-    )
-    assert delete_mismatch.status_code == 409
-    assert delete_mismatch.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_DEPARTMENT_MISMATCH"
-    assert owner.get("/api/reimbursements/drafts").json()["data"]["items"] == []
 
 
 def test_stale_revision_and_invalid_oa_options_leave_the_draft_unchanged(
@@ -1445,106 +1263,6 @@ def test_review_requires_an_exact_disposition_for_each_terminal_ocr_file(
     )
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["data"]["status"] == "REVIEW_READY"
-
-
-def test_review_conservatively_normalizes_a_legacy_terminal_ocr_file(
-    client_factory,
-    monkeypatch,
-) -> None:
-    catalog = _catalog_with_travel()
-    monkeypatch.setattr(
-        reimbursement_drafts,
-        "require_submission_ready_catalog",
-        lambda _database: catalog,
-    )
-    client = client_factory(auth_mock_enabled=True)
-    login = mock_login(client)
-    headers = {"X-CSRF-Token": login["csrfToken"]}
-    draft_id = _create(client, headers).json()["data"]["id"]
-    client.app.state.dingtalk_workflow = FakeTravelWorkflow()
-    related = client.put(
-        f"/api/reimbursements/drafts/{draft_id}/related-approvals",
-        json={"expectedRevision": 1, "selections": [_selection()]},
-        headers=headers,
-    )
-    assert related.status_code == 200, related.text
-    file_id = _add_active_file(client, draft_id, record_disposition=False)
-    with client.app.state.database_session_factory() as database:
-        draft = database.get(ReimbursementDraft, draft_id)
-        assert draft is not None
-        legacy = json.loads(draft.input_json)
-        legacy.pop("ocrDispositionVersion", None)
-        legacy.pop("dismissedOcrFileIds", None)
-        draft.input_json = json.dumps(
-            legacy,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        database.commit()
-
-    reviewed = client.post(
-        f"/api/reimbursements/drafts/{draft_id}/review",
-        json={"expectedRevision": 2},
-        headers=headers,
-    )
-
-    assert reviewed.status_code == 200, reviewed.text
-    assert reviewed.json()["data"]["status"] == "REVIEW_READY"
-    assert reviewed.json()["data"]["input"]["ocrDispositionVersion"] == 1
-    assert reviewed.json()["data"]["input"]["dismissedOcrFileIds"] == []
-    assert reviewed.json()["data"]["input"]["items"][0]["sourceFileId"] == file_id
-    assert reviewed.json()["data"]["totals"]["expenseTotal"] == "44.89"
-
-
-def test_review_rejects_an_unmatched_legacy_terminal_ocr_file(
-    client_factory,
-    monkeypatch,
-) -> None:
-    catalog = _catalog_with_travel()
-    monkeypatch.setattr(
-        reimbursement_drafts,
-        "require_submission_ready_catalog",
-        lambda _database: catalog,
-    )
-    client = client_factory(auth_mock_enabled=True)
-    login = mock_login(client)
-    headers = {"X-CSRF-Token": login["csrfToken"]}
-    draft_id = _create(client, headers).json()["data"]["id"]
-    client.app.state.dingtalk_workflow = FakeTravelWorkflow()
-    related = client.put(
-        f"/api/reimbursements/drafts/{draft_id}/related-approvals",
-        json={"expectedRevision": 1, "selections": [_selection()]},
-        headers=headers,
-    )
-    assert related.status_code == 200, related.text
-    _add_active_file(client, draft_id, record_disposition=False)
-    with client.app.state.database_session_factory() as database:
-        draft = database.get(ReimbursementDraft, draft_id)
-        assert draft is not None
-        legacy = json.loads(draft.input_json)
-        legacy.pop("ocrDispositionVersion", None)
-        legacy.pop("dismissedOcrFileIds", None)
-        legacy["items"][0]["description"] = "用户已修改的说明"
-        draft.input_json = json.dumps(
-            legacy,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        database.commit()
-
-    reviewed = client.post(
-        f"/api/reimbursements/drafts/{draft_id}/review",
-        json={"expectedRevision": 2},
-        headers=headers,
-    )
-
-    assert reviewed.status_code == 409
-    assert reviewed.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_NOT_READY"
-    loaded = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
-    assert loaded["revision"] == 2
-    assert loaded["input"]["ocrDispositionVersion"] == 0
 
 
 def test_review_blocks_unrecognized_expense_source_but_not_plain_attachment(

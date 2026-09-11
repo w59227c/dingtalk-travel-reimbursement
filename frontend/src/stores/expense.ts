@@ -2,24 +2,14 @@ import axios from 'axios'
 import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 
-import { apiErrorMessage } from '@/api/errors'
 import { calculateTotals, getExpenseCategories } from '@/api/expenses'
-import {
-  deleteReceiptFile,
-  recognizeReceiptFile,
-  uploadReceiptFile,
-} from '@/api/receipts'
 import type {
   ExpenseCategoryMetadata,
-  ExcelExpenseItemInput,
-  ExcelGeneratePayload,
-  ExcelProjectInput,
   ExpenseItem,
   ExpenseTotals,
   TripInput,
   TripType,
 } from '@/types/expenses'
-import type { OcrReceiptCandidate, ReceiptFileState } from '@/types/receipts'
 import type { ReceiptUploadLimits } from '@/types/auth'
 import type {
   ReimbursementDraft,
@@ -30,7 +20,7 @@ import { receiptOcrResult } from '@/types/reimbursements'
 import { evidenceRailType, isActiveProof } from '@/utils/expenseProofs'
 import { itineraryConfirmationWarnings, matchItineraries } from '@/utils/itineraryMatching'
 import { centsToMoney, moneyToCents } from '@/utils/money'
-import { DEFAULT_RECEIPT_LIMITS, validateReceiptFiles } from '@/utils/receiptFiles'
+import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime } from '@/utils/tripPeriod'
 
 const SPECIAL_TRIP_TYPES = new Set<TripType>([
@@ -43,13 +33,6 @@ function newItemId(): string {
     return crypto.randomUUID()
   }
   return `manual-${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function newReceiptId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return `receipt-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
 function isCalendarDate(value: string | null): value is string {
@@ -69,18 +52,6 @@ function calendarDays(startDate: string, endDate: string): number | null {
   return days > 0 ? days : null
 }
 
-function legacyOcrMatchKey(item: ExpenseItem): string | null {
-  if (!item.date || !item.displayDate || !item.description || !item.amount) return null
-  return JSON.stringify({
-    category: item.category,
-    date: item.date,
-    displayDate: item.displayDate,
-    description: item.description,
-    amount: item.amount,
-    receiptCount: item.receiptCount,
-  })
-}
-
 export const useExpenseStore = defineStore('expense', () => {
   const manualProjectText = ref('')
   const trip = reactive({
@@ -97,7 +68,6 @@ export const useExpenseStore = defineStore('expense', () => {
   const items = ref<ExpenseItem[]>([])
   const dismissedOcrFileIds = ref<string[]>([])
   const includeSubsidy = ref(false)
-  const receiptFiles = ref<ReceiptFileState[]>([])
   const receiptUploadLimits = ref<ReceiptUploadLimits>({ ...DEFAULT_RECEIPT_LIMITS })
   const ocrUnavailable = ref(false)
   const categories = ref<ExpenseCategoryMetadata[]>([])
@@ -108,8 +78,6 @@ export const useExpenseStore = defineStore('expense', () => {
   const calculationError = ref('')
   let calculationVersion = 0
   const calculatedSignature = ref('')
-  let receiptOperationVersion = 0
-  const receiptControllers = new Set<AbortController>()
 
   const projectCalendarDays = computed(() =>
     trip.tripType === 'project' ? calendarDays(trip.startDate, trip.endDate) : null,
@@ -125,8 +93,6 @@ export const useExpenseStore = defineStore('expense', () => {
   const policyInputError = computed(() => {
     if (!includeSubsidy.value) return ''
     if (trip.tripType === 'overseas') return '境外出差不申请出差补助'
-    // Pre-v6 drafts used one aggregate trip. Keep them editable while all new
-    // reimbursement flows use one subsidyTrips entry per related approval.
     if (!subsidyTrips.value.length) {
       if (!trip.startDate || !trip.endDate) return '请完整填写出发和返回日期、时段'
       if (requiresPolicyConfirmation.value && !trip.policyConfirmed) {
@@ -156,9 +122,6 @@ export const useExpenseStore = defineStore('expense', () => {
         return left.index - right.index
       })
       .map(({ item }) => item),
-  )
-  const receiptBusy = computed(() =>
-    receiptFiles.value.some((file) => ['uploading', 'recognizing'].includes(file.status)),
   )
   const localExpenseCents = computed(() =>
     items.value.reduce((sum, item) => sum + (moneyToCents(item.amount) ?? 0), 0),
@@ -241,7 +204,7 @@ export const useExpenseStore = defineStore('expense', () => {
       !startPeriod ||
       !endPeriod
     ) return []
-    // Normalize both ends so legacy exact times cannot conflict within the same half-day.
+    // Normalize both ends so exact source times cannot conflict within the same half-day.
     const payload: TripInput = {
       tripType: trip.tripType,
       startDate: trip.startDate,
@@ -351,81 +314,6 @@ export const useExpenseStore = defineStore('expense', () => {
     return id
   }
 
-  function stageOcrCandidate(fileId: string, candidate: OcrReceiptCandidate): boolean {
-    const receipt = receiptFiles.value.find((entry) => entry.tempId === fileId)
-    if (!receipt) return false
-    const candidateCategory = manualCategories.value.find(
-      (category) => category.id === candidate.categoryId,
-    )
-    const category = candidateCategory
-      ?? manualCategories.value.find((entry) => entry.id === 'other')
-      ?? manualCategories.value[0]
-    if (!category) {
-      receipt.status = 'failed'
-      receipt.error = '识别结果的费用类别不可用，请重新加载类别后手工添加'
-      receipt.candidate = undefined
-      return false
-    }
-    const confidenceNumber = Number(candidate.confidence)
-    const confidence = Number.isFinite(confidenceNumber)
-      ? Math.min(1, Math.max(0, confidenceNumber)).toFixed(2)
-      : '0.00'
-    const warnings = new Set(candidate.warnings.filter((warning) => warning.trim()))
-    if (!candidateCategory) warnings.add('MANUAL_REVIEW_REQUIRED')
-    if (!isCalendarDate(candidate.date)) warnings.add('MISSING_DATE')
-    const foreign = Boolean(candidate.originalCurrency && candidate.originalCurrency !== 'CNY')
-      || candidate.type === 'foreign_receipt'
-      || candidate.warnings.includes('FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT')
-    if (foreign) warnings.add('FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT')
-    const amountCents = foreign || candidate.amount === null ? null : moneyToCents(candidate.amount)
-    if (amountCents === null) {
-      warnings.add('MISSING_AMOUNT')
-    }
-    if (!candidate.description?.trim()) warnings.add('MISSING_DESCRIPTION')
-    if (warnings.size) warnings.add('MANUAL_REVIEW_REQUIRED')
-    receipt.candidate = {
-      ...candidate,
-      categoryId: category.id,
-      categoryName: category.name,
-      date: candidate.date ?? '',
-      description: candidate.description ?? '',
-      amount: candidate.amount ?? '',
-      confidence,
-      warnings: [...warnings],
-    }
-    const id = receipt.ocrItemId ?? `ocr-${receipt.tempId}`
-    const item: ExpenseItem = {
-      id,
-      transportType: candidate.transportType,
-      requiresItinerary: candidate.requiresItinerary || candidate.transportType === 'ride_hailing',
-      originalCurrency: candidate.originalCurrency ?? undefined,
-      originalAmount: candidate.originalAmount ?? undefined,
-      cnyAmountConfirmed: false,
-      requiresCnyConfirmation: foreign,
-      category: category.id,
-      date: isCalendarDate(candidate.date) ? candidate.date : undefined,
-      displayDate: isCalendarDate(candidate.date) ? candidate.date : '',
-      description: candidate.description?.trim()
-        || (candidate.status === 'failed' ? receipt.name : category.name),
-      amount: amountCents === null ? '' : centsToMoney(amountCents),
-      receiptCount: 1,
-      source: 'ocr',
-      confidence,
-      warnings: [...warnings],
-    }
-    const index = items.value.findIndex((entry) => entry.id === id)
-    if (index >= 0) items.value[index] = item
-    else items.value.push(item)
-    receipt.ocrItemId = id
-    receipt.status = 'done'
-    receipt.error = candidate.status === 'failed'
-      ? candidate.error?.message || '票据识别失败，请编辑该条费用'
-      : undefined
-    totals.value = null
-    calculatedSignature.value = ''
-    return true
-  }
-
   function draftOcrExpenseItem(file: ReimbursementDraftFile): ExpenseItem | null {
     const candidate = receiptOcrResult(file)
     if (
@@ -511,8 +399,6 @@ export const useExpenseStore = defineStore('expense', () => {
     draft: ReimbursementDraft,
     draftFiles: readonly ReimbursementDraftFile[],
   ): void {
-    abortReceiptOperations()
-    receiptFiles.value = []
     ocrUnavailable.value = false
 
     const project = draft.input.project
@@ -543,7 +429,6 @@ export const useExpenseStore = defineStore('expense', () => {
       )
       .sort((left, right) => left.file.sortOrder - right.file.sortOrder)
     const candidateByFileId = new Map(candidates.map((entry) => [entry.file.id, entry]))
-    const legacyDisposition = draft.input.ocrDispositionVersion !== 1
     const dismissed = new Set(
       (Array.isArray(draft.input.dismissedOcrFileIds)
         ? draft.input.dismissedOcrFileIds
@@ -596,48 +481,11 @@ export const useExpenseStore = defineStore('expense', () => {
         warnings: candidate?.warnings ?? [],
       }
     })
-    if (legacyDisposition) {
-      // v0 did not record provenance. Only bind a strict one-to-one exact
-      // match; edited, deleted, or ambiguous rows stay unresolved for an
-      // explicit user choice and are never silently restored or ignored.
-      const itemMatches = new Map<string, number[]>()
-      items.value.forEach((item, index) => {
-        if (item.sourceFileId) return
-        const key = legacyOcrMatchKey(item)
-        if (!key) return
-        itemMatches.set(key, [...(itemMatches.get(key) ?? []), index])
-      })
-      const candidateMatches = new Map<string, typeof candidates>()
-      for (const candidate of candidates) {
-        if (linkedFileIds.has(candidate.file.id) || dismissed.has(candidate.file.id)) continue
-        const key = legacyOcrMatchKey(candidate.item)
-        if (!key) continue
-        candidateMatches.set(key, [...(candidateMatches.get(key) ?? []), candidate])
-      }
-      for (const [key, indexes] of itemMatches) {
-        const matches = candidateMatches.get(key) ?? []
-        if (indexes.length !== 1 || matches.length !== 1) continue
-        const index = indexes[0]!
-        const { file, item: candidate } = matches[0]!
-        const persisted = items.value[index]!
-        items.value[index] = {
-          ...persisted,
-          id: `ocr-${file.id}`,
-          sourceFileId: file.id,
-          source: 'ocr',
-          confidence: candidate.confidence,
-          warnings: candidate.warnings,
-        }
-        linkedFileIds.add(file.id)
-      }
-    }
     dismissedOcrFileIds.value = [...dismissed]
     const undecidedCandidates = candidates.filter(
       ({ file }) => !linkedFileIds.has(file.id) && !dismissed.has(file.id),
     )
-    const recovered = legacyDisposition
-      ? []
-      : undecidedCandidates.map(({ item }) => item)
+    const recovered = undecidedCandidates.map(({ item }) => item)
     items.value.push(...recovered)
     for (const item of items.value) item.warnings = itineraryConfirmationWarnings(item, draftFiles)
     ocrUnavailable.value = draftFiles.some(
@@ -671,13 +519,6 @@ export const useExpenseStore = defineStore('expense', () => {
       ]
     }
     items.value = items.value.filter((item) => item.id !== id)
-    for (const receipt of receiptFiles.value) {
-      if (receipt.ocrItemId === id) {
-        receipt.ocrItemId = undefined
-        receipt.candidate = undefined
-        receipt.status = receipt.tempId ? 'uploaded' : 'failed'
-      }
-    }
     totals.value = null
     calculatedSignature.value = ''
   }
@@ -726,17 +567,6 @@ export const useExpenseStore = defineStore('expense', () => {
     return matches.length
   }
 
-  function excelExpenseItems(): ExcelExpenseItemInput[] {
-    return items.value.map((item) => ({
-      category: item.category,
-      date: item.date ?? '',
-      displayDate: item.displayDate,
-      description: item.description,
-      amount: item.amount,
-      receiptCount: item.receiptCount,
-    }))
-  }
-
   async function refreshCalculations(): Promise<void> {
     const payload = subsidyTrips.value.length ? tripPayloads() : tripPayload()
     const version = ++calculationVersion
@@ -775,45 +605,6 @@ export const useExpenseStore = defineStore('expense', () => {
       totals.value && calculatedSignature.value === calculationSignature(payload),
     )
   })
-
-  function projectPayload(): ExcelProjectInput | null {
-    const text = manualProjectText.value.trim()
-    return text ? { mode: 'manual', text } : null
-  }
-
-  const excelDisabledReason = computed(() => {
-    if (!projectPayload()) return '请先关联出差审批以获取预算代码'
-    if (items.value.length > maxExpenseItems.value) {
-      return `报销单最多填写 ${maxExpenseItems.value} 条票据费用明细`
-    }
-    if (categoryLoadError.value || categories.value.length === 0) return '费用类别尚未正确加载'
-    if (!items.value.every((item) => manualCategories.value.some((entry) => entry.id === item.category))) {
-      return '费用明细中存在不可用类别'
-    }
-    if (itemReadinessError.value) return itemReadinessError.value
-    const subsidyPayloadCount = tripPayloads().length
-    const expectedSubsidyCount = subsidyTrips.value.length || 1
-    if (includeSubsidy.value && (policyInputError.value
-      || subsidyPayloadCount !== expectedSubsidyCount)) {
-      return policyInputError.value || '请完整填写出发和返回日期、时间'
-    }
-    if (calculating.value) return '正在重新计算，请稍候'
-    if (calculationError.value) return calculationError.value
-    if (!calculationsCurrent.value) return '请等待服务端完成金额计算'
-    return ''
-  })
-
-  function buildExcelPayload(): ExcelGeneratePayload | null {
-    const project = projectPayload()
-    const tripValues = tripPayloads()
-    if (excelDisabledReason.value || !project) return null
-    return {
-      project,
-      trip: subsidyTrips.value.length ? null : tripValues[0] ?? null,
-      ...(subsidyTrips.value.length ? { trips: tripValues } : {}),
-      items: excelExpenseItems(),
-    }
-  }
 
   function buildDraftExpenseItems(): ReimbursementDraftExpenseItemInput[] {
     return items.value.map((item) => ({
@@ -861,189 +652,6 @@ export const useExpenseStore = defineStore('expense', () => {
     calculationError.value = ''
   }
 
-  function receiptByLocalId(localId: string): ReceiptFileState | undefined {
-    return receiptFiles.value.find((file) => file.localId === localId)
-  }
-
-  function receiptByItemId(itemId: string): ReceiptFileState | undefined {
-    return receiptFiles.value.find((file) => file.ocrItemId === itemId)
-  }
-
-  function stageFailedReceipt(receipt: ReceiptFileState, code: string, message: string): void {
-    const category = manualCategories.value.find((entry) => entry.id === 'other')
-      ?? manualCategories.value[0]
-    if (!category || !receipt.tempId) {
-      receipt.status = 'failed'
-      receipt.error = message
-      return
-    }
-    stageOcrCandidate(receipt.tempId, {
-      fileId: receipt.tempId,
-      type: 'other',
-      categoryId: category.id,
-      categoryName: category.name,
-      date: null,
-      description: null,
-      amount: null,
-      receiptCount: 1,
-      source: 'ocr',
-      confidence: '0.00',
-      warnings: ['MANUAL_REVIEW_REQUIRED'],
-      status: 'failed',
-      error: { code, message },
-    })
-  }
-
-  function currentReceiptOperation(version: number): boolean {
-    return version === receiptOperationVersion
-  }
-
-  async function attemptUpload(
-    localId: string,
-    controller: AbortController,
-    version: number,
-  ): Promise<boolean> {
-    const receipt = receiptByLocalId(localId)
-    if (!receipt || receipt.tempId) return false
-    receipt.status = 'uploading'
-    receipt.error = undefined
-    receipt.uploadProgress = 0
-    const uploaded = await uploadReceiptFile(receipt.file, {
-      signal: controller.signal,
-      onProgress: (percent) => {
-        if (!currentReceiptOperation(version)) return
-        receipt.uploadProgress = percent
-      },
-    })
-    if (!currentReceiptOperation(version)) {
-      try {
-        await deleteReceiptFile(uploaded.id)
-      } catch {
-        // The server TTL remains the fallback if reset/logout raced the response.
-      }
-      return false
-    }
-    receipt.tempId = uploaded.id
-    receipt.name = uploaded.name || receipt.name
-    receipt.status = 'uploaded'
-    receipt.uploadProgress = 100
-    receipt.error = undefined
-    return true
-  }
-
-  async function recognizeUploadedReceipts(
-    localIds: string[],
-    controller: AbortController,
-    version: number,
-  ): Promise<void> {
-    const recognizing = localIds
-      .map(receiptByLocalId)
-      .filter((file): file is ReceiptFileState => Boolean(file?.tempId))
-    if (!recognizing.length) return
-    for (const receipt of recognizing) {
-      receipt.status = 'recognizing'
-      receipt.error = undefined
-      receipt.candidate = undefined
-    }
-    const subsidyStartDate = subsidyTrips.value[0]?.startDate ?? trip.startDate
-    const tripYear = includeSubsidy.value && /^\d{4}-/.test(subsidyStartDate)
-      ? Number(subsidyStartDate.slice(0, 4))
-      : undefined
-    for (const receipt of recognizing) {
-      if (!currentReceiptOperation(version)) return
-      let candidate: OcrReceiptCandidate | undefined
-      try {
-        const candidates = await recognizeReceiptFile(receipt.tempId as string, {
-          tripYear,
-          signal: controller.signal,
-        })
-        candidate = candidates.find((item) => item.fileId === receipt.tempId)
-      } catch (error) {
-        if (!currentReceiptOperation(version) || axios.isCancel(error)) return
-        stageFailedReceipt(receipt, 'OCR_FAILED', apiErrorMessage(
-          error,
-          '本地票据识别暂不可用，请编辑该条费用',
-        ))
-        continue
-      }
-      if (!candidate) {
-        stageFailedReceipt(receipt, 'OCR_FAILED', '识别结果缺少该文件，请重试或编辑该条费用')
-        continue
-      }
-      if (candidate.status === 'failed') {
-        if (candidate.error?.code === 'OCR_DISABLED') ocrUnavailable.value = true
-        stageOcrCandidate(candidate.fileId, candidate)
-        continue
-      }
-      stageOcrCandidate(candidate.fileId, candidate)
-    }
-  }
-
-  async function processReceiptFiles(localIds: string[]): Promise<void> {
-    if (!localIds.length) return
-    const version = receiptOperationVersion
-    const controller = new AbortController()
-    receiptControllers.add(controller)
-    try {
-      for (const localId of localIds) {
-        if (!currentReceiptOperation(version)) return
-        const receipt = receiptByLocalId(localId)
-        if (!receipt) continue
-        try {
-          const uploaded = await attemptUpload(localId, controller, version)
-          if (uploaded && currentReceiptOperation(version)) {
-            await recognizeUploadedReceipts([localId], controller, version)
-          }
-        } catch (error) {
-          if (!currentReceiptOperation(version) || axios.isCancel(error)) return
-          receipt.status = 'failed'
-          receipt.error = apiErrorMessage(
-            error,
-            '该文件上传失败，请检查格式或手工添加',
-          )
-          receipt.uploadProgress = 0
-        }
-      }
-    } finally {
-      receiptControllers.delete(controller)
-    }
-  }
-
-  async function addReceiptFiles(
-    files: readonly File[],
-  ): Promise<ReturnType<typeof validateReceiptFiles>> {
-    // The server quota counts retained uploads, not local rows whose upload failed.
-    const activeFiles = receiptFiles.value.filter((file) => Boolean(file.tempId))
-    const activeFileCount = activeFiles.length
-    const activeFileBytes = activeFiles.reduce((total, file) => total + file.size, 0)
-    const validation = validateReceiptFiles(
-      files,
-      activeFileCount,
-      activeFileBytes,
-      receiptUploadLimits.value,
-    )
-    if (receiptBusy.value) {
-      return {
-        accepted: [],
-        rejected: files.map((file) => ({ file, message: '已有票据正在处理，请稍后再选' })),
-      }
-    }
-    const localIds = validation.accepted.map((file) => {
-      const localId = newReceiptId()
-      receiptFiles.value.push({
-        localId,
-        file,
-        name: file.name,
-        size: file.size,
-        uploadProgress: 0,
-        status: 'queued',
-      })
-      return localId
-    })
-    await processReceiptFiles(localIds)
-    return validation
-  }
-
   function setReceiptUploadLimits(limits: ReceiptUploadLimits): void {
     receiptUploadLimits.value = { ...limits }
   }
@@ -1054,58 +662,12 @@ export const useExpenseStore = defineStore('expense', () => {
     }
   }
 
-  async function retryReceipt(localId: string): Promise<void> {
-    const receipt = receiptByLocalId(localId)
-    if (!receipt || receiptBusy.value) return
-    if (!receipt.tempId) {
-      await processReceiptFiles([localId])
-      return
-    }
-    const version = receiptOperationVersion
-    const controller = new AbortController()
-    receiptControllers.add(controller)
-    try {
-      await recognizeUploadedReceipts([localId], controller, version)
-    } finally {
-      receiptControllers.delete(controller)
-    }
-  }
-
-  async function removeReceipt(localId: string): Promise<boolean> {
-    const receipt = receiptByLocalId(localId)
-    if (!receipt || ['uploading', 'recognizing'].includes(receipt.status)) return false
-
-    const tempId = receipt.tempId
-    const linkedItemId = receipt.ocrItemId
-    receiptFiles.value = receiptFiles.value.filter((entry) => entry.localId !== localId)
-    if (linkedItemId) removeItem(linkedItemId)
-
-    if (tempId) {
-      try {
-        await deleteReceiptFile(tempId)
-      } catch {
-        // The row is already removed from this reimbursement. Session logout
-        // and the server TTL remain the cleanup fallback for a transient error.
-      }
-    }
-    return true
-  }
-
   async function removeExpenseItem(id: string): Promise<boolean> {
-    const receipt = receiptByItemId(id)
-    if (receipt) return removeReceipt(receipt.localId)
     removeItem(id)
     return true
   }
 
-  function abortReceiptOperations(): void {
-    receiptOperationVersion += 1
-    for (const controller of receiptControllers) controller.abort()
-    receiptControllers.clear()
-  }
-
   function reset(): void {
-    abortReceiptOperations()
     manualProjectText.value = ''
     Object.assign(trip, {
       tripType: 'business' as TripType,
@@ -1121,7 +683,6 @@ export const useExpenseStore = defineStore('expense', () => {
     items.value = []
     dismissedOcrFileIds.value = []
     includeSubsidy.value = false
-    receiptFiles.value = []
     ocrUnavailable.value = false
     totals.value = null
     calculatedSignature.value = ''
@@ -1138,9 +699,7 @@ export const useExpenseStore = defineStore('expense', () => {
     dismissedOcrFileIds,
     sortedItems,
     includeSubsidy,
-    receiptFiles,
     receiptUploadLimits,
-    receiptBusy,
     ocrUnavailable,
     categories,
     categoriesLoading,
@@ -1161,7 +720,6 @@ export const useExpenseStore = defineStore('expense', () => {
     displayReceiptCount,
     displayTotal,
     calculationsCurrent,
-    excelDisabledReason,
     tripPayload,
     tripPayloads,
     syncSubsidyApprovals,
@@ -1176,17 +734,11 @@ export const useExpenseStore = defineStore('expense', () => {
     matchDraftItineraries,
     removeExpenseItem,
     refreshCalculations,
-    projectPayload,
-    buildExcelPayload,
     buildDraftExpenseItems,
     setTripType,
     setSubsidyIncluded,
-    addReceiptFiles,
     setReceiptUploadLimits,
     setExpenseItemLimit,
-    retryReceipt,
-    receiptByItemId,
-    removeReceipt,
     reset,
   }
 })

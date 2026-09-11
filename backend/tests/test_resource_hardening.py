@@ -55,7 +55,6 @@ from app.services.temp_files import (
     store_upload,
     validate_new_file,
 )
-from tests.conftest import mock_login
 
 
 def png_bytes() -> bytes:
@@ -114,14 +113,6 @@ async def assert_no_spawn_resource_growth(
     current_fds = open_file_descriptor_count()
     if baseline_fds is not None and current_fds is not None:
         assert current_fds <= baseline_fds + 2
-
-
-def upload_png(client, csrf: str, name: str = "receipt.png"):
-    return client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf},
-        files=[("files[]", (name, png_bytes(), "image/png"))],
-    )
 
 
 @pytest.mark.asyncio
@@ -371,97 +362,6 @@ async def test_cancelled_image_worker_keeps_admission_and_file_until_termination
     assert not any(path.is_file() for path in directory.iterdir())
     assert upload.file.closed
     assert await runner.run(str, "third", timeout_seconds=1) == {"ok": True}
-
-
-def test_retained_session_file_and_byte_quotas_apply_across_requests(client_factory) -> None:
-    count_client = client_factory(
-        auth_mock_enabled=True,
-        session_max_files=2,
-    )
-    count_csrf = str(mock_login(count_client)["csrfToken"])
-    assert upload_png(count_client, count_csrf, "a.png").status_code == 200
-    assert upload_png(count_client, count_csrf, "b.png").status_code == 200
-    count_limit = upload_png(count_client, count_csrf, "c.png")
-    assert count_limit.status_code == 413
-    assert count_limit.json()["error"]["code"] == "SESSION_FILE_LIMIT"
-
-    byte_client = client_factory(
-        auth_mock_enabled=True,
-        upload_max_file_bytes=100,
-        upload_max_request_bytes=1000,
-        session_max_bytes=120,
-        temp_storage_max_bytes=1000,
-    )
-    byte_csrf = str(mock_login(byte_client)["csrfToken"])
-    assert upload_png(byte_client, byte_csrf, "a.png").status_code == 200
-    byte_limit = upload_png(byte_client, byte_csrf, "b.png")
-    assert byte_limit.status_code == 413
-    assert byte_limit.json()["error"]["code"] == "SESSION_STORAGE_LIMIT"
-
-
-def test_global_quota_and_partials_are_included_in_admission(
-    client_factory,
-    tmp_path: Path,
-) -> None:
-    settings = {
-        "auth_mock_enabled": True,
-        "upload_max_file_bytes": 100,
-        "upload_max_request_bytes": 1000,
-        "session_max_bytes": 100,
-        "temp_storage_max_bytes": 120,
-    }
-    first = client_factory(**settings)
-    first_csrf = str(mock_login(first)["csrfToken"])
-    assert upload_png(first, first_csrf).status_code == 200
-
-    second = client_factory(**settings, auth_mock_user_id="another-user")
-    second_csrf = str(mock_login(second)["csrfToken"])
-    full = upload_png(second, second_csrf)
-    assert full.status_code == 503
-    assert full.json()["error"]["code"] == "TEMP_STORAGE_FULL"
-
-    count_client = client_factory(
-        auth_mock_enabled=True,
-        temp_dir=tmp_path / "partial-temp",
-        session_max_files=2,
-    )
-    count_csrf = str(mock_login(count_client)["csrfToken"])
-    assert upload_png(count_client, count_csrf).status_code == 200
-    directory = next(
-        path
-        for path in count_client.app.state.settings.temp_dir.iterdir()
-        if path.is_dir() and len(path.name) == 64
-    )
-    (directory / ".abandoned.part").write_bytes(b"partial")
-    limited = upload_png(count_client, count_csrf, "second.png")
-    assert limited.status_code == 413
-    assert limited.json()["error"]["code"] == "SESSION_FILE_LIMIT"
-
-
-def test_body_limit_and_malformed_multipart_are_rejected_early(client_factory) -> None:
-    client = client_factory(
-        auth_mock_enabled=True,
-        upload_max_file_bytes=100,
-        upload_max_request_bytes=1000,
-        session_max_bytes=100,
-        temp_storage_max_bytes=120,
-    )
-    csrf = str(mock_login(client)["csrfToken"])
-    too_large = client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf, "Content-Length": "1001"},
-        content=b"small",
-    )
-    assert too_large.status_code == 413
-    assert too_large.json()["error"]["code"] == "REQUEST_TOO_LARGE"
-
-    malformed = client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf},
-        files=[("unexpected", ("receipt.png", png_bytes(), "image/png"))],
-    )
-    assert malformed.status_code == 400
-    assert malformed.json()["error"]["code"] == "MALFORMED_MULTIPART"
 
 
 def test_cleanup_uses_file_age_and_skips_an_active_session(

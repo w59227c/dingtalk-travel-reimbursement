@@ -1,8 +1,3 @@
-import axios from 'axios'
-
-import { http } from './http'
-import type { ExcelGeneratePayload } from '@/types/expenses'
-
 export const DEFAULT_EXCEL_FILENAME = '差旅费报销单.xlsx'
 
 function safeDownloadedFilename(value: string, fallback: string): string {
@@ -51,39 +46,4 @@ export function downloadBlob(blob: Blob, filename: string): void {
     anchor.remove()
     URL.revokeObjectURL(url)
   }
-}
-
-export async function generateExpenseExcel(
-  payload: ExcelGeneratePayload,
-): Promise<{ blob: Blob; filename: string }> {
-  const response = await http.post<Blob>('/excel/generate', payload, {
-    responseType: 'blob',
-    timeout: 30_000,
-  })
-  return {
-    blob: response.data,
-    filename: filenameFromContentDisposition(response.headers['content-disposition']),
-  }
-}
-
-export async function generateAndDownloadExpenseExcel(payload: ExcelGeneratePayload): Promise<void> {
-  const result = await generateExpenseExcel(payload)
-  downloadBlob(result.blob, result.filename)
-}
-
-export async function excelDownloadErrorMessage(error: unknown): Promise<string> {
-  if (!axios.isAxiosError(error)) return 'Excel 生成失败，请稍后重试'
-  const data = error.response?.data
-  if (data instanceof Blob && data.type.includes('json')) {
-    try {
-      const parsed = JSON.parse(await data.text()) as { error?: { message?: string } }
-      return parsed.error?.message || 'Excel 生成失败，请检查填写内容'
-    } catch {
-      return 'Excel 生成失败，请检查填写内容'
-    }
-  }
-  return (
-    (data as { error?: { message?: string } } | undefined)?.error?.message ??
-    'Excel 生成失败，请检查填写内容'
-  )
 }

@@ -502,7 +502,7 @@ class ReimbursementSubmission(Base):
     template_process_code: Mapped[str] = mapped_column(String(128))
     template_config_version: Mapped[int] = mapped_column(Integer)
     schema_fingerprint: Mapped[str] = mapped_column(String(64))
-    snapshot_version: Mapped[int] = mapped_column(Integer, default=1)
+    snapshot_version: Mapped[int] = mapped_column(Integer, default=6)
     form_snapshot_json: Mapped[str] = mapped_column(Text)
     related_instance_ids_json: Mapped[str] = mapped_column(Text)
     snapshot_sha256: Mapped[str] = mapped_column(String(64))

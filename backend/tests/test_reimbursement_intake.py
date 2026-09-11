@@ -65,7 +65,7 @@ def test_partial_input_autosaves_and_incomplete_values_never_enter_totals(
         require_complete_draft_input(ReimbursementDraftInput.model_validate(saved["input"]))
 
 
-def test_budget_option_overrides_obsolete_project_and_full_label_reaches_excel(
+def test_budget_option_ignores_client_project_and_full_label_reaches_excel(
     client_factory, monkeypatch
 ):
     from dataclasses import replace

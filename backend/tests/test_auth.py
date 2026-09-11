@@ -86,11 +86,7 @@ def success_transport(
             200,
             json={
                 "errcode": 0,
-                "result": {
-                    "name": department_names.get(
-                        department_id, f"部门-{department_id}"
-                    )
-                },
+                "result": {"name": department_names.get(department_id, f"部门-{department_id}")},
             },
         )
 
@@ -137,14 +133,12 @@ def test_single_department_login_session_cookie_and_csrf_rotation(client_factory
     new_csrf = me.json()["data"]["csrfToken"]
     assert new_csrf != old_csrf
     stale = client.post(
-        "/api/me/department",
-        json={"departmentId": "10"},
+        "/api/auth/logout",
         headers={"X-CSRF-Token": old_csrf},
     )
     assert stale.status_code == 403
     current = client.post(
-        "/api/me/department",
-        json={"departmentId": "10"},
+        "/api/auth/logout",
         headers={"X-CSRF-Token": new_csrf},
     )
     assert current.status_code == 200
@@ -178,7 +172,9 @@ def test_login_rejects_member_response_without_nonempty_union_id(
     assert "expense_session" not in client.cookies
 
 
-def test_multiple_departments_require_authoritative_selection(client_factory) -> None:
+def test_multiple_departments_remain_unbound_until_a_travel_approval_is_selected(
+    client_factory,
+) -> None:
     transport, _calls = success_transport([10, 20])
     client = client_factory(transport=transport)
     login = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"})
@@ -186,23 +182,6 @@ def test_multiple_departments_require_authoritative_selection(client_factory) ->
 
     assert data["selectedDepartment"] is None
     assert [item["id"] for item in data["departments"]] == ["10", "20"]
-    rejected = client.post(
-        "/api/me/department",
-        json={"departmentId": "999"},
-        headers={"X-CSRF-Token": data["csrfToken"]},
-    )
-    assert rejected.status_code == 400
-    assert rejected.json()["error"]["code"] == "INVALID_DEPARTMENT"
-    accepted = client.post(
-        "/api/me/department",
-        json={"departmentId": "20"},
-        headers={"X-CSRF-Token": data["csrfToken"]},
-    )
-    assert accepted.status_code == 200
-    assert accepted.json()["data"]["selectedDepartment"] == {
-        "id": "20",
-        "name": "部门-20",
-    }
 
 
 def test_multiple_departments_bind_from_verified_travel_approval(

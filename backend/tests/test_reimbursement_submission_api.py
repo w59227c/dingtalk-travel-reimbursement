@@ -187,7 +187,7 @@ def _persist_submission_for_mock_user(client) -> tuple[str, str]:
             originator_union_id="union-owner-1",
             originator_name="测试员工",
             idempotency_key="submission-recovery-test",
-            snapshot_version=1,
+            snapshot_version=6,
             form_snapshot_json="{}",
             snapshot_sha256=hashlib.sha256(b"{}").hexdigest(),
         )
@@ -200,16 +200,10 @@ def test_submission_can_be_recovered_with_worker_disabled_without_mutation(
     owner = client_factory(
         auth_mock_enabled=True,
         auth_mock_user_id="owner-1",
-        auth_mock_departments="100:测试部门,200:项目部",
+        auth_mock_departments="100:测试部门",
         dingtalk_oa_worker_enabled=False,
     )
     login = mock_login(owner)
-    selected = owner.post(
-        "/api/me/department",
-        json={"departmentId": "100"},
-        headers={"X-CSRF-Token": login["csrfToken"]},
-    )
-    assert selected.status_code == 200
     draft_id, submission_id = _persist_submission_for_mock_user(owner)
     with owner.app.state.database_session_factory() as database:
         before = database.get(ReimbursementSubmission, submission_id)
@@ -257,15 +251,9 @@ def test_submission_recovery_is_authenticated_and_identity_scoped(client_factory
     owner = client_factory(
         auth_mock_enabled=True,
         auth_mock_user_id="owner-1",
-        auth_mock_departments="100:测试部门,200:项目部",
+        auth_mock_departments="100:测试部门",
     )
-    login = mock_login(owner)
-    selected = owner.post(
-        "/api/me/department",
-        json={"departmentId": "100"},
-        headers={"X-CSRF-Token": login["csrfToken"]},
-    )
-    assert selected.status_code == 200
+    mock_login(owner)
     draft_id, _ = _persist_submission_for_mock_user(owner)
 
     anonymous = client_factory(auth_mock_enabled=True)
@@ -291,16 +279,6 @@ def test_submission_recovery_is_authenticated_and_identity_scoped(client_factory
     hidden_corp = other_corp.get(f"/api/oa/reimbursements/drafts/{draft_id}/submission")
     assert hidden_corp.status_code == 404
     assert hidden_corp.json()["error"]["code"] == "REIMBURSEMENT_SUBMISSION_NOT_FOUND"
-
-    switched = owner.post(
-        "/api/me/department",
-        json={"departmentId": "200"},
-        headers={"X-CSRF-Token": login["csrfToken"]},
-    )
-    assert switched.status_code == 200
-    hidden_department = owner.get(f"/api/oa/reimbursements/drafts/{draft_id}/submission")
-    assert hidden_department.status_code == 404
-    assert hidden_department.json()["error"]["code"] == "REIMBURSEMENT_SUBMISSION_NOT_FOUND"
 
 
 def test_submission_recovery_returns_stable_not_found_for_unsubmitted_draft(

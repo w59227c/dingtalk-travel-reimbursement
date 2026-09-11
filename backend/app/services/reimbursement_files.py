@@ -1070,7 +1070,7 @@ def _workbook_preview_snapshot(
             f"当前部署每张报销单最多处理 {settings.expense_max_items} 条费用明细",
             422,
         )
-    # A locked historical draft keeps its original receipt counts and evidence.
+    # A locked draft keeps the exact receipt counts and evidence it was reviewed with.
     if draft.locked_at is None:
         draft_input = apply_ocr_evidence(database, draft_id=draft.id, draft_input=draft_input)
     require_complete_draft_input(draft_input)
@@ -1080,7 +1080,6 @@ def _workbook_preview_snapshot(
         catalog=catalog,
         draft_input=draft_input,
         max_items=settings.expense_max_items,
-        validate_project=True,
     )
     draft_input = ReimbursementDraftInput.model_validate(calculation.input_data)
     project = ResolvedProject(

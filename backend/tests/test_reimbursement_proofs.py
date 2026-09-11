@@ -1,21 +1,14 @@
 from __future__ import annotations
 
-import io
 import json
 
 import pytest
 from conftest import mock_login
-from openpyxl import load_workbook
 from test_reimbursement_drafts import _input
-from test_reimbursement_files import (
-    _image_bytes,
-    _insert_draft,
-    _insert_locked_snapshot_draft,
-)
+from test_reimbursement_files import _image_bytes, _insert_draft
 from test_reimbursement_intake import _proof_setup
 
 from app.core.errors import ApiError
-from app.excel.template_contract import EXCEL_TEMPLATE
 from app.models.reimbursement import ReimbursementDraft, ReimbursementDraftFile
 from app.ocr.engine import FakeOcrEngine
 from app.ocr.types import OcrLine
@@ -105,25 +98,6 @@ def test_new_draft_cannot_reference_payment_file_from_an_existing_draft(
     )
     assert created.status_code == 422, created.text
     assert created.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_FILE_REFERENCE_INVALID"
-
-
-def test_locked_snapshot_receipt_count_is_preserved_in_get_and_preview(client_factory, monkeypatch):
-    client = client_factory(auth_mock_enabled=True)
-    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
-    draft_id, _ = _insert_locked_snapshot_draft(client, first_receipt_count=3)
-    loaded = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
-    assert loaded["input"]["items"][0]["receiptCount"] == 3
-    preview = client.post(
-        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
-        headers=headers,
-        json={"expectedRevision": loaded["revision"]},
-    )
-    assert preview.status_code == 200, preview.text
-    workbook = load_workbook(io.BytesIO(preview.content), data_only=True)
-    try:
-        assert workbook.active[EXCEL_TEMPLATE.total_receipt_count_cell].value == 4
-    finally:
-        workbook.close()
 
 
 @pytest.mark.parametrize(("amount", "required"), [("500.00", False), ("500.01", True)])

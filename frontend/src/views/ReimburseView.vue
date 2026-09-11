@@ -900,7 +900,6 @@ onBeforeUnmount(() => {
               </header>
               <ExpenseItemsCard
                 ref="expenseItemsCard"
-                :durable="true"
                 :mobile="props.mobile"
                 :readonly="formReadOnly"
               />

@@ -15,7 +15,6 @@ from app.models.setting import Setting
 
 logger = logging.getLogger(__name__)
 
-LEGACY_SUBSIDY_KEY = "subsidy_per_day"
 CALCULATION_MODE_KEY = "calculation_mode"
 DEFAULT_CALCULATION_MODE = "half_day_12"
 APP_TITLE_KEY = "app_title"
@@ -61,30 +60,14 @@ class ExpenseSettings:
 
 
 def ensure_expense_setting_rows(database: Session) -> dict[str, Setting]:
-    """Seed per-type rates while preserving the legacy automatic rate safely.
+    """Seed the complete set of current application settings."""
 
-    Existing installations may only have ``subsidy_per_day``. Its raw value is
-    copied to the two formerly automatic types and then validated normally; an
-    invalid legacy value therefore fails closed instead of silently changing a
-    company's configured amount.
-    """
-
-    legacy = database.get(Setting, LEGACY_SUBSIDY_KEY)
     changed = False
-    if legacy is None:
-        legacy = Setting(key=LEGACY_SUBSIDY_KEY, value="100.00")
-        database.add(legacy)
-        changed = True
-
-    rows: dict[str, Setting] = {LEGACY_SUBSIDY_KEY: legacy}
+    rows: dict[str, Setting] = {}
     for trip_type, key in RATE_KEYS.items():
         row = database.get(Setting, key)
         if row is None:
-            if trip_type in {TripType.BUSINESS, TripType.SHORT_TERM_PROJECT}:
-                initial_value = legacy.value
-            else:
-                initial_value = format(DEFAULT_RATES[trip_type], ".2f")
-            row = Setting(key=key, value=initial_value)
+            row = Setting(key=key, value=format(DEFAULT_RATES[trip_type], ".2f"))
             database.add(row)
             changed = True
         rows[key] = row

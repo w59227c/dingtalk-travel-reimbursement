@@ -1,19 +1,7 @@
 from __future__ import annotations
 
-import io
-
-from PIL import Image
-
 from app.models.receipt_keyword import ReceiptKeywordMapping
-from app.ocr.engine import FakeOcrEngine
-from app.ocr.types import OcrLine
 from tests.conftest import mock_login
-
-
-def _image_bytes() -> bytes:
-    output = io.BytesIO()
-    Image.new("RGB", (80, 40), "white").save(output, format="PNG")
-    return output.getvalue()
 
 
 def test_receipt_keyword_crud_is_admin_only_and_validated(client_factory) -> None:
@@ -87,50 +75,6 @@ def test_receipt_keyword_crud_is_admin_only_and_validated(client_factory) -> Non
     )
     assert deleted.status_code == 200
     assert admin.get("/api/admin/receipt-keywords").json()["data"] == []
-
-
-def test_admin_keyword_is_used_only_as_other_category_fallback(client_factory) -> None:
-    engine = FakeOcrEngine(
-        {
-            "*": [
-                OcrLine("电子发票", 0.98),
-                OcrLine("开票日期 2026-07-01", 0.98),
-                OcrLine("*办公用品*文具", 0.98),
-                OcrLine("价税合计 ￥56.43", 0.99),
-            ]
-        }
-    )
-    client = client_factory(
-        auth_mock_enabled=True,
-        auth_mock_user_id="admin-1",
-        admin_user_ids="admin-1",
-        ocr_enabled=True,
-        ocr_engine=engine,
-    )
-    csrf = mock_login(client)["csrfToken"]
-    created = client.post(
-        "/api/admin/receipt-keywords",
-        json={"keyword": "文具", "categoryId": "office"},
-        headers={"X-CSRF-Token": csrf},
-    )
-    assert created.status_code == 201
-    uploaded = client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf},
-        files=[("files[]", ("office.png", _image_bytes(), "image/png"))],
-    )
-    file_id = uploaded.json()["data"]["files"][0]["id"]
-
-    response = client.post(
-        "/api/ocr",
-        headers={"X-CSRF-Token": csrf},
-        json={"fileIds": [file_id], "tripYear": 2026},
-    )
-
-    item = response.json()["data"]["items"][0]
-    assert item["categoryId"] == "office"
-    assert item["categoryName"] == "办公费"
-    assert "MANUAL_REVIEW_REQUIRED" not in item["warnings"]
 
 
 def test_seeded_keyword_can_be_edited_moved_and_deleted(client_factory) -> None:

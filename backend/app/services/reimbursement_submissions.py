@@ -184,9 +184,9 @@ class BundledSourceReleaseCandidate:
 
 
 def _require_bundle_manifest(
-    submission: ReimbursementSubmission, uploads: list[ReimbursementUpload]
+    _submission: ReimbursementSubmission, uploads: list[ReimbursementUpload]
 ) -> None:
-    if submission.snapshot_version >= 2 and [
+    if [
         (item.role, item.sort_order) for item in sorted(uploads, key=lambda item: item.sort_order)
     ] != [
         (ReimbursementUploadRole.GENERATED_PDF.value, 0),
@@ -212,9 +212,9 @@ def create_submission(
     """Lock one review-ready draft and persist its immutable submit snapshot.
 
     The caller must build ``form_snapshot_json`` from the same Session directly
-    before this call. This function performs the draft CAS, submission insert,
-    and legacy original-file manifest insert in one transaction, then commits it.
-    Version 2 source files remain draft records; only the PDF/Excel become uploads.
+    before this call. This function performs the draft CAS and submission insert
+    in one transaction, then commits it. Source files remain draft records; only
+    the generated PDF and Excel become remote uploads.
     """
 
     _require_actor(actor)
@@ -358,32 +358,6 @@ def create_submission(
         )
         database.add(submission)
         database.flush()
-        for manifest_order, source in enumerate(source_files if snapshot_version == 1 else ()):
-            database.add(
-                ReimbursementUpload(
-                    id=new_uuid(),
-                    submission_id=submission.id,
-                    draft_id=draft.id,
-                    source_draft_file_id=source.id,
-                    role=ReimbursementUploadRole.ORIGINAL.value,
-                    sort_order=manifest_order,
-                    local_storage_key=source.storage_key,
-                    local_part_storage_key=None,
-                    local_status=ReimbursementUploadLocalStatus.READY.value,
-                    reserved_bytes=source.reserved_bytes,
-                    reservation_expires_at=None,
-                    file_name=source.original_name,
-                    file_type=source.extension,
-                    media_type=source.media_type,
-                    size_bytes=source.size_bytes,
-                    sha256=source.sha256,
-                    upload_status=ReimbursementUploadStatus.PENDING.value,
-                    status_version=1,
-                    attempt_count=0,
-                    created_at=created_at,
-                    updated_at=created_at,
-                )
-            )
         database.commit()
         database.expire_all()
     except IntegrityError as exc:
@@ -1873,7 +1847,6 @@ def _bundled_source_release_query():
             ReimbursementSubmission.draft_id == ReimbursementDraftFile.draft_id,
         )
         .where(
-            ReimbursementSubmission.snapshot_version >= 2,
             ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
             ReimbursementSubmission.process_instance_id.is_not(None),
             ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,

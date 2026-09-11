@@ -35,7 +35,7 @@ export interface ReimbursementDraftExpenseItemInput extends Omit<ExcelExpenseIte
 export interface ReimbursementDraftInput extends Omit<ExcelGeneratePayload, 'items' | 'project'> {
   project?: ExcelProjectInput | null
   editingState?: { includeSubsidy: boolean; trip: TripInput; trips?: TripInput[] }
-  ocrDispositionVersion: 0 | 1
+  ocrDispositionVersion: 1
   companyValue: string
   accountingSourceVerified?: boolean
   budgetCodeValue: string

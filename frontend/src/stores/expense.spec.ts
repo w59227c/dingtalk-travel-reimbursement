@@ -17,7 +17,6 @@ const MANUAL_CATEGORIES = [
 function durableDraft(
   items: ReimbursementDraft['input']['items'],
   dismissedOcrFileIds: string[] = [],
-  ocrDispositionVersion: 0 | 1 = 1,
 ): ReimbursementDraft {
   return {
     id: 'draft-1',
@@ -36,7 +35,7 @@ function durableDraft(
       schemaFingerprint: 'a'.repeat(64),
     },
     input: {
-      ocrDispositionVersion,
+      ocrDispositionVersion: 1,
       companyValue: '北京',
       budgetCodeValue: '26007',
       project: { mode: 'manual', text: '测试项目' },
@@ -239,88 +238,6 @@ describe('expense store', () => {
     expect(store.calculationsCurrent).toBe(false)
   })
 
-  it('binds only a unique exact legacy OCR match and leaves an edited match unresolved', () => {
-    const store = useExpenseStore()
-    store.categories = MANUAL_CATEGORIES
-    const exact = durableFile('file-exact')
-    const edited = durableFile('file-edited', {
-      sortOrder: 1,
-      ocrResult: {
-        ...durableFile('file-edited').ocrResult!,
-        fileId: 'file-edited',
-        description: 'OCR 原说明',
-        amount: '20.00',
-      },
-    })
-    const legacy = durableDraft([
-      {
-        category: 'rail_fare',
-        date: '2026-09-01',
-        displayDate: '2026-09-01',
-        description: '北京南-合肥南',
-        amount: '454.00',
-        receiptCount: 1,
-      },
-      {
-        category: 'rail_fare',
-        date: '2026-09-02',
-        displayDate: '2026-09-02',
-        description: '用户修改后的说明',
-        amount: '20.00',
-        receiptCount: 1,
-      },
-    ], [], 0)
-
-    store.hydrateFromDraft(legacy, [exact, edited])
-
-    expect(store.items).toHaveLength(2)
-    expect(store.items[0]).toMatchObject({
-      sourceFileId: 'file-exact',
-      source: 'ocr',
-      amount: '454.00',
-    })
-    expect(store.items[1]?.sourceFileId).toBeUndefined()
-    expect(store.items.reduce((sum, item) => sum + Number(item.amount), 0)).toBe(474)
-    expect(store.dismissedOcrFileIds).toEqual([])
-  })
-
-  it('does not revive or ignore a legacy OCR line that may have been explicitly deleted', () => {
-    const store = useExpenseStore()
-    store.categories = MANUAL_CATEGORIES
-    const source = durableFile('file-deleted-before-provenance')
-
-    store.hydrateFromDraft(durableDraft([], [], 0), [source])
-
-    expect(store.items).toEqual([])
-    expect(store.dismissedOcrFileIds).toEqual([])
-
-    store.dismissDraftOcrFile('file-deleted-before-provenance')
-
-    expect(store.items).toEqual([])
-    expect(store.dismissedOcrFileIds).toEqual(['file-deleted-before-provenance'])
-  })
-
-  it('does not auto-bind an ambiguous many-to-one legacy OCR match', () => {
-    const store = useExpenseStore()
-    store.categories = MANUAL_CATEGORIES
-    const duplicatedLine = {
-      category: 'rail_fare' as const,
-      date: '2026-09-01',
-      displayDate: '2026-09-01',
-      description: '北京南-合肥南',
-      amount: '454.00',
-      receiptCount: 1,
-    }
-
-    store.hydrateFromDraft(
-      durableDraft([duplicatedLine, { ...duplicatedLine }], [], 0),
-      [durableFile('file-ambiguous')],
-    )
-
-    expect(store.items).toHaveLength(2)
-    expect(store.items.every((item) => item.sourceFileId === undefined)).toBe(true)
-    expect(store.dismissedOcrFileIds).toEqual([])
-  })
 
   it('does not recover a non-terminal OCR candidate', () => {
     const store = useExpenseStore()
@@ -404,7 +321,7 @@ describe('expense store', () => {
     })])
   })
 
-  it('keeps id and source for totals while stripping attachment metadata from Excel', async () => {
+  it('keeps id and source for totals and draft persistence', async () => {
     vi.mocked(calculateTotals).mockResolvedValue({
       expenseTotal: '454.00',
       subsidyTotal: '0.00',
@@ -430,7 +347,6 @@ describe('expense store', () => {
       amount: '454.00',
       receiptCount: 1,
     })])
-    expect(store.buildExcelPayload()?.items[0]).not.toHaveProperty('sourceFileId')
     expect(store.buildDraftExpenseItems()[0]).toHaveProperty(
       'sourceFileId',
       'file-calculation',
@@ -693,7 +609,7 @@ describe('expense store', () => {
     ['18:00', '12:00', '18:00', '18:00'],
     ['11:59', '12:00', '09:00', '18:00'],
     ['12:00', '11:59', '18:00', '09:00'],
-  ])('normalizes legacy %s–%s to half-day times without changing saved editing values', (start, end, expectedStart, expectedEnd) => {
+  ])('normalizes exact %s–%s to half-day times without changing editing values', (start, end, expectedStart, expectedEnd) => {
     const store = useExpenseStore()
     store.setSubsidyIncluded(true)
     Object.assign(store.trip, {
@@ -784,62 +700,6 @@ describe('expense store', () => {
     expect(store.manualCategories).toHaveLength(2)
   })
 
-  it('builds an Excel payload without identity or client totals and blocks stale calculations', async () => {
-    vi.mocked(calculateTotals).mockResolvedValue({
-      expenseTotal: '44.89',
-      subsidyTotal: '800.00',
-      totalAmount: '844.89',
-      receiptCount: 1,
-      uppercaseAmount: '捌佰肆拾肆元捌角玖分',
-      subsidy: {
-        tripType: 'business',
-        calendarDays: 8,
-        effectiveDays: '8.0',
-        dailyRate: '100.00',
-        total: '800.00',
-      },
-    })
-    const store = useExpenseStore()
-    store.categories = MANUAL_CATEGORIES
-    store.manualProjectText = 'P-007 测试项目'
-    store.setSubsidyIncluded(true)
-    Object.assign(store.trip, {
-      startDate: '2026-06-30',
-      endDate: '2026-07-07',
-    })
-    store.upsertManualItem({
-      category: 'local_transport',
-      date: '2026-07-01',
-      displayDate: '2026-07-01',
-      description: '市内交通',
-      amount: '44.89',
-      receiptCount: 1,
-    })
-
-    expect(store.excelDisabledReason).toContain('等待服务端')
-    expect(store.buildExcelPayload()).toBeNull()
-    await store.refreshCalculations()
-    const payload = store.buildExcelPayload()
-    expect(payload).toMatchObject({
-      project: { mode: 'manual', text: 'P-007 测试项目' },
-      trip: { startDate: '2026-06-30', endDate: '2026-07-07' },
-      items: [{
-        category: 'local_transport',
-        date: '2026-07-01',
-        amount: '44.89',
-        receiptCount: 1,
-      }],
-    })
-    expect(payload).not.toHaveProperty('employee')
-    expect(payload).not.toHaveProperty('department')
-    expect(payload).not.toHaveProperty('totals')
-    expect(payload?.items[0]).not.toHaveProperty('id')
-    expect(payload?.items[0]).not.toHaveProperty('source')
-
-    store.trip.endDate = '2026-07-08'
-    expect(store.calculationsCurrent).toBe(false)
-    expect(store.buildExcelPayload()).toBeNull()
-  })
 
   it('keeps a completed subsidy calculation when unchanged approvals are synchronized again', async () => {
     vi.mocked(calculateTotals).mockResolvedValue({
@@ -888,31 +748,10 @@ describe('expense store', () => {
     await store.refreshCalculations()
 
     expect(store.calculationsCurrent).toBe(true)
-    expect(store.buildExcelPayload()).not.toBeNull()
-
     store.syncSubsidyApprovals(approvals.map((approval) => ({ ...approval })))
 
     expect(store.calculationsCurrent).toBe(true)
     expect(store.displaySubsidyTotal).toBe('800.00')
-    expect(store.buildExcelPayload()).not.toBeNull()
   })
 
-  it('does not require a trip when subsidy is not selected', async () => {
-    vi.mocked(calculateTotals).mockResolvedValue({
-      expenseTotal: '0.00', subsidyTotal: '0.00', totalAmount: '0.00', receiptCount: 0,
-      uppercaseAmount: '零元整', subsidy: null,
-    })
-    const store = useExpenseStore()
-    expect(store.excelDisabledReason).toBe('请先关联出差审批以获取预算代码')
-    store.manualProjectText = '临时项目'
-    expect(store.excelDisabledReason).toBe('费用类别尚未正确加载')
-    store.categories = MANUAL_CATEGORIES
-    expect(store.includeSubsidy).toBe(false)
-    await store.refreshCalculations()
-    expect(store.excelDisabledReason).toBe('')
-    expect(store.buildExcelPayload()).toMatchObject({ trip: null, items: [] })
-
-    store.setSubsidyIncluded(true)
-    expect(store.excelDisabledReason).toContain('出发和返回')
-  })
 })

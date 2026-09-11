@@ -69,7 +69,7 @@ def _dynamic_source():
         ("境外短期出差", "境外商务出差（短期）", "overseas"),
     ],
 )
-def test_pre_change_travel_categories_map_to_current_reimbursement_categories(
+def test_source_travel_categories_map_to_reimbursement_categories(
     source_label,
     target_label,
     expected_policy,
@@ -80,7 +80,7 @@ def test_pre_change_travel_categories_map_to_current_reimbursement_categories(
         components=(SimpleNamespace(component_id="source-type", options=(source_option,)),)
     )
     instance = replace(
-        _instance("legacy-category"),
+        _instance("source-category"),
         form_values=(
             WorkflowFormValue(
                 "source-type",
@@ -143,16 +143,11 @@ def test_dynamic_config_roundtrip_and_api_contract():
         )
 
 
-def test_dynamic_snapshot_roundtrip_and_legacy_rejection():
+def test_dynamic_snapshot_roundtrip_uses_current_version():
     snapshot = build_snapshot(_dynamic_source())
     assert snapshot.snapshot_version == 6
     assert parse_snapshot(serialize_snapshot(snapshot)) == snapshot
     assert snapshot.related_approvals[0].source_travel_type_value == "商务出差"
-    for version in (1, 2, 3, 4):
-        value = snapshot.model_dump(by_alias=True)
-        value["snapshotVersion"] = version
-        with pytest.raises(ValueError):
-            type(snapshot).model_validate(value)
 
 
 @pytest.mark.asyncio

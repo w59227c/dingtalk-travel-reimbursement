@@ -24,7 +24,6 @@ from app.models.reimbursement import (
     ReimbursementUploadStatus,
     utc_now,
 )
-from app.services.oa_reimbursement import LinkedLocalFileMaintenance
 from app.services.reimbursement_drafts import DraftActor
 from app.services.reimbursement_submissions import (
     ReimbursementSubmissionConflict,
@@ -40,7 +39,6 @@ from app.services.reimbursement_submissions import (
     finalize_local_upload_release,
     find_owned_submission_for_draft,
     list_due_linked_local_release_candidates,
-    list_linked_local_release_candidates,
     mark_oa_create_uncertain,
     mark_submission_submitted,
     mark_upload_commit_uncertain,
@@ -123,7 +121,7 @@ def _create(
     key: str = "submission-request-0001",
     now=None,
 ):
-    snapshot = '{"snapshotVersion":1,"total":"100.00"}'
+    snapshot = '{"snapshotVersion":6,"total":"100.00"}'
     return create_submission(
         database,
         actor=actor,
@@ -132,7 +130,7 @@ def _create(
         originator_union_id="union-1",
         originator_name="测试员工",
         idempotency_key=key,
-        snapshot_version=1,
+        snapshot_version=6,
         form_snapshot_json=snapshot,
         snapshot_sha256=hashlib.sha256(snapshot.encode()).hexdigest(),
         now=now,
@@ -162,6 +160,8 @@ def _claim_to_uploading(database: Session, draft: ReimbursementDraft, *, now):
         to_status=ReimbursementSubmissionStatus.GENERATING_EXCEL,
         now=now,
     )
+    submission = database.get(ReimbursementSubmission, result.submission_id)
+    _add_generated_upload(database, submission)
     lease = advance_submission(
         database,
         lease=lease,
@@ -178,6 +178,44 @@ def _add_generated_upload(
     *,
     status: ReimbursementUploadStatus = ReimbursementUploadStatus.PENDING,
 ) -> ReimbursementUpload:
+    existing = database.scalars(
+        select(ReimbursementUpload)
+        .where(ReimbursementUpload.submission_id == submission.id)
+        .order_by(ReimbursementUpload.sort_order)
+    ).all()
+    if existing:
+        bundle, generated = existing
+        for index, upload in enumerate((bundle, generated)):
+            upload.upload_status = status.value
+            if status in {
+                ReimbursementUploadStatus.COMMITTED,
+                ReimbursementUploadStatus.LINKED,
+            }:
+                upload.space_id = "space-generated"
+                upload.file_id = f"file-generated-{index}"
+            if status is ReimbursementUploadStatus.LINKED:
+                upload.linked_at = utc_now()
+        database.commit()
+        return generated
+
+    bundle = ReimbursementUpload(
+        submission_id=submission.id,
+        draft_id=submission.draft_id,
+        source_draft_file_id=None,
+        role=ReimbursementUploadRole.GENERATED_PDF.value,
+        sort_order=0,
+        local_storage_key=f"generated/{submission.id}/receipts.pdf",
+        local_part_storage_key=None,
+        local_status=ReimbursementUploadLocalStatus.READY.value,
+        reserved_bytes=4096,
+        reservation_expires_at=None,
+        file_name="票据汇总.pdf",
+        file_type="pdf",
+        media_type="application/pdf",
+        size_bytes=2048,
+        sha256="a" * 64,
+        upload_status=status.value,
+    )
     generated = ReimbursementUpload(
         submission_id=submission.id,
         draft_id=submission.draft_id,
@@ -200,17 +238,18 @@ def _add_generated_upload(
         ReimbursementUploadStatus.COMMITTED,
         ReimbursementUploadStatus.LINKED,
     }:
-        generated.space_id = "space-generated"
-        generated.file_id = "file-generated"
+        for index, upload in enumerate((bundle, generated)):
+            upload.space_id = "space-generated"
+            upload.file_id = f"file-generated-{index}"
     if status is ReimbursementUploadStatus.LINKED:
-        generated.linked_at = utc_now()
-    database.add(generated)
+        bundle.linked_at = generated.linked_at = utc_now()
+    database.add_all((bundle, generated))
     database.commit()
     return generated
 
 
-def test_create_submission_locks_draft_and_copies_original_manifest(database: Session) -> None:
-    draft, source = _new_ready_draft(database)
+def test_create_submission_locks_draft_without_copying_source_files(database: Session) -> None:
+    draft, _source = _new_ready_draft(database)
 
     result = _create(database, draft)
 
@@ -218,19 +257,20 @@ def test_create_submission_locks_draft_and_copies_original_manifest(database: Se
     assert result.idempotency_matched is True
     persisted_draft = database.get(ReimbursementDraft, draft.id)
     submission = database.get(ReimbursementSubmission, result.submission_id)
-    upload = database.scalar(
-        select(ReimbursementUpload).where(ReimbursementUpload.submission_id == result.submission_id)
-    )
     assert persisted_draft.status == ReimbursementDraftStatus.LOCKED.value
     assert persisted_draft.revision == 5
     assert persisted_draft.locked_at is not None
-    assert submission.snapshot_version == 1
-    assert submission.form_snapshot_json == '{"snapshotVersion":1,"total":"100.00"}'
+    assert submission.snapshot_version == 6
+    assert submission.form_snapshot_json == '{"snapshotVersion":6,"total":"100.00"}'
     assert submission.next_attempt_at is not None
-    assert upload.role == ReimbursementUploadRole.ORIGINAL.value
-    assert upload.source_draft_file_id == source.id
-    assert upload.local_storage_key == source.storage_key
-    assert upload.size_bytes == source.size_bytes
+    assert (
+        database.scalar(
+            select(ReimbursementUpload).where(
+                ReimbursementUpload.submission_id == result.submission_id
+            )
+        )
+        is None
+    )
 
 
 def test_existing_submission_is_reused_even_when_browser_has_a_new_key(
@@ -609,16 +649,6 @@ def test_expired_oa_create_lease_moves_to_reconciliation_never_create_retry(
         submission,
         status=ReimbursementUploadStatus.COMMITTED,
     )
-    original = database.scalar(
-        select(ReimbursementUpload).where(
-            ReimbursementUpload.submission_id == submission.id,
-            ReimbursementUpload.role == ReimbursementUploadRole.ORIGINAL.value,
-        )
-    )
-    original.upload_status = ReimbursementUploadStatus.COMMITTED.value
-    original.space_id = "space-original"
-    original.file_id = "file-original"
-    database.commit()
     request = '{"processCode":"PROC-REIMBURSEMENT"}'
     oa_lease = checkpoint_oa_create(
         database,
@@ -741,13 +771,9 @@ def test_oa_result_can_be_reconciled_and_submitted_only_after_linking(database: 
     original = database.scalar(
         select(ReimbursementUpload).where(
             ReimbursementUpload.submission_id == submission.id,
-            ReimbursementUpload.role == ReimbursementUploadRole.ORIGINAL.value,
+            ReimbursementUpload.role == ReimbursementUploadRole.GENERATED_PDF.value,
         )
     )
-    original.upload_status = ReimbursementUploadStatus.COMMITTED.value
-    original.space_id = "space-original"
-    original.file_id = "file-original"
-    database.commit()
     request = '{"processCode":"PROC-REIMBURSEMENT"}'
     lease = checkpoint_oa_create(
         database,
@@ -806,329 +832,6 @@ def test_oa_result_can_be_reconciled_and_submitted_only_after_linking(database: 
     assert persisted.status == ReimbursementSubmissionStatus.SUBMITTED.value
     assert persisted.lease_token is None
     assert persisted.approval_url == "dingtalk://oa-instance-1"
-
-
-def test_linked_local_release_purges_shared_original_accounting_atomically(
-    database: Session,
-) -> None:
-    now = utc_now()
-    draft, source = _new_ready_draft(database)
-    result = _create(database, draft, now=now)
-    submission = database.get(ReimbursementSubmission, result.submission_id)
-    submission.status = ReimbursementSubmissionStatus.VERIFYING.value
-    submission.oa_create_started_at = now
-    submission.oa_request_json = "{}"
-    submission.oa_request_hash = hashlib.sha256(b"{}").hexdigest()
-    submission.process_instance_id = "instance-1"
-    upload = database.scalar(
-        select(ReimbursementUpload).where(ReimbursementUpload.submission_id == submission.id)
-    )
-    upload.upload_status = ReimbursementUploadStatus.LINKED.value
-    upload.space_id = "space-1"
-    upload.file_id = "file-1"
-    upload.linked_at = now
-    database.commit()
-
-    scoped = list_linked_local_release_candidates(
-        database,
-        corp_id=_ACTOR.corp_id,
-        user_id=_ACTOR.user_id,
-        submission_id=submission.id,
-    )
-    due = list_due_linked_local_release_candidates(database)
-    assert scoped == due
-    assert scoped[0].corp_id == _ACTOR.corp_id
-    assert scoped[0].source_draft_file_id == source.id
-
-    version = finalize_local_upload_release(
-        database,
-        corp_id=_ACTOR.corp_id,
-        user_id=_ACTOR.user_id,
-        submission_id=submission.id,
-        upload_id=upload.id,
-        expected_status_version=scoped[0].upload_status_version,
-        now=now,
-    )
-
-    assert database.get(ReimbursementUpload, upload.id).local_status == (
-        ReimbursementUploadLocalStatus.DELETED.value
-    )
-    assert database.get(ReimbursementUpload, upload.id).upload_status == (
-        ReimbursementUploadStatus.LINKED.value
-    )
-    assert database.get(ReimbursementUpload, upload.id).space_id == "space-1"
-    assert database.get(ReimbursementUpload, upload.id).file_id == "file-1"
-    assert database.get(ReimbursementDraftFile, source.id).file_status == (
-        ReimbursementDraftFileStatus.PURGED.value
-    )
-    assert (
-        finalize_local_upload_release(
-            database,
-            corp_id=_ACTOR.corp_id,
-            user_id=_ACTOR.user_id,
-            submission_id=submission.id,
-            upload_id=upload.id,
-            expected_status_version=scoped[0].upload_status_version,
-            now=now,
-        )
-        == version
-    )
-
-
-def test_failed_final_local_file_is_retained_until_expiry_then_discarded_atomically(
-    database: Session,
-) -> None:
-    expires_at = utc_now()
-    draft, source = _new_ready_draft(database)
-    result = _create(database, draft, now=expires_at - timedelta(minutes=1))
-    submission = database.get(ReimbursementSubmission, result.submission_id)
-    upload = database.scalar(
-        select(ReimbursementUpload).where(ReimbursementUpload.submission_id == submission.id)
-    )
-    submission.status = ReimbursementSubmissionStatus.FAILED_FINAL.value
-    submission.next_attempt_at = None
-    draft.expires_at = expires_at
-    database.commit()
-
-    assert (
-        list_due_linked_local_release_candidates(
-            database,
-            now=expires_at - timedelta(microseconds=1),
-        )
-        == ()
-    )
-    candidates = list_due_linked_local_release_candidates(database, now=expires_at)
-
-    assert [candidate.upload_id for candidate in candidates] == [upload.id]
-    version = finalize_local_upload_release(
-        database,
-        corp_id=_ACTOR.corp_id,
-        user_id=_ACTOR.user_id,
-        submission_id=submission.id,
-        upload_id=upload.id,
-        expected_status_version=candidates[0].upload_status_version,
-        now=expires_at,
-    )
-
-    persisted_upload = database.get(ReimbursementUpload, upload.id)
-    persisted_source = database.get(ReimbursementDraftFile, source.id)
-    assert persisted_upload.status_version == version
-    assert persisted_upload.upload_status == ReimbursementUploadStatus.DISCARDED.value
-    assert persisted_upload.local_status == ReimbursementUploadLocalStatus.DELETED.value
-    assert persisted_upload.local_deleted_at == expires_at
-    assert persisted_source.file_status == ReimbursementDraftFileStatus.PURGED.value
-    assert persisted_source.purged_at == expires_at
-    assert (
-        finalize_local_upload_release(
-            database,
-            corp_id=_ACTOR.corp_id,
-            user_id=_ACTOR.user_id,
-            submission_id=submission.id,
-            upload_id=upload.id,
-            expected_status_version=candidates[0].upload_status_version,
-            now=expires_at,
-        )
-        == version
-    )
-
-
-def test_failed_final_cleanup_includes_safe_put_states_and_generated_excel(
-    database: Session,
-) -> None:
-    expires_at = utc_now()
-    draft, source = _new_ready_draft(database)
-    result = _create(database, draft, now=expires_at - timedelta(minutes=1))
-    submission = database.get(ReimbursementSubmission, result.submission_id)
-    original = database.scalar(
-        select(ReimbursementUpload).where(ReimbursementUpload.submission_id == submission.id)
-    )
-    generated = _add_generated_upload(database, submission)
-    original.upload_status = ReimbursementUploadStatus.PUTTING.value
-    original.put_started_at = expires_at - timedelta(seconds=2)
-    generated.upload_status = ReimbursementUploadStatus.PUT_DONE.value
-    generated.put_started_at = expires_at - timedelta(seconds=1)
-    submission.status = ReimbursementSubmissionStatus.FAILED_FINAL.value
-    submission.next_attempt_at = None
-    draft.expires_at = expires_at
-    database.commit()
-
-    candidates = list_due_linked_local_release_candidates(database, now=expires_at)
-
-    assert {candidate.upload_id for candidate in candidates} == {
-        original.id,
-        generated.id,
-    }
-    for candidate in candidates:
-        finalize_local_upload_release(
-            database,
-            corp_id=candidate.corp_id,
-            user_id=candidate.user_id,
-            submission_id=candidate.submission_id,
-            upload_id=candidate.upload_id,
-            expected_status_version=candidate.upload_status_version,
-            now=expires_at,
-        )
-    assert database.get(ReimbursementDraftFile, source.id).file_status == (
-        ReimbursementDraftFileStatus.PURGED.value
-    )
-    assert {
-        database.get(ReimbursementUpload, original.id).upload_status,
-        database.get(ReimbursementUpload, generated.id).upload_status,
-    } == {ReimbursementUploadStatus.DISCARDED.value}
-
-
-@pytest.mark.parametrize(
-    "blocked_case",
-    [
-        "not_expired",
-        "not_locked",
-        "manual_review",
-        "oa_create_started",
-        "commit_started",
-        "remote_identity",
-        "committing",
-        "commit_uncertain",
-        "committed",
-    ],
-)
-def test_failed_final_cleanup_excludes_any_state_that_might_have_remote_effects(
-    database: Session,
-    blocked_case: str,
-) -> None:
-    now = utc_now()
-    draft, _ = _new_ready_draft(database)
-    result = _create(database, draft, now=now - timedelta(minutes=1))
-    submission = database.get(ReimbursementSubmission, result.submission_id)
-    upload = database.scalar(
-        select(ReimbursementUpload).where(ReimbursementUpload.submission_id == submission.id)
-    )
-    submission.status = ReimbursementSubmissionStatus.FAILED_FINAL.value
-    submission.next_attempt_at = None
-    draft.expires_at = now
-    if blocked_case == "not_expired":
-        draft.expires_at = now + timedelta(microseconds=1)
-    elif blocked_case == "not_locked":
-        draft.status = ReimbursementDraftStatus.DRAFT.value
-        draft.locked_at = None
-    elif blocked_case == "manual_review":
-        submission.status = ReimbursementSubmissionStatus.MANUAL_REVIEW.value
-    elif blocked_case == "oa_create_started":
-        submission.oa_create_started_at = now - timedelta(seconds=1)
-    elif blocked_case == "commit_started":
-        upload.upload_status = ReimbursementUploadStatus.PUT_DONE.value
-        upload.put_started_at = now - timedelta(seconds=2)
-        upload.commit_started_at = now - timedelta(seconds=1)
-    elif blocked_case == "remote_identity":
-        upload.upload_status = ReimbursementUploadStatus.PUT_DONE.value
-        upload.space_id = "space-unsafe"
-        upload.file_id = "file-unsafe"
-    elif blocked_case == "committing":
-        upload.upload_status = ReimbursementUploadStatus.COMMITTING.value
-        upload.commit_started_at = now - timedelta(seconds=1)
-    elif blocked_case == "commit_uncertain":
-        upload.upload_status = ReimbursementUploadStatus.COMMIT_UNCERTAIN.value
-        upload.commit_started_at = now - timedelta(seconds=1)
-    elif blocked_case == "committed":
-        upload.upload_status = ReimbursementUploadStatus.COMMITTED.value
-        upload.space_id = "space-committed"
-        upload.file_id = "file-committed"
-    database.commit()
-
-    assert list_due_linked_local_release_candidates(database, now=now) == ()
-
-
-def test_failed_final_cleanup_rejects_a_stale_candidate_without_purging_source(
-    database: Session,
-) -> None:
-    now = utc_now()
-    draft, source = _new_ready_draft(database)
-    result = _create(database, draft, now=now - timedelta(minutes=1))
-    submission = database.get(ReimbursementSubmission, result.submission_id)
-    upload = database.scalar(
-        select(ReimbursementUpload).where(ReimbursementUpload.submission_id == submission.id)
-    )
-    submission.status = ReimbursementSubmissionStatus.FAILED_FINAL.value
-    submission.next_attempt_at = None
-    draft.expires_at = now
-    database.commit()
-    candidate = list_due_linked_local_release_candidates(database, now=now)[0]
-    upload.status_version += 1
-    upload.upload_status = ReimbursementUploadStatus.COMMIT_UNCERTAIN.value
-    upload.commit_started_at = now
-    database.commit()
-
-    with pytest.raises(ReimbursementSubmissionConflict):
-        finalize_local_upload_release(
-            database,
-            corp_id=candidate.corp_id,
-            user_id=candidate.user_id,
-            submission_id=candidate.submission_id,
-            upload_id=candidate.upload_id,
-            expected_status_version=candidate.upload_status_version,
-            now=now,
-        )
-
-    assert database.get(ReimbursementDraftFile, source.id).file_status == (
-        ReimbursementDraftFileStatus.ACTIVE.value
-    )
-
-
-class _RetryableDeleteBoundary:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def delete(self, _key, *, expected_size, expected_sha256, missing_ok) -> None:
-        assert expected_size == 1024
-        assert expected_sha256 == _HASH_A
-        assert missing_ok is True
-        self.calls += 1
-        if self.calls == 1:
-            raise OSError("temporary local deletion failure")
-
-
-async def test_failed_final_maintenance_retries_after_restart_and_is_idempotent(
-    database: Session,
-) -> None:
-    now = utc_now()
-    draft, source = _new_ready_draft(database)
-    result = _create(database, draft, now=now - timedelta(minutes=1))
-    submission = database.get(ReimbursementSubmission, result.submission_id)
-    upload = database.scalar(
-        select(ReimbursementUpload).where(ReimbursementUpload.submission_id == submission.id)
-    )
-    submission.status = ReimbursementSubmissionStatus.FAILED_FINAL.value
-    submission.next_attempt_at = None
-    draft.expires_at = now
-    database.commit()
-    staging = _RetryableDeleteBoundary()
-    session_factory = create_session_factory(database.get_bind())
-
-    first_process = LinkedLocalFileMaintenance(
-        session_factory=session_factory,
-        staging=staging,
-        clock=lambda: now,
-    )
-    assert await first_process.release_linked_local_files(limit=1) == 0
-    database.expire_all()
-    assert database.get(ReimbursementUpload, upload.id).local_status == (
-        ReimbursementUploadLocalStatus.READY.value
-    )
-
-    restarted_process = LinkedLocalFileMaintenance(
-        session_factory=session_factory,
-        staging=staging,
-        clock=lambda: now,
-    )
-    assert await restarted_process.release_linked_local_files(limit=1) == 1
-    assert await restarted_process.release_linked_local_files(limit=1) == 0
-    database.expire_all()
-    assert staging.calls == 2
-    assert database.get(ReimbursementUpload, upload.id).upload_status == (
-        ReimbursementUploadStatus.DISCARDED.value
-    )
-    assert database.get(ReimbursementDraftFile, source.id).file_status == (
-        ReimbursementDraftFileStatus.PURGED.value
-    )
 
 
 def test_discarded_generated_excel_can_be_removed_under_generation_lease(
@@ -1191,13 +894,9 @@ def test_explicit_oa_rejection_can_enter_and_complete_orphan_cleanup(
     original = database.scalar(
         select(ReimbursementUpload).where(
             ReimbursementUpload.submission_id == submission.id,
-            ReimbursementUpload.role == ReimbursementUploadRole.ORIGINAL.value,
+            ReimbursementUpload.role == ReimbursementUploadRole.GENERATED_PDF.value,
         )
     )
-    original.upload_status = ReimbursementUploadStatus.COMMITTED.value
-    original.space_id = "space-original"
-    original.file_id = "file-original"
-    database.commit()
     request = '{"processCode":"PROC-REIMBURSEMENT"}'
     lease = checkpoint_oa_create(
         database,
@@ -1246,6 +945,3 @@ def test_explicit_oa_rejection_can_enter_and_complete_orphan_cleanup(
             expected_status_version=candidate.upload_status_version,
             now=now,
         )
-    assert database.get(ReimbursementDraftFile, original.source_draft_file_id).file_status == (
-        ReimbursementDraftFileStatus.PURGED.value
-    )

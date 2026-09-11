@@ -6,7 +6,6 @@ import io
 import json
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
-from types import SimpleNamespace
 
 import pytest
 from conftest import mock_login
@@ -64,11 +63,6 @@ from app.services.oa_reimbursement import (
     LinkedLocalFileMaintenance,
     OAReimbursementProcessor,
     SnapshotSubmissionMaterializer,
-)
-from app.services.oa_reimbursement_payload import (
-    parse_snapshot,
-    serialize_snapshot,
-    snapshot_sha256,
 )
 from app.services.oa_template_profiles import (
     TravelProfileConfirmation,
@@ -561,7 +555,6 @@ def _persist_ready_draft(
             catalog=catalog,
             draft_input=_draft_input().model_copy(update={"accounting_source_verified": True}),
             max_items=settings.expense_max_items,
-            validate_project=True,
         )
         draft = ReimbursementDraft(
             corp_id="corp-fixed",
@@ -654,7 +647,6 @@ def _persist_ready_draft(
                 update={"accounting_source_verified": True}
             ),
             max_items=settings.expense_max_items,
-            validate_project=True,
         )
         draft.input_json = linked_calculation.canonical_json
         database.commit()
@@ -875,70 +867,6 @@ def test_old_mutable_accounting_requires_reconfirmation_before_lock(
     with client.app.state.database_session_factory() as database:
         assert database.get(ReimbursementDraft, draft_id).locked_at is None
         assert database.scalar(select(ReimbursementSubmission)) is None
-
-
-def test_legacy_v3_materializer_validates_without_new_source_mapping_requirements(
-    enabled_manual_worker_client,
-    monkeypatch,
-) -> None:
-    reimbursement_schema, travel_schema, travel_type = _schemas()
-    workflow = LocalWorkflowBoundary(reimbursement_schema, travel_schema)
-    client = enabled_manual_worker_client
-    csrf = str(mock_login(client)["csrfToken"])
-    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
-    response = client.post(
-        f"/api/oa/reimbursements/{draft_id}/submit",
-        json={"expectedRevision": 4},
-        headers={"X-CSRF-Token": csrf, "Idempotency-Key": "77777777-7777-4777-8777-777777777778"},
-    )
-    assert response.status_code == 202, response.text
-    with client.app.state.database_session_factory() as database:
-        row = database.get(ReimbursementSubmission, response.json()["data"]["submissionId"])
-        snapshot = parse_snapshot(row.form_snapshot_json)
-    snapshot = snapshot.model_copy(
-        update={
-            "snapshot_version": 3,
-            "template": snapshot.template.model_copy(
-                update={
-                    "travel_profiles": tuple(
-                        profile.model_copy(
-                            update={"company_component_id": None, "budget_code_component_id": None}
-                        )
-                        for profile in snapshot.template.travel_profiles
-                    ),
-                }
-            ),
-        }
-    )
-    raw = serialize_snapshot(snapshot)
-    job = SimpleNamespace(
-        draft_id=snapshot.draft_id,
-        process_code=snapshot.template.process_code,
-        originator_user_id=snapshot.identity.user_id,
-        originator_union_id=snapshot.identity.union_id,
-        department_id=int(snapshot.identity.department_id),
-        snapshot_json=raw,
-        snapshot_sha256=snapshot_sha256(snapshot),
-        uploads=(),
-    )
-    materializer = SnapshotSubmissionMaterializer(
-        workflow=workflow,
-        staging=client.app.state.reimbursement_staging,
-        excel_template_path=client.app.state.settings.excel_template_path,
-    )
-
-    def new_accounting_must_not_run(*args, **kwargs):
-        raise AssertionError("Legacy snapshots must retain their original validation contract")
-
-    monkeypatch.setattr(
-        "app.services.oa_reimbursement.travel_accounting_options", new_accounting_must_not_run
-    )
-
-    async def heartbeat():
-        return None
-
-    asyncio.run(materializer.validate(job, heartbeat=heartbeat))
-    assert workflow.travel_detail_calls > 0
 
 
 def test_validation_shares_membership_pages_across_related_approvals(

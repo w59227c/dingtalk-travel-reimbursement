@@ -146,16 +146,7 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
 class ReimbursementDraftInput(ExcelGenerateRequest):
     """Editable values whose authoritative result is recalculated by the server."""
 
-    # Stored drafts created before receipt provenance existed have no version field.
-    # Keep that absence observable as v0 so the UI/server can migrate them safely
-    # instead of treating every terminal OCR result as a newly recovered line.
-    ocr_disposition_version: int = Field(
-        default=0,
-        alias="ocrDispositionVersion",
-        ge=0,
-        le=CURRENT_OCR_DISPOSITION_VERSION,
-        strict=True,
-    )
+    ocr_disposition_version: Literal[1] = Field(default=1, alias="ocrDispositionVersion")
     company_value: str = Field(default="", alias="companyValue", max_length=2048)
     accounting_source_verified: bool = Field(
         default=False, alias="accountingSourceVerified", strict=True

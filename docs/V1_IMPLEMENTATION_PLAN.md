@@ -251,7 +251,7 @@ interface TripInput {
 
 - `key`
 - `value`
-- 初始设置：五个类型标准 `100.00/100.00/150.00/50.00/100.00`，以及 `calculation_mode=half_day_12`。旧库的 `subsidy_per_day` 只在迁移时安全继承给商务出差和市外项目短期；非法旧值不静默覆盖，而是保持配置错误并 fail-closed。
+- 初始设置：五个类型标准 `100.00/100.00/150.00/50.00/100.00`，以及 `calculation_mode=half_day_12`。
 - 这些值只提供 Excel 计算标准，不构成预算、审批或合规判断；特殊类型的用户确认值只存在于当前页面状态和本次生成请求中，不入库形成报销历史。
 
 `sessions`
@@ -305,7 +305,7 @@ interface TripInput {
 
 - 一个部门：自动选中。
 - 多个部门：页面要求用户从后端返回的合法列表中选择；不能自由输入。
-- 用户先通过 `/api/me/department` 选择合法部门；Excel 生成接口不再接收 `departmentId` 或部门名称，只写入当前 Session 已确认的部门。
+- 用户通过 `/api/me/department/from-travel-approval` 由已核验出差审批绑定部门；Excel 生成接口不接收 `departmentId` 或部门名称，只写入当前 Session 已确认的部门。
 - 不默认把 `dept_id_list[0]` 当主部门，因为官方文档没有该保证。
 
 ## 7. 文件、文本提取与 OCR 管线
@@ -473,17 +473,15 @@ V1 实现顺序：
 | GET | `/api/ready` | 无 | SQLite、模板、临时目录及已启用本地 OCR 的就绪检查 |
 | GET | `/api/config/public` | 无 | 返回 CorpId、Client ID、上传限制等非敏感配置 |
 | POST | `/api/auth/dingtalk` | authCode | 钉钉免登并建立 Session |
-| POST | `/api/auth/logout` | Session + CSRF | 退出并清理当前临时文件 |
-| GET | `/api/me` | Session | 当前用户、合法部门列表、管理员标识 |
-| POST | `/api/me/department` | Session + CSRF | 选择当前合法部门 |
+| POST | `/api/auth/logout` | Session + CSRF | 退出并清理当前上传缓存 |
+| GET | `/api/me` | Session | 当前用户和管理员标识 |
+| POST | `/api/me/department/from-travel-approval` | Session + CSRF | 按已核验出差审批绑定报销部门 |
 | GET | `/api/settings` | Session | 读取补助显示配置 |
 | GET | `/api/expense-categories` | Session | 读取 17 类集中费用契约及手工可选标记 |
-| POST | `/api/calculate/subsidy` | Session + CSRF | 服务端计算补助 |
 | POST | `/api/calculate/totals` | Session + CSRF | 重算费用、补助、总额、票据数和人民币大写 |
-| POST | `/api/files/upload` | Session + CSRF | 单票据上传，返回一个临时 ID（兼容单元素 `files` 数组） |
-| DELETE | `/api/files/{fileId}` | Session + CSRF | 应用内部取消/竞态清理本 Session 临时票据；员工页面不提供入口 |
-| POST | `/api/ocr` | Session + CSRF | 单个文件同步识别，便于逐文件进度和重试 |
-| POST | `/api/excel/generate` | Session + CSRF | 后端校验、重算并下载 Excel |
+| POST | `/api/reimbursements/drafts/{draftId}/files` | Session + CSRF | 上传并持久保存一份报销材料 |
+| POST | `/api/reimbursements/drafts/{draftId}/files/{fileId}/ocr` | Session + CSRF | 识别一份已保存材料 |
+| POST | `/api/reimbursements/drafts/{draftId}/excel-preview` | Session + CSRF | 从当前已保存报销生成 Excel 预览 |
 | PUT | `/api/admin/settings` | Admin + CSRF | 修改五项境内每日补助标准；计算模式固定为 `half_day_12` |
 
 管理员由 `ADMIN_USER_IDS` 环境变量配置。前端路由守卫只改善体验，后端依赖注入才是权限边界。
@@ -734,7 +732,7 @@ dingtalk-travel-reimbursement/
 - pypdf 原生文本提取和质量门槛。
 - 单页 PDF 直接本地 OCR、图片预处理和 PaddleOCR 3.x 回退。
 - `TrainTicketParser`、按明确交通工具类型保守分类的 `GenericInvoiceParser` 和 `FallbackParser`。
-- 单文件 `/api/ocr`；前端顺序处理并实时更新 1/N 进度。
+- 单文件持久 OCR；前端顺序处理并实时更新 1/N 进度。
 - 候选整体置信度、警告和人工确认。
 
 文档依据：

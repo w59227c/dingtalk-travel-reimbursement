@@ -1,4 +1,3 @@
-import hashlib
 import json
 from dataclasses import replace
 from datetime import date
@@ -77,15 +76,9 @@ def test_native_range_command_emits_one_field_and_roundtrips():
     )
     assert _form_value_matches(ranges[0], actual)
     for duration in (2, 3, "2", "3"):
-        import json
-
         returned = replace(actual, value=json.dumps(["2026-09-01", "2026-09-03", duration]))
         assert _form_value_matches(ranges[0], returned)
     assert not _form_value_matches(ranges[0], replace(actual, value='["2026-09-01","2026-09-04"]'))
-    with pytest.raises((ApiError, ValueError)):
-        parse_snapshot(
-            serialize_snapshot(snapshot).replace('"snapshotVersion":6', '"snapshotVersion":4')
-        )
 
 
 def test_travel_range_read_and_mapping():
@@ -100,24 +93,6 @@ def test_travel_range_read_and_mapping():
         start_date_component_id="range",
         end_date_component_id="range",
     ) == (date(2026, 9, 1), date(2026, 9, 3))
-
-
-def test_old_version_four_individual_dates_still_roundtrip():
-    snapshot = build_snapshot(_source()).model_copy(update={"snapshot_version": 4})
-    raw = serialize_snapshot(snapshot)
-    # Pin canonical bytes independently of the parser round-trip: adding a
-    # defaulted v5 field must not silently change persisted v4 content hashes.
-    assert hashlib.sha256(raw.encode()).hexdigest() == (
-        "9a0878381c1568a051c2231b870663de12d7dddbc047f639864b85a4d25c7b41"
-    )
-    content = json.loads(raw)
-    assert all(
-        "travelTypeComponentId" not in profile and "travelTypeMappings" not in profile
-        for profile in content["template"]["travelProfiles"]
-    )
-    assert all("sourceTravelTypeValue" not in item for item in content["relatedApprovals"])
-    assert serialize_snapshot(parse_snapshot(raw)) == raw
-    assert len(build_create_command(snapshot, _attachments(snapshot)).form_values) == 10
 
 
 def test_partial_range_mapping_rejected():
@@ -170,6 +145,5 @@ def test_production_numeric_elapsed_days_readback():
 
 @pytest.mark.parametrize("duration", [True, False, -1, 1.5, 99, "7天", None, {}, []])
 def test_range_rejects_invalid_duration_metadata(duration):
-    import json
 
     assert parse_date_range(json.dumps(["2026-06-30", "2026-07-07", duration])) is None

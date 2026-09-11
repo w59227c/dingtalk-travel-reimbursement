@@ -16,8 +16,6 @@ from app.services.temp_files import (
     new_upload_budget,
     retained_usage,
 )
-from tests.conftest import mock_login
-from tests.test_resource_hardening import png_bytes
 
 
 async def multipart_chunks(
@@ -147,30 +145,7 @@ async def test_file_part_and_field_count_limits_are_stable(settings_factory) -> 
     assert_no_spool_files(settings)
 
 
-def test_upload_admission_is_held_before_parser_runs(client_factory, monkeypatch) -> None:
-    client = client_factory(auth_mock_enabled=True)
-    csrf = str(mock_login(client)["csrfToken"])
-    original_parse = parse_upload_files
-    observed_cleanup_admission: list[bool] = []
-
-    async def observing_parse(headers, stream, settings, budget):
-        with client.app.state.file_coordinator.try_upload_cleanup_lease() as acquired:
-            observed_cleanup_admission.append(acquired)
-        return await original_parse(headers, stream, settings, budget)
-
-    monkeypatch.setattr("app.api.files.parse_upload_files", observing_parse)
-    response = client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf},
-        files=[("files[]", ("receipt.png", png_bytes(), "image/png"))],
-    )
-    assert response.status_code == 200
-    assert observed_cleanup_admission == [False]
-    assert_no_spool_files(client.app.state.settings)
-
-
-def test_orphan_spool_is_counted_cleaned_and_can_reject_global_peak(
-    client_factory,
+def test_orphan_spool_is_counted_and_cleaned(
     settings_factory,
 ) -> None:
     settings = settings_factory(
@@ -188,26 +163,3 @@ def test_orphan_spool_is_counted_cleaned_and_can_reject_global_peak(
     os.utime(orphan, (old.timestamp(), old.timestamp()))
     assert cleanup_expired_temp_files(settings) == 1
     assert not orphan.exists()
-
-    client = client_factory(
-        auth_mock_enabled=True,
-        upload_max_file_bytes=100,
-        upload_max_request_bytes=1_000,
-        upload_spool_memory_bytes=1,
-        session_max_bytes=100,
-        temp_storage_max_bytes=120,
-    )
-    csrf = str(mock_login(client)["csrfToken"])
-    spool = prepare_spool_directory(client.app.state.settings)
-    (spool / "upload-orphan.spool").write_bytes(b"x" * 60)
-    other_session = client.app.state.settings.temp_dir / ("b" * 64)
-    other_session.mkdir(mode=0o700)
-    (other_session / "retained.png").write_bytes(b"x" * 50)
-    response = client.post(
-        "/api/files/upload",
-        headers={"X-CSRF-Token": csrf},
-        files=[("files[]", ("receipt.png", png_bytes(), "image/png"))],
-    )
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "TEMP_STORAGE_FULL"
-    assert [path.name for path in spool.iterdir()] == ["upload-orphan.spool"]

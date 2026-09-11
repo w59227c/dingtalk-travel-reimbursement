@@ -534,36 +534,31 @@ class SnapshotSubmissionMaterializer:
                     "所选出差审批状态或日期已变化，请重新选择",
                     409,
                 )
-            # Legacy immutable snapshots predate source accounting mappings.
-            # Resume them under their original contract, retaining all other checks.
-            if snapshot.snapshot_version < 4:
-                continue
-            if snapshot.snapshot_version >= 5:
-                option, source_value, type_reason = travel_instance_type_option(
-                    instance,
-                    source_schema=schema_by_process_code[profile.process_code],
-                    component_id=profile.travel_type_component_id,
-                    mappings=(
-                        {
-                            key: FormOption(**value.model_dump())
-                            for key, value in profile.travel_type_mappings.items()
-                        }
-                        if profile.travel_type_mappings is not None
-                        else None
-                    ),
-                    fixed_option=FormOption(**profile.travel_type_option.model_dump()),
+            option, source_value, type_reason = travel_instance_type_option(
+                instance,
+                source_schema=schema_by_process_code[profile.process_code],
+                component_id=profile.travel_type_component_id,
+                mappings=(
+                    {
+                        key: FormOption(**value.model_dump())
+                        for key, value in profile.travel_type_mappings.items()
+                    }
+                    if profile.travel_type_mappings is not None
+                    else None
+                ),
+                fixed_option=FormOption(**profile.travel_type_option.model_dump()),
+            )
+            if (
+                type_reason
+                or source_value != related.source_travel_type_value
+                or option is None
+                or option.as_dict() != snapshot.selections.travel_type.model_dump()
+            ):
+                raise ApiError(
+                    "TRAVEL_APPROVAL_TYPE_CHANGED",
+                    type_reason or "出差审批类别已变化，请重新关联后提交",
+                    409,
                 )
-                if (
-                    type_reason
-                    or source_value != related.source_travel_type_value
-                    or option is None
-                    or option.as_dict() != snapshot.selections.travel_type.model_dump()
-                ):
-                    raise ApiError(
-                        "TRAVEL_APPROVAL_TYPE_CHANGED",
-                        type_reason or "出差审批类别已变化，请重新关联后提交",
-                        409,
-                    )
             fields = {field.logical_key: field.component_id for field in snapshot.template.fields}
             components = {component.component_id: component for component in schema.components}
             company, budget, reason = travel_accounting_options(
@@ -988,20 +983,19 @@ class DatabaseSubmissionState:
         job = self.load_job(lease)
         if job.snapshot_json != snapshot_json or job.snapshot_sha256 != snapshot_sha256:
             raise ReimbursementSubmissionConflict("submission snapshot changed")
-        snapshot = parse_snapshot(snapshot_json, expected_sha256=snapshot_sha256)
-        if snapshot.snapshot_version >= 2:
-            self._ensure_generated_file(
-                lease,
-                job,
-                role=ReimbursementUploadRole.GENERATED_PDF,
-                sort_order=0,
-                generate=self._materializer.generate_bundle,
-            )
+        parse_snapshot(snapshot_json, expected_sha256=snapshot_sha256)
+        self._ensure_generated_file(
+            lease,
+            job,
+            role=ReimbursementUploadRole.GENERATED_PDF,
+            sort_order=0,
+            generate=self._materializer.generate_bundle,
+        )
         self._ensure_generated_file(
             lease,
             job,
             role=ReimbursementUploadRole.GENERATED_EXCEL,
-            sort_order=(1 if snapshot.snapshot_version >= 2 else len(snapshot.original_files)),
+            sort_order=1,
             generate=self._materializer.generate_excel,
         )
         return lease
@@ -1261,41 +1255,39 @@ class DatabaseSubmissionState:
             snapshot = parse_snapshot(
                 submission.form_snapshot_json, expected_sha256=submission.snapshot_sha256
             )
-            if snapshot.snapshot_version >= 2:
-                validate_draft_file_references(
-                    database,
-                    draft_id=submission.draft_id,
-                    draft_input=draft_input_from_snapshot(snapshot),
-                    require_terminal_disposition=True,
-                    require_submission_proofs=True,
+            validate_draft_file_references(
+                database,
+                draft_id=submission.draft_id,
+                draft_input=draft_input_from_snapshot(snapshot),
+                require_terminal_disposition=True,
+                require_submission_proofs=True,
+            )
+            sources = database.scalars(
+                select(ReimbursementDraftFile).where(
+                    ReimbursementDraftFile.draft_id == submission.draft_id,
+                    ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,
                 )
-                sources = database.scalars(
-                    select(ReimbursementDraftFile).where(
-                        ReimbursementDraftFile.draft_id == submission.draft_id,
-                        ReimbursementDraftFile.file_status
-                        == ReimbursementDraftFileStatus.ACTIVE.value,
-                    )
-                ).all()
-                actual = {
-                    (item.id, item.storage_key, item.size_bytes, item.sha256, item.processing_role)
-                    for item in sources
-                }
-                expected = {
-                    (
-                        item.draft_file_id,
-                        item.storage_key,
-                        item.size_bytes,
-                        item.sha256,
-                        item.processing_role,
-                    )
-                    for item in snapshot.original_files
-                }
-                if actual != expected:
-                    raise ApiError(
-                        "REIMBURSEMENT_ATTACHMENT_MANIFEST_CHANGED",
-                        "待提交票据与已确认内容不一致，请重新确认",
-                        409,
-                    )
+            ).all()
+            actual = {
+                (item.id, item.storage_key, item.size_bytes, item.sha256, item.processing_role)
+                for item in sources
+            }
+            expected = {
+                (
+                    item.draft_file_id,
+                    item.storage_key,
+                    item.size_bytes,
+                    item.sha256,
+                    item.processing_role,
+                )
+                for item in snapshot.original_files
+            }
+            if actual != expected:
+                raise ApiError(
+                    "REIMBURSEMENT_ATTACHMENT_MANIFEST_CHANGED",
+                    "待提交票据与已确认内容不一致，请重新确认",
+                    409,
+                )
             changed = checkpoint_oa_create(
                 database,
                 lease=_quota_lease(lease),
@@ -2575,44 +2567,15 @@ def _validate_job_identity(
 
 
 def _validate_original_manifest(
-    snapshot: ReimbursementSnapshot,
+    _snapshot: ReimbursementSnapshot,
     uploads: Sequence[SubmissionUpload],
 ) -> None:
-    if snapshot.snapshot_version >= 2:
-        if any(item.role == ReimbursementUploadRole.ORIGINAL.value for item in uploads):
-            raise ApiError(
-                "REIMBURSEMENT_ATTACHMENT_MANIFEST_CHANGED",
-                "票据汇总提交不应包含单独原始附件",
-                409,
-            )
-        return
-    originals = tuple(
-        item
-        for item in sorted(uploads, key=lambda value: (value.sort_order, value.id))
-        if item.role == "ORIGINAL"
-    )
-    if len(originals) != len(snapshot.original_files):
+    if any(item.role == ReimbursementUploadRole.ORIGINAL.value for item in uploads):
         raise ApiError(
             "REIMBURSEMENT_ATTACHMENT_MANIFEST_CHANGED",
-            "原始附件清单与锁定快照不一致",
+            "票据汇总提交不应包含单独原始附件",
             409,
         )
-    for expected, actual in zip(snapshot.original_files, originals, strict=True):
-        if (
-            actual.source_draft_file_id != expected.draft_file_id
-            or actual.sort_order != expected.sort_order
-            or actual.local_storage_key != expected.storage_key
-            or actual.file_name != expected.file_name
-            or actual.file_type != expected.file_type
-            or actual.media_type != expected.media_type
-            or actual.size_bytes != expected.size_bytes
-            or actual.sha256 != expected.sha256
-        ):
-            raise ApiError(
-                "REIMBURSEMENT_ATTACHMENT_MANIFEST_CHANGED",
-                "原始附件清单与锁定快照不一致",
-                409,
-            )
 
 
 def _quota_lease(lease: SubmissionLease) -> QuotaSubmissionLease:

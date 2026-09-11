@@ -33,14 +33,12 @@ def upgrade() -> None:
         "CREATE UNIQUE INDEX uq_projects_project_name_nocase ON projects(lower(project_name))"
     )
     op.execute(
-        "INSERT OR IGNORE INTO settings (key, value) VALUES "
-        "('subsidy_per_day', '100.00'), "
-        "('calculation_mode', 'half_day_12')"
+        "INSERT OR IGNORE INTO settings (key, value) VALUES ('calculation_mode', 'half_day_12')"
     )
 
 
 def downgrade() -> None:
-    op.execute("DELETE FROM settings WHERE key IN ('subsidy_per_day', 'calculation_mode')")
+    op.execute("DELETE FROM settings WHERE key = 'calculation_mode'")
     op.drop_index("uq_projects_project_name_nocase", table_name="projects")
     op.drop_index("uq_projects_project_code_nocase", table_name="projects")
     with op.batch_alter_table("sessions") as batch_op:

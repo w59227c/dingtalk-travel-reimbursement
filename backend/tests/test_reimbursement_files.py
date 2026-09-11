@@ -6,7 +6,6 @@ import json
 import stat
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -31,13 +30,6 @@ from app.models.session import UserSession
 from app.ocr.engine import FakeOcrEngine
 from app.ocr.types import OcrLine
 from app.services.file_coordination import SessionFilesRetired, UploadBusy
-from app.services.oa_reimbursement_payload import (
-    draft_input_from_snapshot,
-    hash_excel_template,
-    parse_snapshot,
-    serialize_snapshot,
-    snapshot_sha256,
-)
 from app.services.reimbursement_drafts import DraftActor
 from app.services.reimbursement_files import recognize_draft_file
 from app.services.reimbursement_quota import DraftFileOwner
@@ -104,105 +96,6 @@ def _insert_draft(client, *, revision: int = 1, amount: str = "44.89") -> str:
         return draft.id
 
 
-def _insert_locked_snapshot_draft(
-    client,
-    *,
-    first_receipt_count: int | None = None,
-) -> tuple[str, str]:
-    snapshot_path = Path(__file__).parent / "fixtures" / "reimbursement_snapshot_v3.json"
-    snapshot = parse_snapshot(snapshot_path.read_text(encoding="utf-8").strip())
-    snapshot = snapshot.model_copy(
-        update={
-            "identity": snapshot.identity.model_copy(
-                update={"corp_id": "corp-fixed", "user_id": "mock-user"}
-            ),
-            "excel": snapshot.excel.model_copy(
-                update={
-                    "template_sha256": hash_excel_template(
-                        client.app.state.settings.excel_template_path
-                    )
-                }
-            ),
-        }
-    )
-    if first_receipt_count is not None:
-        items = list(snapshot.input.items)
-        dismissed_ids = list(snapshot.input.dismissed_ocr_file_ids)
-        if items[0].source_file_id is not None:
-            dismissed_ids.append(items[0].source_file_id)
-        items[0] = items[0].model_copy(
-            update={"receipt_count": first_receipt_count, "source_file_id": None}
-        )
-        snapshot = snapshot.model_copy(
-            update={
-                "input": snapshot.input.model_copy(
-                    update={
-                        "items": tuple(items),
-                        "dismissed_ocr_file_ids": tuple(dismissed_ids),
-                    }
-                ),
-                "totals": snapshot.totals.model_copy(
-                    update={"receipt_count": sum(item.receipt_count for item in items)}
-                ),
-            }
-        )
-    snapshot_json = serialize_snapshot(snapshot)
-    draft_input = draft_input_from_snapshot(snapshot)
-    input_data = draft_input.model_dump(mode="json", by_alias=True, exclude_none=True)
-    if draft_input.trip is not None:
-        input_data["trip"]["startTime"] = draft_input.trip.start_time.strftime("%H:%M")
-        input_data["trip"]["endTime"] = draft_input.trip.end_time.strftime("%H:%M")
-    input_json = json.dumps(
-        input_data,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    with client.app.state.database_session_factory() as database:
-        draft = ReimbursementDraft(
-            id=snapshot.draft_id,
-            corp_id="corp-fixed",
-            owner_user_id="mock-user",
-            status="LOCKED",
-            revision=snapshot.draft_revision + 1,
-            department_id=snapshot.identity.department_id,
-            department_name=snapshot.identity.department_name,
-            template_process_code=snapshot.template.process_code,
-            template_config_version=snapshot.template.config_version,
-            schema_fingerprint=snapshot.template.schema_fingerprint,
-            input_json=input_json,
-            related_instance_ids_json=json.dumps(
-                [item.process_instance_id for item in snapshot.related_approvals]
-            ),
-            expires_at=utc_now() + timedelta(days=1),
-            locked_at=utc_now(),
-        )
-        database.add(draft)
-        database.add(
-            ReimbursementSubmission(
-                draft_id=draft.id,
-                corp_id=draft.corp_id,
-                originator_user_id=draft.owner_user_id,
-                originator_union_id=snapshot.identity.union_id,
-                originator_name=snapshot.identity.name,
-                department_id=draft.department_id,
-                department_name=draft.department_name,
-                template_process_code=draft.template_process_code,
-                template_config_version=draft.template_config_version,
-                schema_fingerprint=draft.schema_fingerprint,
-                snapshot_version=snapshot.snapshot_version,
-                form_snapshot_json=snapshot_json,
-                related_instance_ids_json=draft.related_instance_ids_json,
-                snapshot_sha256=snapshot_sha256(snapshot),
-                idempotency_key_hash="c" * 64,
-                status="QUEUED",
-                status_version=1,
-            )
-        )
-        database.commit()
-    return snapshot.draft_id, str(snapshot.totals.total_amount)
-
-
 def _upload(
     client,
     csrf: str,
@@ -220,54 +113,6 @@ def _upload(
         headers={"X-CSRF-Token": csrf},
         files=[("files[]", (name, content or _image_bytes(), content_type))],
     )
-
-
-def _store_legacy_complete_ocr(
-    client,
-    *,
-    draft_id: str,
-    file_id: str,
-    description: str = "打车费",
-    amount: str = "44.89",
-    duplicate_line: bool = False,
-) -> None:
-    with client.app.state.database_session_factory() as database:
-        draft = database.get(ReimbursementDraft, draft_id)
-        file = database.get(ReimbursementDraftFile, file_id)
-        assert draft is not None and file is not None
-        file.ocr_status = "COMPLETE"
-        file.ocr_result_json = json.dumps(
-            {
-                "fileId": file.id,
-                "type": "taxi",
-                "categoryId": "other",
-                "categoryName": "其他",
-                "date": "2026-09-01",
-                "description": description,
-                "amount": amount,
-                "receiptCount": 1,
-                "source": "ocr",
-                "confidence": "0.95",
-                "warnings": [],
-                "status": "recognized",
-                "error": None,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        legacy = json.loads(draft.input_json)
-        legacy.pop("ocrDispositionVersion", None)
-        legacy.pop("dismissedOcrFileIds", None)
-        if duplicate_line:
-            legacy["items"].append(dict(legacy["items"][0]))
-        draft.input_json = json.dumps(
-            legacy,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        database.commit()
 
 
 def test_upload_is_durable_private_and_recovers_after_restart(client_factory) -> None:
@@ -897,108 +742,6 @@ def test_delete_file_atomically_clears_linked_item_and_ocr_disposition(
     assert after_dismissed["input"]["dismissedOcrFileIds"] == []
 
 
-def test_delete_legacy_exact_match_removes_line_but_keeps_other_unresolved_v0(
-    client_factory,
-) -> None:
-    client = client_factory(auth_mock_enabled=True)
-    csrf = str(mock_login(client)["csrfToken"])
-    draft_id = _insert_draft(client)
-    first = _upload(client, csrf, draft_id, revision=1)
-    second = _upload(client, csrf, draft_id, revision=2, name="second.png")
-    first_id = first.json()["data"]["file"]["id"]
-    second_id = second.json()["data"]["file"]["id"]
-    _store_legacy_complete_ocr(client, draft_id=draft_id, file_id=first_id)
-    with client.app.state.database_session_factory() as database:
-        second_file = database.get(ReimbursementDraftFile, second_id)
-        assert second_file is not None
-        second_file.ocr_status = "COMPLETE"
-        second_file.ocr_result_json = json.dumps(
-            {
-                "fileId": second_id,
-                "type": "train",
-                "categoryId": "other",
-                "categoryName": "其他",
-                "date": "2026-09-02",
-                "description": "旧草稿中已删除的另一行",
-                "amount": "99.00",
-                "receiptCount": 1,
-                "source": "ocr",
-                "confidence": "0.90",
-                "warnings": [],
-                "status": "recognized",
-                "error": None,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        database.commit()
-
-    deleted = client.delete(
-        f"/api/reimbursements/drafts/{draft_id}/files/{first_id}",
-        params={"expectedRevision": 3},
-        headers={"X-CSRF-Token": csrf},
-    )
-
-    assert deleted.status_code == 200, deleted.text
-    refreshed = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
-    assert refreshed["input"]["ocrDispositionVersion"] == 0
-    assert refreshed["input"]["items"] == []
-    assert refreshed["input"]["dismissedOcrFileIds"] == []
-
-
-def test_rerole_legacy_exact_match_to_attachment_removes_the_linked_line(
-    client_factory,
-) -> None:
-    client = client_factory(auth_mock_enabled=True)
-    csrf = str(mock_login(client)["csrfToken"])
-    draft_id = _insert_draft(client)
-    uploaded = _upload(client, csrf, draft_id, revision=1)
-    file_id = uploaded.json()["data"]["file"]["id"]
-    _store_legacy_complete_ocr(client, draft_id=draft_id, file_id=file_id)
-
-    changed = client.patch(
-        f"/api/reimbursements/drafts/{draft_id}/files/{file_id}",
-        headers={"X-CSRF-Token": csrf},
-        json={"expectedRevision": 2, "role": "ATTACHMENT_ONLY"},
-    )
-
-    assert changed.status_code == 200, changed.text
-    assert changed.json()["data"]["file"]["role"] == "ATTACHMENT_ONLY"
-    refreshed = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
-    assert refreshed["input"]["ocrDispositionVersion"] == 0
-    assert refreshed["input"]["items"] == []
-    assert refreshed["totals"]["expenseTotal"] == "0.00"
-
-
-def test_delete_legacy_ambiguous_match_does_not_remove_manual_lines(
-    client_factory,
-) -> None:
-    client = client_factory(auth_mock_enabled=True)
-    csrf = str(mock_login(client)["csrfToken"])
-    draft_id = _insert_draft(client)
-    uploaded = _upload(client, csrf, draft_id, revision=1)
-    file_id = uploaded.json()["data"]["file"]["id"]
-    _store_legacy_complete_ocr(
-        client,
-        draft_id=draft_id,
-        file_id=file_id,
-        duplicate_line=True,
-    )
-
-    deleted = client.delete(
-        f"/api/reimbursements/drafts/{draft_id}/files/{file_id}",
-        params={"expectedRevision": 2},
-        headers={"X-CSRF-Token": csrf},
-    )
-
-    assert deleted.status_code == 200, deleted.text
-    refreshed = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
-    assert refreshed["input"]["ocrDispositionVersion"] == 0
-    assert len(refreshed["input"]["items"]) == 2
-    assert all("sourceFileId" not in item for item in refreshed["input"]["items"])
-
-
 def test_delete_releases_sync_session_before_physical_cleanup(
     client_factory,
     monkeypatch,
@@ -1190,72 +933,6 @@ def test_excel_preview_recalculates_from_saved_draft_without_submission_side_eff
     with client.app.state.database_session_factory() as database:
         assert database.scalar(select(func.count()).select_from(ReimbursementSubmission)) == 0
         assert database.scalar(select(func.count()).select_from(ReimbursementUpload)) == 0
-
-
-def test_locked_draft_uses_submission_snapshot_totals_after_rate_changes(
-    client_factory,
-    monkeypatch,
-) -> None:
-    from app.services import subsidy_calculation
-
-    client = client_factory(auth_mock_enabled=True)
-    mock_login(client)
-    draft_id, expected_total = _insert_locked_snapshot_draft(client)
-    monkeypatch.setattr(
-        subsidy_calculation,
-        "get_expense_settings",
-        lambda _database: type(
-            "ChangedRates",
-            (),
-            {"daily_rate_for": staticmethod(lambda _trip_type: Decimal("999.00"))},
-        )(),
-    )
-
-    response = client.get(f"/api/reimbursements/drafts/{draft_id}")
-
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["status"] == "LOCKED"
-    assert response.json()["data"]["totals"]["totalAmount"] == expected_total
-
-
-def test_locked_draft_excel_preview_does_not_depend_on_current_catalog_or_rates(
-    client_factory,
-    monkeypatch,
-) -> None:
-    from app.services import reimbursement_files, subsidy_calculation
-
-    client = client_factory(auth_mock_enabled=True)
-    csrf = str(mock_login(client)["csrfToken"])
-    draft_id, expected_total = _insert_locked_snapshot_draft(client)
-
-    def fail_current_configuration(*_args, **_kwargs):
-        raise AssertionError("locked preview must not read current configuration")
-
-    monkeypatch.setattr(
-        reimbursement_files,
-        "require_submission_ready_catalog",
-        fail_current_configuration,
-    )
-    monkeypatch.setattr(
-        subsidy_calculation,
-        "get_expense_settings",
-        fail_current_configuration,
-    )
-
-    response = client.post(
-        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
-        headers={"X-CSRF-Token": csrf},
-        json={"expectedRevision": 5},
-    )
-
-    assert response.status_code == 200, response.text
-    workbook = load_workbook(io.BytesIO(response.content), data_only=True)
-    try:
-        worksheet = workbook.active
-        assert str(worksheet[EXCEL_TEMPLATE.total_amount_cell].value) == expected_total
-        assert worksheet[EXCEL_TEMPLATE.project_cell].value == "26007 项目"
-    finally:
-        workbook.close()
 
 
 def test_excel_preview_releases_sync_session_before_generation(

@@ -219,7 +219,6 @@ def create_reimbursement_draft(
         catalog=catalog,
         draft_input=draft_input,
         max_items=max_items,
-        validate_project=True,
         allow_partial=True,
     )
     binding = CatalogBinding.from_catalog(catalog)
@@ -326,18 +325,12 @@ def update_reimbursement_draft(
             "project": stored_input.project if has_related else None,
         }
     )
-    draft_input = _normalize_legacy_ocr_dispositions(
-        database,
-        draft_id=draft.id,
-        draft_input=draft_input,
-    )
     draft_input = apply_ocr_evidence(database, draft_id=draft.id, draft_input=draft_input)
     calculation = validate_and_calculate_input(
         database,
         catalog=catalog,
         draft_input=draft_input,
         max_items=max_items,
-        validate_project=True,
         allow_partial=True,
     )
     validate_draft_file_references(
@@ -401,18 +394,12 @@ def mark_reimbursement_draft_review_ready(
     draft_input = _stored_input(draft)
     if not draft_input.accounting_source_verified:
         raise _not_ready_error("请重新确认关联出差审批，以核验所属公司和预算代码")
-    draft_input = _normalize_legacy_ocr_dispositions(
-        database,
-        draft_id=draft.id,
-        draft_input=draft_input,
-    )
     draft_input = apply_ocr_evidence(database, draft_id=draft.id, draft_input=draft_input)
     calculation = validate_and_calculate_input(
         database,
         catalog=catalog,
         draft_input=draft_input,
         max_items=max_items,
-        validate_project=True,
     )
     related = database.scalars(
         select(ReimbursementDraftRelatedApproval)
@@ -529,7 +516,6 @@ def validate_and_calculate_input(
     catalog: OaTemplateCatalogContract,
     draft_input: ReimbursementDraftInput,
     max_items: int,
-    validate_project: bool,
     allow_partial: bool = False,
 ) -> DraftCalculation:
     if len(draft_input.items) > max_items:
@@ -543,8 +529,7 @@ def validate_and_calculate_input(
     budget = None
     if draft_input.budget_code_value or not allow_partial:
         budget = _require_exact_option(catalog, "budgetCode", draft_input.budget_code_value)
-    # The obsolete project argument stays accepted for stored callers, but the
-    # currently selected OA option is always authoritative for new saved input.
+    # The selected OA budget option is authoritative for the generated workbook.
     draft_input = draft_input.model_copy(
         update={
             "project": BudgetProjectInput(mode="manual", text=budget.label) if budget else None,
@@ -789,11 +774,6 @@ def detach_draft_files_from_input(
     """Remove a batch of sources and proof links in one calculation."""
 
     draft_input = _stored_input(draft)
-    draft_input = _bind_unique_legacy_ocr_matches(
-        database,
-        draft_id=draft.id,
-        draft_input=draft_input,
-    )
     remaining_items = [
         item.model_copy(
             update={
@@ -1079,127 +1059,6 @@ def _canonical_input_data(draft_input: ReimbursementDraftInput) -> dict[str, obj
     if draft_input.editing_state is not None:
         result["editingState"] = draft_input.editing_state.model_dump(mode="json", by_alias=True)
     return result
-
-
-def _normalize_legacy_ocr_dispositions(
-    database: Session,
-    *,
-    draft_id: str,
-    draft_input: ReimbursementDraftInput,
-) -> ReimbursementDraftInput:
-    """Upgrade only unambiguous legacy OCR links; never infer a dismissal.
-
-    A v0 draft cannot prove whether an unmatched OCR result was never delivered,
-    edited, or deliberately removed. Bind a receipt only when its complete
-    calculation fields match exactly one unlinked line and no other receipt has
-    the same fields. Any remaining terminal receipt stays unresolved, and the
-    normal v1 invariant blocks save/review until the user explicitly adopts or
-    ignores it.
-    """
-
-    if draft_input.ocr_disposition_version != 0:
-        return draft_input
-
-    with_matches = _bind_unique_legacy_ocr_matches(
-        database,
-        draft_id=draft_id,
-        draft_input=draft_input,
-    )
-    return with_matches.model_copy(
-        update={"ocr_disposition_version": CURRENT_OCR_DISPOSITION_VERSION}
-    )
-
-
-def _bind_unique_legacy_ocr_matches(
-    database: Session,
-    *,
-    draft_id: str,
-    draft_input: ReimbursementDraftInput,
-) -> ReimbursementDraftInput:
-    """Add provable v0 source links while preserving the v0 migration marker."""
-
-    if draft_input.ocr_disposition_version != 0:
-        return draft_input
-
-    linked_ids = {
-        item.source_file_id for item in draft_input.items if item.source_file_id is not None
-    }
-    decided_ids = linked_ids | set(draft_input.dismissed_ocr_file_ids)
-    terminal_files = database.scalars(
-        select(ReimbursementDraftFile)
-        .where(
-            ReimbursementDraftFile.draft_id == draft_id,
-            ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,
-            ReimbursementDraftFile.processing_role
-            == ReimbursementDraftFileRole.EXPENSE_SOURCE.value,
-            ReimbursementDraftFile.ocr_status.in_(
-                (
-                    ReimbursementOcrStatus.COMPLETE.value,
-                    ReimbursementOcrStatus.FAILED.value,
-                )
-            ),
-        )
-        .order_by(ReimbursementDraftFile.sort_order, ReimbursementDraftFile.id)
-    ).all()
-    item_matches: dict[tuple[object, ...], list[int]] = {}
-    updated_items = list(draft_input.items)
-    for index, item in enumerate(updated_items):
-        if item.source_file_id is not None:
-            continue
-        item_matches.setdefault(_legacy_item_match_key(item), []).append(index)
-    file_matches: dict[tuple[object, ...], list[ReimbursementDraftFile]] = {}
-    for file in terminal_files:
-        if file.id in decided_ids:
-            continue
-        key = _legacy_file_match_key(file)
-        if key is not None:
-            file_matches.setdefault(key, []).append(file)
-    for key, indexes in item_matches.items():
-        matching_files = file_matches.get(key, [])
-        if len(indexes) != 1 or len(matching_files) != 1:
-            continue
-        item_index = indexes[0]
-        updated_items[item_index] = updated_items[item_index].model_copy(
-            update={"source_file_id": matching_files[0].id}
-        )
-    return draft_input.model_copy(update={"items": updated_items})
-
-
-def _legacy_item_match_key(
-    item: ReimbursementDraftExpenseItemInput,
-) -> tuple[object, ...]:
-    value = item.model_dump(mode="json", by_alias=True)
-    return (
-        value.get("category"),
-        value.get("date"),
-        value.get("displayDate"),
-        value.get("description"),
-        value.get("amount"),
-        value.get("receiptCount"),
-    )
-
-
-def _legacy_file_match_key(file: ReimbursementDraftFile) -> tuple[object, ...] | None:
-    try:
-        value = json.loads(file.ocr_result_json or "null")
-    except (TypeError, ValueError):
-        return None
-    if (
-        not isinstance(value, dict)
-        or value.get("fileId") != file.id
-        or value.get("source") != "ocr"
-        or value.get("status") not in {"recognized", "failed"}
-    ):
-        return None
-    key = (
-        value.get("categoryId"),
-        value.get("date"),
-        value.get("date"),
-        value.get("description"),
-        value.get("amount"),
-        value.get("receiptCount"),
-    )
-    return None if any(part is None for part in key) else key
 
 
 def _draft_file_reference_ids(draft_input: ReimbursementDraftInput) -> set[str]:

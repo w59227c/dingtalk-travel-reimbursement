@@ -9,10 +9,8 @@ from app.core.errors import ApiError
 from app.database.session import get_db
 from app.domain.categories import EXPENSE_CATEGORIES
 from app.domain.expenses import calculate_expense_totals
-from app.domain.subsidy import calculate_subsidy
 from app.schemas.common import success
-from app.schemas.expenses import TotalsRequest, TripInput
-from app.services.application_settings import get_expense_settings
+from app.schemas.expenses import TotalsRequest
 from app.services.sessions import (
     CurrentSession,
     get_current_session,
@@ -24,35 +22,11 @@ from app.services.subsidy_calculation import calculate_trip_subsidies, request_t
 router = APIRouter(tags=["reimbursement"])
 
 
-def _calculate(body: TripInput, database: Session):
-    settings = get_expense_settings(database)
-    subsidy_trip_type = body.subsidy_trip_type()
-    return calculate_subsidy(
-        trip_type=subsidy_trip_type,
-        period=body.as_period(),
-        configured_daily_rate=settings.daily_rate_for(subsidy_trip_type),
-        policy_confirmed=body.policy_confirmed,
-        confirmed_effective_days=body.confirmed_effective_days,
-        no_subsidy_exception=body.no_subsidy_exception,
-        manual_subsidy_amount=body.manual_subsidy_amount,
-    )
-
-
 @router.get("/expense-categories")
 def expense_categories(
     _current: Annotated[CurrentSession, Depends(get_current_session)],
 ) -> dict[str, object]:
     return success([item.as_api_dict() for item in EXPENSE_CATEGORIES])
-
-
-@router.post("/calculate/subsidy")
-def subsidy(
-    body: TripInput,
-    database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
-) -> dict[str, object]:
-    require_selected_department(current)
-    return success(_calculate(body, database).as_api_dict())
 
 
 @router.post("/calculate/totals")

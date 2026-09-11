@@ -335,7 +335,7 @@ class SnapshotFormValue(_SnapshotModel):
 
 
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[1, 2, 3, 4, 5, 6] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6] = SNAPSHOT_VERSION
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
@@ -483,7 +483,6 @@ def collect_snapshot_source(
         catalog=catalog,
         draft_input=draft_input,
         max_items=max_items,
-        validate_project=True,
     )
     if calculation.canonical_json != draft.input_json:
         raise _snapshot_error("报销内容已变化，请重新确认后再提交")
@@ -526,8 +525,8 @@ def collect_snapshot_source(
         require_terminal_disposition=True,
         require_submission_proofs=True,
     )
-    # Upload sort_order is the compact manifest order, not the draft's
-    # historical slot. Deleted draft files may legitimately leave gaps.
+    # Upload sort_order is the compact manifest order. Deleted draft files may
+    # legitimately leave gaps in their own ordering.
     ordered_ids = list(
         dict.fromkeys(
             file_id
@@ -677,47 +676,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
 
 def serialize_snapshot(snapshot: ReimbursementSnapshot) -> str:
     snapshot = _require_snapshot(snapshot)
-    value = snapshot.model_dump(mode="json", by_alias=True)
-    if snapshot.snapshot_version < 5:
-        for profile in value["template"]["travelProfiles"]:
-            profile.pop("travelTypeComponentId", None)
-            profile.pop("travelTypeMappings", None)
-        for related in value["relatedApprovals"]:
-            related.pop("sourceTravelTypeValue", None)
-    if snapshot.snapshot_version < 6:
-        value["input"].pop("trips", None)
-        value.pop("subsidies", None)
-        if value["input"].get("trip"):
-            value["input"]["trip"].pop("relatedApprovalId", None)
-        if value.get("subsidy"):
-            value["subsidy"].pop("relatedApprovalId", None)
-    if snapshot.snapshot_version < 4:
-        for item in value["input"]["items"]:
-            item.pop("hotelBillFileIds", None)
-        if value["input"].get("trip"):
-            value["input"]["trip"].pop("manualSubsidyAmount", None)
-        for profile in value["template"]["travelProfiles"]:
-            profile.pop("companyComponentId", None)
-            profile.pop("budgetCodeComponentId", None)
-    if snapshot.snapshot_version < 3:
-        for item in value["input"]["items"]:
-            item.pop("paymentProofFileIds", None)
-            item.pop("railType", None)
-        for file in value["originalFiles"]:
-            file.pop("attachmentKind", None)
-    if snapshot.snapshot_version == 1:
-        for item in value["input"]["items"]:
-            for key in (
-                "itineraryFileIds",
-                "requiresItinerary",
-                "transportType",
-                "originalCurrency",
-                "originalAmount",
-                "cnyAmountConfirmed",
-                "requiresCnyConfirmation",
-            ):
-                item.pop(key, None)
-    return _canonical_json(value)
+    return _canonical_json(snapshot.model_dump(mode="json", by_alias=True))
 
 
 def snapshot_sha256(snapshot: ReimbursementSnapshot) -> str:
@@ -1326,32 +1285,6 @@ def _description_v1(
 
 
 def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
-    if snapshot.snapshot_version < 5 and (
-        any(
-            profile.travel_type_component_id is not None or profile.travel_type_mappings is not None
-            for profile in snapshot.template.travel_profiles
-        )
-        or any(item.source_travel_type_value is not None for item in snapshot.related_approvals)
-    ):
-        raise ValueError("legacy snapshots do not support source travel category mappings")
-    if snapshot.snapshot_version < 4 and (
-        any(item.hotel_bill_file_ids for item in snapshot.input.items)
-        or any(file.attachment_kind == "hotel_bill" for file in snapshot.original_files)
-        or (
-            snapshot.input.trip is not None
-            and (
-                snapshot.input.trip.trip_type == "overseas"
-                or snapshot.input.trip.manual_subsidy_amount is not None
-            )
-        )
-        or any(
-            profile.company_component_id is not None or profile.budget_code_component_id is not None
-            for profile in snapshot.template.travel_profiles
-        )
-    ):
-        raise ValueError(
-            "new hotel, overseas and approval mapping fields require snapshot version 4"
-        )
     if (
         not _POSITIVE_DECIMAL_IDENTIFIER.fullmatch(snapshot.identity.department_id)
         or int(snapshot.identity.department_id) > _SIGNED_INT64_MAX
@@ -1367,11 +1300,10 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         item for item in snapshot.template.fields if item.component_type == "DDDateRangeField"
     ]
     if range_bindings and (
-        snapshot.snapshot_version < 5
-        or {item.logical_key for item in range_bindings} != {"startDate", "endDate", "durationDays"}
+        {item.logical_key for item in range_bindings} != {"startDate", "endDate", "durationDays"}
         or len({item.component_id for item in range_bindings}) != 1
     ):
-        raise ValueError("date range requires version 5 and all three date bindings")
+        raise ValueError("date range requires all three date bindings")
     expected_ids = len(_OA_LOGICAL_KEYS) - (2 if range_bindings else 0)
     if len({item.component_id for item in snapshot.template.fields}) != expected_ids:
         raise ValueError("template component ids must be unique")
@@ -1497,59 +1429,54 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         raise ValueError("expense source OCR must be complete before submission")
     if terminal_expense_file_ids != source_file_ids | dismissed_file_ids:
         raise ValueError("terminal OCR files require an exact disposition")
-    if snapshot.snapshot_version >= 2:
-        support_ids = {
-            item.draft_file_id
-            for item in snapshot.original_files
-            if item.processing_role == ReimbursementDraftFileRole.ATTACHMENT_ONLY.value
-        }
-        for item in snapshot.input.items:
-            if len(item.itinerary_file_ids) != len(set(item.itinerary_file_ids)) or not set(
-                item.itinerary_file_ids
-            ).issubset(support_ids):
-                raise ValueError("itinerary must reference active support files")
-            if (
-                item.requires_itinerary or item.transport_type == "ride_hailing"
-            ) and not item.itinerary_file_ids:
-                raise ValueError("ride-hailing requires itinerary")
-            if (
-                item.requires_cny_confirmation
-                or (item.original_currency and item.original_currency != "CNY")
-            ) and not item.cny_amount_confirmed:
-                raise ValueError("foreign receipts require a confirmed CNY amount")
-            if snapshot.snapshot_version >= 3:
-                if item.source_file_id is not None and item.receipt_count != 1:
-                    raise ValueError("one source receipt must have receipt count one")
-                by_id = {file.draft_file_id: file for file in snapshot.original_files}
-                for proof_ids, kind in (
-                    (item.itinerary_file_ids, "itinerary"),
-                    (item.payment_proof_file_ids, "payment_proof"),
-                    (item.hotel_bill_file_ids, "hotel_bill"),
-                ):
-                    if len(proof_ids) != len(set(proof_ids)) or any(
-                        file_id not in support_ids or by_id[file_id].attachment_kind != kind
-                        for file_id in proof_ids
-                    ):
-                        raise ValueError("proof must reference support files of the correct kind")
-                if (
-                    payment_proof_required(
-                        amount=item.amount,
-                        category=item.category,
-                        rail_type=item.rail_type,
-                    )
-                    and not item.payment_proof_file_ids
-                ):
-                    raise ValueError("payment proof is required for this receipt")
-                if snapshot.snapshot_version >= 4:
-                    if item.category is ExpenseCategory.LODGING and not item.hotel_bill_file_ids:
-                        raise ValueError("lodging requires hotel stay details")
-                elif item.hotel_bill_file_ids:
-                    raise ValueError("hotel bill references require snapshot version 4")
+    support_ids = {
+        item.draft_file_id
+        for item in snapshot.original_files
+        if item.processing_role == ReimbursementDraftFileRole.ATTACHMENT_ONLY.value
+    }
+    by_id = {file.draft_file_id: file for file in snapshot.original_files}
+    for item in snapshot.input.items:
+        if len(item.itinerary_file_ids) != len(set(item.itinerary_file_ids)) or not set(
+            item.itinerary_file_ids
+        ).issubset(support_ids):
+            raise ValueError("itinerary must reference active support files")
         if (
-            snapshot.input.project.display_text != snapshot.selections.budget_code.label
-            or snapshot.input.project.manual_text != snapshot.selections.budget_code.label
+            item.requires_itinerary or item.transport_type == "ride_hailing"
+        ) and not item.itinerary_file_ids:
+            raise ValueError("ride-hailing requires itinerary")
+        if (
+            item.requires_cny_confirmation
+            or (item.original_currency and item.original_currency != "CNY")
+        ) and not item.cny_amount_confirmed:
+            raise ValueError("foreign receipts require a confirmed CNY amount")
+        if item.source_file_id is not None and item.receipt_count != 1:
+            raise ValueError("one source receipt must have receipt count one")
+        for proof_ids, kind in (
+            (item.itinerary_file_ids, "itinerary"),
+            (item.payment_proof_file_ids, "payment_proof"),
+            (item.hotel_bill_file_ids, "hotel_bill"),
         ):
-            raise ValueError("workbook project must match the budget label")
+            if len(proof_ids) != len(set(proof_ids)) or any(
+                file_id not in support_ids or by_id[file_id].attachment_kind != kind
+                for file_id in proof_ids
+            ):
+                raise ValueError("proof must reference support files of the correct kind")
+        if (
+            payment_proof_required(
+                amount=item.amount,
+                category=item.category,
+                rail_type=item.rail_type,
+            )
+            and not item.payment_proof_file_ids
+        ):
+            raise ValueError("payment proof is required for this receipt")
+        if item.category is ExpenseCategory.LODGING and not item.hotel_bill_file_ids:
+            raise ValueError("lodging requires hotel stay details")
+    if (
+        snapshot.input.project.display_text != snapshot.selections.budget_code.label
+        or snapshot.input.project.manual_text != snapshot.selections.budget_code.label
+    ):
+        raise ValueError("workbook project must match the budget label")
     subsidy = _subsidy_from_snapshot(snapshot.subsidy)
     subsidies = tuple(
         item
@@ -1717,28 +1644,14 @@ def _validate_attachment_manifest(
     if not isinstance(attachments, Sequence) or isinstance(attachments, (str, bytes)):
         raise _snapshot_error("审批附件清单无效，请稍后重试")
     values = tuple(attachments)
-    expected_count = 2 if snapshot.snapshot_version >= 2 else len(snapshot.original_files) + 1
-    if len(values) != expected_count or any(
-        not isinstance(item, ApprovalAttachment) for item in values
-    ):
+    if len(values) != 2 or any(not isinstance(item, ApprovalAttachment) for item in values):
         raise _snapshot_error("审批附件数量与提交快照不一致，请稍后重试")
     spaces = {item.space_id for item in values}
     identities = {(item.space_id, item.file_id) for item in values}
     if len(spaces) != 1 or len(identities) != len(values):
         raise _snapshot_error("审批附件标识不一致，请稍后重试")
-    if snapshot.snapshot_version >= 2:
-        if values[0].file_type.lower().removeprefix(".") != "pdf" or values[0].file_size <= 0:
-            raise _snapshot_error("票据汇总 PDF 必须位于附件清单首位")
-    for source, attachment in zip(
-        snapshot.original_files if snapshot.snapshot_version == 1 else (),
-        values[:-1] if snapshot.snapshot_version == 1 else (),
-        strict=True,
-    ):
-        if source.size_bytes != attachment.file_size or not _equivalent_file_type(
-            source.file_type,
-            attachment.file_type,
-        ):
-            raise _snapshot_error("原始附件顺序或元数据与提交快照不一致")
+    if values[0].file_type.lower().removeprefix(".") != "pdf" or values[0].file_size <= 0:
+        raise _snapshot_error("票据汇总 PDF 必须位于附件清单首位")
     generated = values[-1]
     # DingTalk may safely de-duplicate the committed name (for example by
     # adding "(1)"). Role/order and type prove this is the generated workbook;
@@ -1824,15 +1737,6 @@ def _utc_timestamp(value: datetime) -> str:
         raise ValueError("timestamp must be a datetime")
     aware = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
     return aware.isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
-def _equivalent_file_type(first: str, second: str) -> bool:
-    normalized_first = first.lower().removeprefix(".")
-    normalized_second = second.lower().removeprefix(".")
-    return normalized_first == normalized_second or {
-        normalized_first,
-        normalized_second,
-    } == {"jpg", "jpeg"}
 
 
 def _snapshot_error(message: str) -> ApiError:

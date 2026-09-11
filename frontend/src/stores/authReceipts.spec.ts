@@ -5,7 +5,6 @@ import {
   getMe,
   getPublicConfig,
   logout as logoutRequest,
-  selectDepartment as selectDepartmentRequest,
   selectDepartmentFromTravelApproval as selectDepartmentFromTravelApprovalRequest,
 } from '@/api/auth'
 import { getOaReimbursementOptions } from '@/api/reimbursements'
@@ -29,19 +28,12 @@ vi.mock('@/api/auth', () => ({
   loginWithDingTalk: vi.fn(),
   loginWithMock: vi.fn(),
   logout: vi.fn().mockResolvedValue(undefined),
-  selectDepartment: vi.fn(),
   selectDepartmentFromTravelApproval: vi.fn(),
 }))
 
 vi.mock('@/api/expenses', () => ({
   calculateTotals: vi.fn(),
   getExpenseCategories: vi.fn(),
-}))
-
-vi.mock('@/api/receipts', () => ({
-  deleteReceiptFile: vi.fn(),
-  recognizeReceiptFile: vi.fn(),
-  uploadReceiptFile: vi.fn(),
 }))
 
 vi.mock('@/api/reimbursements', () => ({
@@ -64,18 +56,8 @@ vi.mock('@/api/reimbursements', () => ({
   uploadReimbursementDraftFile: vi.fn(),
 }))
 
-function seedReceiptMemory(): ReturnType<typeof useExpenseStore> {
+function seedExpenseMemory(): ReturnType<typeof useExpenseStore> {
   const expense = useExpenseStore()
-  expense.receiptFiles.push({
-    localId: 'local-a',
-    tempId: 'temp-a',
-    file: new File(['receipt'], 'a.jpg', { type: 'image/jpeg' }),
-    name: 'a.jpg',
-    size: 7,
-    uploadProgress: 100,
-    status: 'done',
-    ocrItemId: 'ocr-temp-a',
-  })
   expense.items.push({
     id: 'ocr-temp-a',
     category: 'other',
@@ -134,9 +116,9 @@ describe('authentication clears scoped client memory', () => {
     vi.mocked(logoutRequest).mockResolvedValue(undefined)
   })
 
-  it('aborts and clears receipt and reimbursement memory on HTTP 401', () => {
+  it('aborts and clears expense and reimbursement memory on HTTP 401', () => {
     useAuthStore()
-    const expense = seedReceiptMemory()
+    const expense = seedExpenseMemory()
     const drafts = seedDraftMemory()
     const submission = useReimbursementSubmissionStore()
     submission.submission = {
@@ -164,7 +146,6 @@ describe('authentication clears scoped client memory', () => {
     callbacks.unauthorized?.()
 
     expect(signal?.aborted).toBe(true)
-    expect(expense.receiptFiles).toEqual([])
     expect(expense.items).toEqual([])
     expect(drafts.drafts).toEqual([])
     expect(drafts.reimbursementOptions).toBeNull()
@@ -203,15 +184,14 @@ describe('authentication clears scoped client memory', () => {
     expect(auth.session).toBeNull()
   })
 
-  it('clears files, OCR candidates and reimbursement state after logout', async () => {
+  it('clears expense and reimbursement state after logout', async () => {
     const auth = useAuthStore()
-    const expense = seedReceiptMemory()
+    const expense = seedExpenseMemory()
     const drafts = seedDraftMemory()
 
     await auth.logout()
 
     expect(logoutRequest).toHaveBeenCalledOnce()
-    expect(expense.receiptFiles).toEqual([])
     expect(expense.items).toEqual([])
     expect(drafts.drafts).toEqual([])
     expect(drafts.reimbursementOptions).toBeNull()
@@ -219,41 +199,22 @@ describe('authentication clears scoped client memory', () => {
 
   it('clears client state even when the logout request fails', async () => {
     const auth = useAuthStore()
-    const expense = seedReceiptMemory()
+    seedExpenseMemory()
     const drafts = seedDraftMemory()
     vi.mocked(logoutRequest).mockRejectedValue(new Error('network unavailable'))
 
     await expect(auth.logout()).rejects.toThrow('network unavailable')
 
-    expect(expense.receiptFiles).toEqual([])
     expect(drafts.drafts).toEqual([])
     expect(auth.session).toBeNull()
     expect(auth.status).toBe('unauthorized')
-  })
-
-  it('resets scoped stores before switching department', async () => {
-    const auth = useAuthStore()
-    auth.session = session()
-    auth.status = 'authenticated'
-    const expense = seedReceiptMemory()
-    const drafts = seedDraftMemory()
-    vi.mocked(selectDepartmentRequest).mockResolvedValue({
-      id: '200', name: '另一个部门',
-    })
-
-    await auth.selectDepartment('200')
-
-    expect(selectDepartmentRequest).toHaveBeenCalledWith('200')
-    expect(auth.session?.selectedDepartment?.id).toBe('200')
-    expect(expense.receiptFiles).toEqual([])
-    expect(drafts.drafts).toEqual([])
   })
 
   it('binds reimbursement scope from a travel approval without manual department input', async () => {
     const auth = useAuthStore()
     auth.session = { ...session(), selectedDepartment: null }
     auth.status = 'department_required'
-    seedReceiptMemory()
+    seedExpenseMemory()
     const drafts = seedDraftMemory()
     const selection = {
       processInstanceId: 'travel-instance-20',

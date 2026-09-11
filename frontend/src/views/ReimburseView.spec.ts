@@ -698,29 +698,6 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
-  it('offers reconfirmation for legacy related approvals and preserves live edits during verification', async () => {
-    serverDraft.relatedApprovals = [linkedApproval]
-    serverDraft.relatedApprovalCount = 1
-    const { wrapper, expense } = await mountView()
-    expect(wrapper.text()).toContain('此报销需重新核验')
-    const pending = deferred<ReimbursementDraft>()
-    vi.mocked(replaceReimbursementRelatedApprovals).mockReturnValueOnce(pending.promise)
-    await visibleButton(wrapper, '重新确认出差审批').trigger('click')
-    await vi.waitFor(() => expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce())
-    expense.items[0]!.description = '核验期间继续编辑'
-    expense.trip.startDate = '2026-09-03'
-    serverDraft = { ...serverDraft, revision: serverDraft.revision + 1,
-      input: { ...serverDraft.input, accountingSourceVerified: true } }
-    pending.resolve(serverDraft)
-    await flushPromises()
-    expect(expense.items[0]!.description).toBe('核验期间继续编辑')
-    // Subsidy dates are owned by the linked approval, so an in-flight manual
-    // date edit cannot override the reverified approval period.
-    expect(expense.trip.startDate).toBe('2026-08-31')
-    expect(wrapper.text()).not.toContain('此报销需重新核验')
-    wrapper.unmount()
-  })
-
   it.each([
     { processCode: 'PROC-OLD', configVersion: 12 },
     { processCode: 'PROC-REIMBURSEMENT', configVersion: 11 },
@@ -831,31 +808,6 @@ describe('ReimburseView single-form OA flow', () => {
     expect(sent).not.toHaveProperty('project')
     await flushPromises()
     expect(wrapper.get('[data-testid="autosave-status"]').text()).toBe('已保存')
-    wrapper.unmount()
-  })
-
-  it('persists legacy trip times with consistent half-day values for submission validation', async () => {
-    serverDraft.input.trip = {
-      tripType: 'business', startDate: '2026-09-01', endDate: '2026-09-01',
-      startTime: '11:59', endTime: '12:00',
-    }
-    const { wrapper, expense } = await mountView()
-    expect(expense.trip.startTime).toBe('11:59')
-    expect(expense.trip.endTime).toBe('12:00')
-    await saveCurrent(wrapper)
-    const sent = vi.mocked(updateReimbursementDraft).mock.lastCall![2]
-    expect(sent.trip).toMatchObject({ startTime: '09:00', endTime: '18:00' })
-    expect(sent.trips).toEqual([])
-    expect(sent.editingState?.trip).toMatchObject(sent.trip!)
-    expect(wrapper.get('[data-testid="autosave-status"]').text()).toBe('已保存')
-
-    // Changing only the return period must not leave a hidden 11:59 -> 09:00 reversal.
-    expense.trip.endTime = '09:00'
-    await saveCurrent(wrapper)
-    const changed = vi.mocked(updateReimbursementDraft).mock.lastCall![2]
-    expect(changed.trip).toMatchObject({ startTime: '09:00', endTime: '09:00' })
-    expect(changed.trips).toEqual([])
-    expect(changed.editingState?.trip).toMatchObject(changed.trip!)
     wrapper.unmount()
   })
 

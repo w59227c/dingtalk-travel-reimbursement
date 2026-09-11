@@ -7,7 +7,7 @@ import {
   subsidyTripTypeForTravelLabel,
 } from './travelTypes'
 
-describe('travel type compatibility', () => {
+describe('travel type mapping', () => {
   it.each([
     ['境内商务出差', 'business'],
     ['境内市外项目出差（长期）', 'project'],
@@ -21,7 +21,7 @@ describe('travel type compatibility', () => {
     expect(subsidyTripTypeForTravelLabel(label)).toBe(policy)
   })
 
-  it('resolves a historical source value through the current configured mapping', () => {
+  it('resolves a source value through the configured mapping', () => {
     const profile: OaReimbursementTravelProfile = {
       profileKey: 'domestic',
       displayName: '境内出差申请',

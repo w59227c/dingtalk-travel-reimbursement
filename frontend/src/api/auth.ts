@@ -22,14 +22,6 @@ export async function getMe(): Promise<AuthSession> {
   return response.data.data
 }
 
-export async function selectDepartment(departmentId: string): Promise<Department> {
-  const response = await http.post<ApiEnvelope<{ selectedDepartment: Department }>>(
-    '/me/department',
-    { departmentId },
-  )
-  return response.data.data.selectedDepartment
-}
-
 export async function selectDepartmentFromTravelApproval(
   selection: ReimbursementRelatedApprovalSelection,
 ): Promise<Department> {

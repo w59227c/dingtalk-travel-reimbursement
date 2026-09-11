@@ -16,11 +16,6 @@ import {
   uploadReimbursementDraftFile,
 } from '@/api/reimbursements'
 import { logout as logoutRequest } from '@/api/auth'
-import {
-  deleteReceiptFile,
-  recognizeReceiptFile,
-  uploadReceiptFile,
-} from '@/api/receipts'
 import { useExpenseStore } from '@/stores/expense'
 import { useAuthStore } from '@/stores/auth'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -31,12 +26,6 @@ import type {
   ReimbursementDraftFile,
 } from '@/types/reimbursements'
 import ExpenseItemsCard from './ExpenseItemsCard.vue'
-
-vi.mock('@/api/receipts', () => ({
-  deleteReceiptFile: vi.fn(),
-  recognizeReceiptFile: vi.fn(),
-  uploadReceiptFile: vi.fn(),
-}))
 
 vi.mock('@/api/auth', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/auth')>()
@@ -202,7 +191,7 @@ describe('ExpenseItemsCard durable files', () => {
     const file = recognizedItinerary()
     Object.assign(file.ocrResult!, { trips: [], complete: false, warnings: ['ITINERARY_ROWS_INCOMPLETE'] })
     drafts.files = [file]
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     expect(wrapper.text()).toContain('行程明细未识别')
     expect(wrapper.text()).not.toContain('0 次行程')
@@ -241,7 +230,7 @@ describe('ExpenseItemsCard durable files', () => {
     expense.hydrateFromDraft(drafts.currentDraft, drafts.files)
 
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true, readonly: true },
+      props: { readonly: true },
       global: { plugins: [pinia, ElementPlus] },
     })
     await flushPromises()
@@ -287,7 +276,7 @@ describe('ExpenseItemsCard durable files', () => {
     vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 3, file: {
       ...pending, materialClassification: { status: 'needs_confirmation', kind: 'unknown', reason: '用途不确定，请选择', pageCount: 1 },
     } })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     const header = wrapper.find('.receipt-header-actions')
     expect(header.text()).toContain('上传报销材料')
     expect(header.text()).not.toContain('添加行程单')
@@ -305,7 +294,7 @@ describe('ExpenseItemsCard durable files', () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft()
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true, mobile: true },
+      props: { mobile: true },
       global: { plugins: [pinia, ElementPlus] },
     })
     const fileInput = wrapper.get('[data-testid="durable-expense-input"]')
@@ -334,7 +323,7 @@ describe('ExpenseItemsCard durable files', () => {
     const source = recognizedFile('file-1', '误归类材料.pdf')
     drafts.files = [source]
     expense.upsertDraftOcrItem(source)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     const desktop = wrapper.find('.el-table__row')
     const mobile = wrapper.find('.expense-mobile-card')
@@ -375,7 +364,7 @@ describe('ExpenseItemsCard durable files', () => {
     Object.assign(expense.items[0]!, { amount: '455.00', description: '人工修正的说明', itineraryAutoMatchDisabled: true })
     const expected = JSON.parse(JSON.stringify(expense.items[0]))
     vi.mocked(updateReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: source })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.find('.el-table__row').findAll('button').find((button) => button.text() === '修改用途')!.trigger('click')
     await flushPromises()
@@ -399,7 +388,7 @@ describe('ExpenseItemsCard durable files', () => {
     const pending = deferred<Awaited<ReturnType<typeof recognizeReimbursementDraftFile>>>()
     vi.mocked(updateReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: classified })
     vi.mocked(recognizeReimbursementDraftFile).mockReturnValueOnce(pending.promise)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '修改用途')!.trigger('click')
     const dialog = wrapper.findAllComponents({ name: 'ElDialog' }).find((entry) => entry.props('title') === '修改材料用途')!
     dialog.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'expense')
@@ -429,7 +418,7 @@ describe('ExpenseItemsCard durable files', () => {
       materialClassification: { status: 'needs_confirmation', kind: 'unknown', reason: null, pageCount: 1 },
     })]
     vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: recognizedFile('file-1', '模糊材料.pdf') })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '重新识别')!.trigger('click')
     await flushPromises()
     expect(expense.items).toHaveLength(1)
@@ -447,7 +436,7 @@ describe('ExpenseItemsCard durable files', () => {
     const proof = serverFile('payment-1', '付款截图.jpg', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
     const pending = deferred<Awaited<ReturnType<typeof uploadReimbursementDraftFile>>>()
     vi.mocked(uploadReimbursementDraftFile).mockReturnValueOnce(pending.promise)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text().includes('添加付款凭证'))!.trigger('click')
     await selectFiles(wrapper, 'durable-payment-proof-input', [new File(['image'], proof.name, { type: 'image/jpeg' })])
@@ -483,7 +472,7 @@ describe('ExpenseItemsCard durable files', () => {
     })
     drafts.files = [proof]
     const readonly = ref(false)
-    const wrapper = mount({ render: () => h(ExpenseItemsCard, { durable: true, readonly: readonly.value }) },
+    const wrapper = mount({ render: () => h(ExpenseItemsCard, { readonly: readonly.value }) },
       { global: { plugins: [pinia, ElementPlus] } })
     const open = async () => {
       await wrapper.get('[data-testid="record-payment-expense"]').trigger('click')
@@ -625,7 +614,7 @@ describe('ExpenseItemsCard durable files', () => {
       draftId, revision: input.expectedRevision + 1,
       file: serverFile(fileId, fileId, 'ATTACHMENT_ONLY', { attachmentKind: 'hotel_bill', ocrStatus: 'FAILED', hotelBillDetails: { warnings: ['HOTEL_BILL_INCOMPLETE'] } }),
     }))
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text().includes('添加住宿明细'))!.trigger('click')
     await selectFiles(wrapper, 'durable-hotel-bill-input', [new File(['a'], 'hotel-a.pdf', { type: 'application/pdf' }), new File(['b'], 'hotel-b.pdf', { type: 'application/pdf' })])
@@ -653,7 +642,7 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.files = [serverFile('payment-1', '合并付款.png', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })]
     for (const description of ['住宿一', '住宿二']) expense.upsertManualItem({ category: 'hotel', description, date: '2026-09-01', displayDate: '2026-09-01', amount: '600.00', receiptCount: 1 })
     expense.items[1]!.paymentProofFileIds = ['payment-1']
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text() === '从已上传材料选择')!.trigger('click')
     const picker = wrapper.findAllComponents({ name: 'ElDialog' }).find((dialog) => dialog.props('title') === '选择已上传的付款凭证')!
@@ -678,7 +667,7 @@ describe('ExpenseItemsCard durable files', () => {
     expense.upsertManualItem({ category: 'hotel', description: '住宿', date: '2026-09-01', displayDate: '2026-09-01', amount: '600.00', receiptCount: 1 })
     expense.items[0]!.paymentProofFileIds = ['payment-1']
     vi.spyOn(drafts, 'uploadFile').mockRejectedValue(new Error('网络中断，请重试'))
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text() === '更换')!.trigger('click')
     await selectFiles(wrapper, 'durable-payment-proof-input', [new File(['img'], '新付款.png', { type: 'image/png' })])
@@ -695,7 +684,7 @@ describe('ExpenseItemsCard durable files', () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft()
     expense.upsertManualItem({ category: 'hotel', description: '住宿', date: '2026-09-01', displayDate: '2026-09-01', amount: '600.00', receiptCount: 1 })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text().includes('添加付款凭证'))!.trigger('click')
     drafts.currentDraft = draft(1, 'draft-2')
@@ -718,7 +707,7 @@ describe('ExpenseItemsCard durable files', () => {
     const itinerary = recognizedItinerary()
     drafts.files = [invoice, itinerary]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     expect(expense.items[0]?.itineraryFileIds).toEqual([])
     expect(wrapper.text()).toContain('疑似对应打车行程')
@@ -744,7 +733,7 @@ describe('ExpenseItemsCard durable files', () => {
     if (edited) Object.assign(expense.items[0]!, { date: '2026-08-12', displayDate: '2026-08-12', description: '手动核对过的路线' })
     const before = JSON.stringify(expense.items)
     const originalOcr = JSON.stringify(invoice.ocrResult)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     expect(JSON.stringify(expense.items)).toBe(before)
     // The same recommendation is available in the desktop row and mobile card.
@@ -787,7 +776,7 @@ describe('ExpenseItemsCard durable files', () => {
     Object.assign(invoice.ocrResult, { type: 'invoice', description: null, invoiceNumbers: [] })
     drafts.files = [invoice, recognizedItinerary()]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     const suggestion = wrapper.findComponent({ name: 'ExpenseItinerarySuggestion' })
     expect(suggestion.exists()).toBe(true)
@@ -811,7 +800,7 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.files = [invoice, recognizedItinerary(), recognizedItinerary('proof-2')]
     expense.upsertDraftOcrItem(invoice)
     expense.items[0]!.itineraryAutoMatchDisabled = true
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     await flushPromises()
@@ -841,7 +830,7 @@ describe('ExpenseItemsCard durable files', () => {
     const fileToUpload = order === 'invoice_first' ? proof : invoice
     vi.mocked(uploadReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: { ...fileToUpload, ocrResult: null, ocrStatus: 'NOT_REQUESTED' } })
     vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 3, file: fileToUpload })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await selectFiles(wrapper, order === 'invoice_first' ? 'durable-itinerary-input' : 'durable-expense-input', [new File(['pdf'], fileToUpload.name, { type: 'application/pdf' })])
     await flushPromises()
     expect(uploadReimbursementDraftFile).toHaveBeenCalledWith('draft-1', 1, expect.any(File), expect.objectContaining(order === 'invoice_first'
@@ -863,7 +852,7 @@ describe('ExpenseItemsCard durable files', () => {
     useReimbursementDraftStore().currentDraft = draft()
     const file = serverFile('payment-1', '转账.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
     vi.mocked(uploadReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await selectFiles(wrapper, 'durable-payment-proof-input', [new File(['pdf'], file.name, { type: 'application/pdf' })])
     await flushPromises()
     expect(recognizeReimbursementDraftFile).not.toHaveBeenCalled()
@@ -882,7 +871,7 @@ describe('ExpenseItemsCard durable files', () => {
     Object.assign(invoice.ocrResult, { transportType: 'other', requiresItinerary: false })
     drafts.files = [invoice, recognizedItinerary()]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     expect(expense.items[0]?.itineraryFileIds).toEqual([])
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
@@ -906,7 +895,7 @@ describe('ExpenseItemsCard durable files', () => {
     Object.assign(invoice.ocrResult, { transportType: 'other', requiresItinerary: false, invoiceNumbers: [], amount: '70.00', date: '2026-09-02', description: '交通费用' })
     drafts.files = [invoice, recognizedItinerary()]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     const formItem = (label: string) => wrapper.findAllComponents({ name: 'ElFormItem' }).find((field) => field.props('label') === label)!
     formItem('市内交通类型').findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'taxi')
@@ -934,7 +923,7 @@ describe('ExpenseItemsCard durable files', () => {
     const invoice = taxiInvoice()
     drafts.files = [invoice]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((field) => field.props('label') === '市内交通类型')).toBe(false)
     expect(wrapper.text()).toContain('网约车费用必须有对应行程单')
@@ -952,7 +941,7 @@ describe('ExpenseItemsCard durable files', () => {
     const invoice = taxiInvoice()
     drafts.files = [invoice, recognizedItinerary()]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     expect(expense.items[0]?.itineraryFileIds).toEqual(['proof-1'])
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
@@ -973,7 +962,7 @@ describe('ExpenseItemsCard durable files', () => {
     expect(expense.buildDraftExpenseItems()[0]?.itineraryFileIds).toEqual([])
     wrapper.unmount()
     expense.hydrateFromDraft({ ...draft(2), input }, drafts.files)
-    const restored = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const restored = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     expect(expense.buildDraftExpenseItems()[0]).toMatchObject({ itineraryFileIds: [], itineraryAutoMatchDisabled: true })
     await restored.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
@@ -993,7 +982,7 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.files = [source]
     expense.upsertDraftOcrItem(source)
     expense.items[0]!.category = 'rail_fare'
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     const railField = wrapper.findAllComponents({ name: 'ElFormItem' }).find((field) => field.props('label') === '铁路票种')
     expect(Boolean(railField)).toBe(categoryId === 'other')
@@ -1018,7 +1007,7 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.currentDraft = draft()
     drafts.files = [serverFile('proof-1', '原材料.pdf', 'ATTACHMENT_ONLY')]
     vi.mocked(updateReimbursementDraftFile).mockReturnValue(pending.promise)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '修改用途')!.trigger('click')
     await flushPromises()
     const dialog = wrapper.findAllComponents({ name: 'ElDialog' }).find((entry) => entry.props('title') === '修改材料用途')!
@@ -1050,7 +1039,7 @@ describe('ExpenseItemsCard durable files', () => {
     expense.items[0]!.paymentProofFileIds = [proof.id]
     vi.mocked(updateReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: { ...proof, ocrResult: null } })
     vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 3, file: proof })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     // A reused proof is deliberately not deleted when unlinked, then its purpose can be changed.
     await wrapper.findAll('button').find((button) => button.text() === '移除关联')!.trigger('click')
     await wrapper.findAll('button').find((button) => button.text() === '修改用途')!.trigger('click')
@@ -1083,7 +1072,7 @@ describe('ExpenseItemsCard durable files', () => {
     Object.assign(source.ocrResult, { categoryId: category, railType })
     drafts.files = [source, recognizedItinerary(), serverFile('payment-1', '付款.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' }), serverFile('other-1', '其他.pdf', 'ATTACHMENT_ONLY')]
     expense.upsertDraftOcrItem(source)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     const paymentField = wrapper.findAllComponents({ name: 'ElFormItem' }).find((field) => field.props('label') === '付款凭证')
     expect(Boolean(paymentField)).toBe(expected)
@@ -1123,7 +1112,6 @@ describe('ExpenseItemsCard durable files', () => {
       },
     )
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -1137,9 +1125,6 @@ describe('ExpenseItemsCard durable files', () => {
     ])
     await flushPromises()
 
-    expect(uploadReceiptFile).not.toHaveBeenCalled()
-    expect(recognizeReceiptFile).not.toHaveBeenCalled()
-    expect(deleteReceiptFile).not.toHaveBeenCalled()
     expect(vi.mocked(uploadReimbursementDraftFile).mock.calls.map((call) => [
       call[1], call[2].name, call[3]?.role,
     ])).toEqual([
@@ -1176,7 +1161,7 @@ describe('ExpenseItemsCard durable files', () => {
       description: '本次费用', amount: '10.00', receiptCount: 1, source: 'manual',
     }]
     useReimbursementDraftStore().currentDraft = draft()
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     await flushPromises()
     expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((item) =>
@@ -1193,7 +1178,7 @@ describe('ExpenseItemsCard durable files', () => {
     const source = recognizedFile('file-1', '单张发票.pdf')
     drafts.files = [source]
     expense.upsertDraftOcrItem(source)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     await flushPromises()
     expect(wrapper.findAllComponents({ name: 'ElInputNumber' })).toHaveLength(0)
@@ -1221,7 +1206,7 @@ describe('ExpenseItemsCard durable files', () => {
     vi.mocked(recognizeReimbursementDraftFile)
       .mockResolvedValueOnce({ draftId: 'draft-1', revision: 4, file: recognizedFile('file-1', '第一张.pdf') })
       .mockReturnValueOnce(recognition.promise)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await selectFiles(wrapper, 'durable-expense-input', [
       new File(['a'], '第一张.pdf', { type: 'application/pdf' }),
       new File(['b'], '第二张.pdf', { type: 'application/pdf' }),
@@ -1271,7 +1256,7 @@ describe('ExpenseItemsCard durable files', () => {
       retained[retained.indexOf(uploaded)] = result
       return { draftId, revision, file: result }
     })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await selectFiles(wrapper, 'durable-expense-input', ['上传失败.pdf', '识别失败.pdf', '成功一.pdf', '成功二.pdf'].map((name) =>
       new File(['pdf'], name, { type: 'application/pdf' }),
     ))
@@ -1311,7 +1296,7 @@ describe('ExpenseItemsCard durable files', () => {
       .mockResolvedValueOnce({ draftId: 'draft-1', revision: 4, file: serverFile('c', 'C.pdf', 'ATTACHMENT_ONLY') })
     vi.mocked(recognizeReimbursementDraftFile).mockReturnValueOnce(ocrA.promise).mockReturnValueOnce(ocrB.promise)
       .mockResolvedValueOnce({ draftId: 'draft-1', revision: 4, file: recognizedFile('c', 'C.pdf') })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await selectFiles(wrapper, 'durable-expense-input', ['A.pdf', 'B.pdf', 'C.pdf'].map((name) => new File(['pdf'], name, { type: 'application/pdf' })))
     await flushPromises()
     const placeholders = wrapper.findAll('[data-testid="batch-file"]').map((row) => row.element)
@@ -1364,7 +1349,7 @@ describe('ExpenseItemsCard durable files', () => {
       .mockResolvedValueOnce({ draftId: 'draft-1', revision: 2, file: serverFile('a', 'A.pdf', 'ATTACHMENT_ONLY') })
       .mockReturnValueOnce(uploadB.promise)
     vi.mocked(recognizeReimbursementDraftFile).mockReturnValueOnce(ocrA.promise)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await selectFiles(wrapper, 'durable-expense-input', ['A.pdf', 'B.pdf', 'C.pdf'].map((name) => new File(['pdf'], name)))
     await flushPromises()
     drafts.currentDraft = draft(1, 'draft-2')
@@ -1385,7 +1370,7 @@ describe('ExpenseItemsCard durable files', () => {
 
   it('does not start a batch when the file picker is cancelled', async () => {
     useReimbursementDraftStore().currentDraft = draft()
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await selectFiles(wrapper, 'durable-expense-input', [])
     expect(uploadReimbursementDraftFile).not.toHaveBeenCalled()
     expect(wrapper.find('[data-testid="batch-progress"]').exists()).toBe(false)
@@ -1397,7 +1382,7 @@ describe('ExpenseItemsCard durable files', () => {
     expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
     expense.upsertManualItem({ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01', description: '市内交通', amount: '20.00', receiptCount: 3 })
     useReimbursementDraftStore().currentDraft = draft()
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     for (const transportType of ['taxi', 'ride_hailing'] as const) {
       await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
       await flushPromises()
@@ -1448,7 +1433,6 @@ describe('ExpenseItemsCard durable files', () => {
     })
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -1514,7 +1498,6 @@ describe('ExpenseItemsCard durable files', () => {
       drafts.files = [failed]
       expense.upsertDraftOcrItem(failed)
       const wrapper = mount(ExpenseItemsCard, {
-        props: { durable: true },
         global: { plugins: [pinia, ElementPlus] },
       })
 
@@ -1574,7 +1557,7 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.files = [failed]
     expense.upsertDraftOcrItem(failed)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true, readonly: true },
+      props: { readonly: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -1615,7 +1598,7 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
-  it('stops an old upload before OCR or remaining files when another draft is opened', async () => {
+  it('stops the previous upload before OCR or remaining files when another draft is opened', async () => {
     const pending = deferred<Awaited<ReturnType<typeof uploadReimbursementDraftFile>>>()
     const expense = useExpenseStore()
     expense.categories = [
@@ -1625,13 +1608,12 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.currentDraft = draft()
     vi.mocked(uploadReimbursementDraftFile).mockReturnValueOnce(pending.promise)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
     const operation = selectFiles(wrapper, 'durable-expense-input', [
-      new File(['a'], '旧草稿一.pdf', { type: 'application/pdf' }),
-      new File(['b'], '旧草稿二.pdf', { type: 'application/pdf' }),
+      new File(['a'], '前一笔一.pdf', { type: 'application/pdf' }),
+      new File(['b'], '前一笔二.pdf', { type: 'application/pdf' }),
     ])
     await vi.waitFor(() => expect(uploadReimbursementDraftFile).toHaveBeenCalledOnce())
     drafts.currentDraft = draft(1, 'draft-2')
@@ -1639,7 +1621,7 @@ describe('ExpenseItemsCard durable files', () => {
     pending.resolve({
       draftId: 'draft-1',
       revision: 2,
-      file: serverFile('file-old', '旧草稿一.pdf', 'EXPENSE_SOURCE'),
+      file: serverFile('file-previous', '前一笔一.pdf', 'EXPENSE_SOURCE'),
     })
     await operation
     await flushPromises()
@@ -1652,7 +1634,7 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
-  it('does not insert an old OCR result or continue its batch after switching drafts', async () => {
+  it('does not insert a previous OCR result or continue its batch after switching drafts', async () => {
     const pending = deferred<Awaited<ReturnType<typeof recognizeReimbursementDraftFile>>>()
     const expense = useExpenseStore()
     expense.categories = [
@@ -1675,13 +1657,12 @@ describe('ExpenseItemsCard durable files', () => {
         file: recognizedFile(fileId, '不应上传.pdf'),
       }))
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
     const operation = selectFiles(wrapper, 'durable-expense-input', [
-      new File(['a'], '旧草稿一.pdf', { type: 'application/pdf' }),
-      new File(['b'], '旧草稿二.pdf', { type: 'application/pdf' }),
+      new File(['a'], '前一笔一.pdf', { type: 'application/pdf' }),
+      new File(['b'], '前一笔二.pdf', { type: 'application/pdf' }),
     ])
     await vi.waitFor(() => expect(recognizeReimbursementDraftFile).toHaveBeenCalledOnce())
     const current = draft(1, 'draft-2')
@@ -1699,7 +1680,7 @@ describe('ExpenseItemsCard durable files', () => {
     pending.resolve({
       draftId: 'draft-1',
       revision: 3,
-      file: recognizedFile('file-1', '旧草稿一.pdf'),
+      file: recognizedFile('file-1', '前一笔一.pdf'),
     })
     await operation
     await flushPromises()
@@ -1723,7 +1704,6 @@ describe('ExpenseItemsCard durable files', () => {
       vi.mocked(uploadReimbursementDraftFile).mockReturnValueOnce(pending.promise)
       const message = vi.spyOn(ElMessage, 'error')
       const wrapper = mount(ExpenseItemsCard, {
-        props: { durable: true },
         global: { plugins: [pinia, ElementPlus] },
       })
 
@@ -1756,7 +1736,6 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.currentDraft = draft()
     vi.mocked(uploadReimbursementDraftFile).mockReturnValueOnce(pending.promise)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -1793,7 +1772,7 @@ describe('ExpenseItemsCard durable files', () => {
     const recalculate = vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     vi.mocked(clearReimbursementDraftFiles).mockResolvedValue({ draftId: 'draft-1', deletedFileIds: ['file-1', 'file-2', 'file-3'], revision: 9 })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text().trim() === '清空文件')!.trigger('click')
     await flushPromises()
     expect(ElMessageBox.confirm).toHaveBeenCalledOnce()
@@ -1816,7 +1795,7 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.files = [recognizedFile('file-1', '发票.pdf', '10.00')]
     const pending = deferred<Awaited<ReturnType<typeof ElMessageBox.confirm>>>()
     vi.spyOn(ElMessageBox, 'confirm').mockReturnValue(pending.promise)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text().trim() === '清空文件')!.trigger('click')
     await flushPromises()
     if (scenario === 'switch') {
@@ -1844,7 +1823,7 @@ describe('ExpenseItemsCard durable files', () => {
       drafts.files = drafts.files.filter((file) => file.id !== 'file-1')
       throw new Error('连接中断')
     })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text().trim() === '清空文件')!.trigger('click')
     await flushPromises()
     expect(remove).toHaveBeenCalledOnce()
@@ -1862,7 +1841,7 @@ describe('ExpenseItemsCard durable files', () => {
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     const pending = deferred<Awaited<ReturnType<typeof drafts.clearFiles>>>()
     const remove = vi.spyOn(drafts, 'clearFiles').mockReturnValue(pending.promise)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text().trim() === '清空文件')!.trigger('click')
     await flushPromises()
     expect(drafts.processingFiles).toBe(true)
@@ -1880,7 +1859,7 @@ describe('ExpenseItemsCard durable files', () => {
   it('disables clearing for empty, busy or submitted reimbursements', async () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft()
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     const button = wrapper.findAll('button').find((entry) => entry.text().trim() === '清空文件')!
     expect(button.attributes('disabled')).toBeDefined()
     drafts.files = [recognizedFile('file-1', '发票.pdf', '10.00')]
@@ -1908,7 +1887,7 @@ describe('ExpenseItemsCard durable files', () => {
     const pending = deferred<Awaited<ReturnType<typeof ElMessageBox.confirm>>>()
     vi.spyOn(ElMessageBox, 'confirm').mockReturnValue(pending.promise)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true }, global: { plugins: [pinia, ElementPlus] },
+      global: { plugins: [pinia, ElementPlus] },
     })
     try {
       expect(wrapper.find('.action-help').exists()).toBe(false)
@@ -1957,7 +1936,6 @@ describe('ExpenseItemsCard durable files', () => {
     })
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -2015,7 +1993,7 @@ describe('ExpenseItemsCard durable files', () => {
       static createObjectURL = createUrl
       static revokeObjectURL = revokeUrl
     })
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
 
     expect(wrapper.findAll('.receipt-row')).toHaveLength(0)
@@ -2048,7 +2026,7 @@ describe('ExpenseItemsCard durable files', () => {
     expense.upsertDraftOcrItem(first)
     expense.upsertDraftOcrItem(second)
     expense.items[0]!.itineraryFileIds = ['file-3']
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     const secondRow = wrapper.findAll('.el-table__row').find((row) => row.text().includes('发票二.pdf'))!
     await secondRow.findAll('button').find((button) => button.text().trim() === '编辑')!.trigger('click')
@@ -2079,7 +2057,7 @@ describe('ExpenseItemsCard durable files', () => {
     }
     drafts.files = [source]
     expense.upsertDraftOcrItem(source)
-    const wrapper = mount(ExpenseItemsCard, { props: { durable: true }, global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text().trim() === '编辑')!.trigger('click')
     await flushPromises()
@@ -2105,7 +2083,6 @@ describe('ExpenseItemsCard durable files', () => {
     drafts.files = [recognizedFile('file-1', '待确认票据.pdf', '10.00')]
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -2152,11 +2129,10 @@ describe('ExpenseItemsCard durable files', () => {
         csrfToken: 'synthetic-csrf',
       }
       drafts.currentDraft = draft(8)
-      drafts.files = [recognizedFile('file-1', '旧草稿票据.pdf', '10.00')]
+      drafts.files = [recognizedFile('file-1', '前一笔票据.pdf', '10.00')]
       const pending = deferred<Awaited<ReturnType<typeof ElMessageBox.confirm>>>()
       vi.spyOn(ElMessageBox, 'confirm').mockReturnValue(pending.promise)
       const wrapper = mount(ExpenseItemsCard, {
-        props: { durable: true },
         global: { plugins: [pinia, ElementPlus] },
       })
       const ignore = wrapper.findAll('button').find((button) =>
@@ -2210,7 +2186,6 @@ describe('ExpenseItemsCard durable files', () => {
     vi.mocked(recognizeReimbursementDraftFile).mockReturnValueOnce(pending.promise)
     const warning = vi.spyOn(ElMessage, 'warning')
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -2278,7 +2253,7 @@ describe('ExpenseItemsCard durable files', () => {
     vi.mocked(recognizeReimbursementDraftFile).mockReturnValueOnce(pending.promise)
     const warning = vi.spyOn(ElMessage, 'warning')
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true }, global: { plugins: [pinia, ElementPlus] },
+      global: { plugins: [pinia, ElementPlus] },
     })
     await flushPromises()
     const retry = wrapper.find('.el-table__row').findAll('button').find((button) => button.text().trim() === '重新识别')
@@ -2315,7 +2290,6 @@ describe('ExpenseItemsCard durable files', () => {
     })
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -2352,7 +2326,6 @@ describe('ExpenseItemsCard durable files', () => {
     })
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 
@@ -2406,7 +2379,6 @@ describe('ExpenseItemsCard durable files', () => {
     })
     const warning = vi.spyOn(ElMessage, 'warning')
     const wrapper = mount(ExpenseItemsCard, {
-      props: { durable: true },
       global: { plugins: [pinia, ElementPlus] },
     })
 

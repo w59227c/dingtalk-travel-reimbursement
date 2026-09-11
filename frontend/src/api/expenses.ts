@@ -4,17 +4,11 @@ import type {
   ExpenseCategoryMetadata,
   ExpenseItem,
   ExpenseTotals,
-  SubsidyResult,
   TripInput,
 } from '@/types/expenses'
 
 export async function getExpenseCategories(): Promise<ExpenseCategoryMetadata[]> {
   const response = await http.get<ApiEnvelope<ExpenseCategoryMetadata[]>>('/expense-categories')
-  return response.data.data
-}
-
-export async function calculateSubsidy(input: TripInput): Promise<SubsidyResult> {
-  const response = await http.post<ApiEnvelope<SubsidyResult>>('/calculate/subsidy', input)
   return response.data.data
 }
 

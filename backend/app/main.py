@@ -14,12 +14,9 @@ from fastapi import FastAPI, Request, Response
 
 from app.api.auth import router as auth_router
 from app.api.calculations import router as calculations_router
-from app.api.excel import router as excel_router
-from app.api.files import router as files_router
 from app.api.health import router as health_router
 from app.api.oa_reimbursements import router as oa_reimbursements_router
 from app.api.oa_templates import router as oa_templates_router
-from app.api.ocr import router as ocr_router
 from app.api.receipt_keywords import router as receipt_keywords_router
 from app.api.reimbursement_files import router as reimbursement_files_router
 from app.api.reimbursement_submissions import router as reimbursement_submissions_router
@@ -281,9 +278,7 @@ def create_app(
                 and bool(path_parts[4])
                 and path_parts[5] == "files"
             )
-            if request.method == "POST" and (
-                request.url.path == "/api/files/upload" or is_reimbursement_file_upload
-            ):
+            if request.method == "POST" and is_reimbursement_file_upload:
                 declared_length = request.headers.get("Content-Length")
                 if declared_length:
                     try:
@@ -335,9 +330,6 @@ def create_app(
     application.include_router(receipt_keywords_router, prefix="/api")
     application.include_router(settings_router, prefix="/api")
     application.include_router(calculations_router, prefix="/api")
-    application.include_router(excel_router, prefix="/api")
-    application.include_router(files_router, prefix="/api")
-    application.include_router(ocr_router, prefix="/api")
     application.include_router(oa_templates_router, prefix="/api")
     application.include_router(oa_reimbursements_router, prefix="/api")
     application.include_router(reimbursements_router, prefix="/api")

@@ -18,8 +18,8 @@ do
     grep -F "$required" "$config" >/dev/null
 done
 
-if [ "$(grep -Fc 'proxy_request_buffering off' "$config")" -ne 2 ]; then
-    echo "Both temporary and persistent upload routes must disable request buffering." >&2
+if [ "$(grep -Fc 'proxy_request_buffering off' "$config")" -ne 1 ]; then
+    echo "The persistent upload route must disable request buffering." >&2
     exit 1
 fi
 

@@ -1075,9 +1075,8 @@ def _delete_draft_file_cleanup(
         )
         return
     if item.file_status == ReimbursementDraftFileStatus.FAILED.value:
-        # Current writers purge failed reservations themselves. A legacy FAILED
-        # row has no trustworthy digest and therefore owns no safely deletable
-        # final object.
+        # A failed row has no trustworthy digest and therefore owns no safely
+        # deletable final object.
         return
     raise ReimbursementReservationConflict("draft file is not deletable")
 

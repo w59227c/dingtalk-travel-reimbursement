@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Annotated
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi import Depends
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 from app.database.base import Base
 from app.database.session import create_database_engine, create_session_factory, get_db
 from app.main import create_app
@@ -207,141 +204,3 @@ def test_session_load_opportunistically_purges_expired_sessions(
 
     with client.app.state.database_session_factory() as database:
         assert database.get(UserSession, "expired-after-startup") is None
-
-
-def test_alembic_0003_preserves_legacy_rate_for_old_automatic_types(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    database_path = tmp_path / "legacy-settings.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
-    get_settings.cache_clear()
-    # A programmatic config keeps this test from replacing pytest's logging
-    # handlers via alembic.ini's fileConfig side effect.
-    config = Config()
-    config.set_main_option("script_location", str(Path(__file__).parents[1] / "migrations"))
-    try:
-        command.upgrade(config, "20260901_0002")
-        with sqlite3.connect(database_path) as connection:
-            connection.execute("UPDATE settings SET value = '88.50' WHERE key = 'subsidy_per_day'")
-            connection.commit()
-
-        command.upgrade(config, "head")
-
-        with sqlite3.connect(database_path) as connection:
-            revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            values = dict(
-                connection.execute(
-                    "SELECT key, value FROM settings WHERE key LIKE 'subsidy_%'"
-                ).fetchall()
-            )
-            keyword_count = connection.execute(
-                "SELECT COUNT(*) FROM receipt_keyword_mappings"
-            ).fetchone()
-            keyword_columns = {
-                row[1]
-                for row in connection.execute(
-                    "PRAGMA table_info(receipt_keyword_mappings)"
-                ).fetchall()
-            }
-            oa_template_columns = {
-                row[1]
-                for row in connection.execute("PRAGMA table_info(oa_template_profiles)").fetchall()
-            }
-        assert revision == ("20260909_0017",)
-        assert keyword_count == (23,)
-        assert keyword_columns == {
-            "id",
-            "keyword",
-            "normalized_keyword",
-            "category_id",
-        }
-        assert oa_template_columns == {
-            "profile_key",
-            "process_code",
-            "template_name",
-            "schema_fingerprint",
-            "confirmed_schema_fingerprint",
-            "schema_json",
-            "mapping_json",
-            "config_version",
-            "allowed_travel_process_codes_json",
-            "travel_profiles_json",
-            "compatibility_status",
-            "confirmed_by_user_id",
-            "last_checked_at",
-            "confirmed_at",
-            "created_at",
-            "updated_at",
-        }
-        with sqlite3.connect(database_path) as connection:
-            session_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
-            }
-        assert "dingtalk_union_id" in session_columns
-        assert values == {
-            "subsidy_per_day": "88.50",
-            "subsidy_business_per_day": "88.50",
-            "subsidy_short_term_project_per_day": "88.50",
-            "subsidy_long_term_project_per_day": "150.00",
-            "subsidy_same_city_project_per_day": "50.00",
-            "subsidy_internal_per_day": "100.00",
-        }
-    finally:
-        get_settings.cache_clear()
-
-
-def test_alembic_0008_adds_nullable_union_id_without_fabricating_legacy_identity(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    database_path = tmp_path / "legacy-session.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database_path}")
-    get_settings.cache_clear()
-    config = Config()
-    config.set_main_option("script_location", str(Path(__file__).parents[1] / "migrations"))
-    try:
-        command.upgrade(config, "20260903_0007")
-        with sqlite3.connect(database_path) as connection:
-            connection.execute(
-                """
-                INSERT INTO sessions (
-                    session_id_hash, dingtalk_user_id, name, departments_json,
-                    current_department_id, current_department_name, csrf_token_hash,
-                    created_at, expires_at, last_seen_at, corp_id, is_admin
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "legacy-session",
-                    "legacy-user",
-                    "Legacy User",
-                    '[{"id":"10","name":"Legacy Department"}]',
-                    "10",
-                    "Legacy Department",
-                    "legacy-csrf",
-                    "2026-09-03 00:00:00",
-                    "2099-09-03 00:00:00",
-                    "2026-09-03 00:00:00",
-                    "corp-fixed",
-                    0,
-                ),
-            )
-            connection.commit()
-
-        command.upgrade(config, "head")
-
-        with sqlite3.connect(database_path) as connection:
-            revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
-            session_columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
-            }
-            union_id = connection.execute(
-                "SELECT dingtalk_union_id FROM sessions WHERE session_id_hash = ?",
-                ("legacy-session",),
-            ).fetchone()
-
-        assert revision == ("20260909_0017",)
-        assert "dingtalk_union_id" in session_columns
-        assert union_id == (None,)
-    finally:
-        get_settings.cache_clear()
