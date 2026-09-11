@@ -41,7 +41,7 @@ jobs:
           npm ci --prefix frontend --ignore-scripts --no-audit --no-fund
       - name: Test backend and cross-stack calculation contract
         working-directory: backend
-        run: uv run --frozen --extra dev --extra ocr pytest
+        run: uv run --frozen --extra dev --extra ocr pytest -n 2
       - name: Lint backend and model downloader
         working-directory: backend
         run: uv run --frozen --extra dev ruff check app tests migrations scripts
