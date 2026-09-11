@@ -290,7 +290,7 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
-  it('splits the mobile upload entry into the file manager and image picker', async () => {
+  it('uses one mobile reimbursement-material entry backed by the generic system picker', async () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft()
     const wrapper = mount(ExpenseItemsCard, {
@@ -298,18 +298,15 @@ describe('ExpenseItemsCard durable files', () => {
       global: { plugins: [pinia, ElementPlus] },
     })
     const fileInput = wrapper.get('[data-testid="durable-expense-input"]')
-    const imageInput = wrapper.get('[data-testid="durable-image-input"]')
     const fileClick = vi.spyOn(fileInput.element as HTMLInputElement, 'click')
-    const imageClick = vi.spyOn(imageInput.element as HTMLInputElement, 'click')
 
     expect(fileInput.attributes('accept')).toBeUndefined()
-    expect(imageInput.attributes('accept')).not.toContain('.pdf')
-    expect(imageInput.attributes('accept')).toContain('image/jpeg')
+    expect(wrapper.find('[data-testid="durable-image-input"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="mobile-image-upload-button"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="mobile-file-upload-button"]').text()).toBe('上传报销材料')
     await wrapper.get('[data-testid="mobile-file-upload-button"]').trigger('click')
-    await wrapper.get('[data-testid="mobile-image-upload-button"]').trigger('click')
 
     expect(fileClick).toHaveBeenCalledOnce()
-    expect(imageClick).toHaveBeenCalledOnce()
     expect(wrapper.find('.receipt-header-actions').text()).toContain('清空文件')
     expect(wrapper.find('.receipt-header-actions').text()).not.toContain('更多')
     wrapper.unmount()

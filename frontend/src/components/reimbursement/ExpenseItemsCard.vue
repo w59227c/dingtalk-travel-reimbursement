@@ -36,7 +36,6 @@ const expense = useExpenseStore()
 const drafts = useReimbursementDraftStore()
 const auth = useAuthStore()
 const durableExpenseInput = ref<HTMLInputElement | null>(null)
-const durableImageInput = ref<HTMLInputElement | null>(null)
 const durableAttachmentInput = ref<HTMLInputElement | null>(null)
 const durableItineraryInput = ref<HTMLInputElement | null>(null)
 const durablePaymentProofInput = ref<HTMLInputElement | null>(null)
@@ -592,10 +591,9 @@ function readableWarning(warning: string): string {
   return warningLabels[warning] ?? '请核对识别结果'
 }
 
-function chooseReceiptFiles(source: 'file' | 'image' = 'file'): void {
+function chooseReceiptFiles(): void {
   if (props.readonly) return
-  if (source === 'image') durableImageInput.value?.click()
-  else durableExpenseInput.value?.click()
+  durableExpenseInput.value?.click()
 }
 
 function choosePaymentProof(item: ExpenseItem, replaceId?: string, kind: 'payment_proof' | 'hotel_bill' = 'payment_proof'): void {
@@ -1262,38 +1260,13 @@ async function retryItemRecognition(id: string): Promise<void> {
           >
             手动添加
           </el-button>
-          <template v-if="props.mobile">
-            <el-button
-              class="mobile-upload-button"
-              type="primary"
-              plain
-              :loading="durableBusy"
-              :disabled="Boolean(receiptUploadDisabledReason)"
-              :title="receiptUploadDisabledReason"
-              data-testid="mobile-file-upload-button"
-              @click="chooseReceiptFiles('file')"
-            >
-              上传文件
-            </el-button>
-            <el-button
-              class="mobile-upload-button"
-              type="primary"
-              :loading="durableBusy"
-              :disabled="Boolean(receiptUploadDisabledReason)"
-              :title="receiptUploadDisabledReason"
-              data-testid="mobile-image-upload-button"
-              @click="chooseReceiptFiles('image')"
-            >
-              上传图片
-            </el-button>
-          </template>
           <el-button
-            v-else
-            class="receipt-upload-button"
+            :class="props.mobile ? 'mobile-upload-button' : 'receipt-upload-button'"
             type="primary"
             :loading="durableBusy"
             :disabled="Boolean(receiptUploadDisabledReason)"
             :title="receiptUploadDisabledReason"
+            :data-testid="props.mobile ? 'mobile-file-upload-button' : undefined"
             @click="chooseReceiptFiles()"
           >
             上传报销材料
@@ -1305,17 +1278,6 @@ async function retryItemRecognition(id: string): Promise<void> {
           class="visually-hidden"
           type="file"
           :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
-          multiple
-          :disabled="Boolean(durableActionDisabledReason)"
-          @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'other', true)"
-        >
-        <input
-          v-if="props.mobile"
-          ref="durableImageInput"
-          data-testid="durable-image-input"
-          class="visually-hidden"
-          type="file"
-          accept=".jpg,.jpeg,.png,image/jpeg,image/png"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'other', true)"
@@ -2385,7 +2347,7 @@ async function retryItemRecognition(id: string): Promise<void> {
   width: 100%;
 }
 .receipt-header-actions--mobile :deep(.el-button) { width: 100%; margin: 0; }
-.mobile-upload-button { min-height: 64px; }
+.mobile-upload-button { grid-column: 1 / -1; min-height: 64px; }
 .batch-progress { margin-top: 16px; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .batch-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; padding-top: 12px; }
 .batch-file > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
