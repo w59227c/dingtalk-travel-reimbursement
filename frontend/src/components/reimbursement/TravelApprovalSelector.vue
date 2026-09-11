@@ -13,11 +13,13 @@ const props = withDefaults(defineProps<{
   modelValue: ReimbursementRelatedApprovalSelection[]
   linkedApprovals?: ReimbursementRelatedApproval[]
   readonly?: boolean
+  single?: boolean
   requiredStartDate?: string
   requiredEndDate?: string
 }>(), {
   linkedApprovals: () => [],
   readonly: false,
+  single: false,
   requiredStartDate: '',
   requiredEndDate: '',
 })
@@ -168,7 +170,7 @@ function toggle(row: ApprovalRow, checked: boolean): void {
     localError.value = '该审批的查询凭据已失效，请重新加载后再选择'
     return
   }
-  emit('update:modelValue', [...props.modelValue, selection])
+  emit('update:modelValue', props.single ? [selection] : [...props.modelValue, selection])
 }
 
 function unavailableReason(row: ApprovalRow): string {
@@ -181,6 +183,7 @@ function unavailableReason(row: ApprovalRow): string {
     && (row.endDate < props.requiredStartDate || row.startDate > props.requiredEndDate)) {
     return '审批日期与出差补助日期不重合'
   }
+  if (props.single) return ''
   const first = props.modelValue[0]
   if (!first) return ''
   const baseline = candidateCache.get(first.processInstanceId)
@@ -223,9 +226,14 @@ function accountingLabel(row: ApprovalRow): string {
     <div class="card-header travel-approval-heading">
       <div>
         <h2 id="travel-approval-heading">
-          关联已通过的出差审批
+          {{ props.single ? '选择本次出差申请' : '关联已通过的出差审批' }}
         </h2>
-        <p>先选本人已通过的审批；可继续关联相同公司、预算和出差类别的多张审批，日期不连续也可以。</p>
+        <p v-if="props.single">
+          系统会读取审批中的所在部门，无需再次选择部门。
+        </p>
+        <p v-else>
+          先选本人已通过的审批；可继续关联相同公司、预算和出差类别的多张审批，日期不连续也可以。
+        </p>
       </div>
       <el-tag
         :type="modelValue.length ? 'success' : 'warning'"

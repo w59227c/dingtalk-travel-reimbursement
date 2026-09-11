@@ -301,6 +301,31 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it('splits the mobile upload entry into the file manager and image picker', async () => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { durable: true, mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    const fileInput = wrapper.get('[data-testid="durable-expense-input"]')
+    const imageInput = wrapper.get('[data-testid="durable-image-input"]')
+    const fileClick = vi.spyOn(fileInput.element as HTMLInputElement, 'click')
+    const imageClick = vi.spyOn(imageInput.element as HTMLInputElement, 'click')
+
+    expect(fileInput.attributes('accept')).toContain('.pdf')
+    expect(imageInput.attributes('accept')).not.toContain('.pdf')
+    expect(imageInput.attributes('accept')).toContain('image/jpeg')
+    await wrapper.get('[data-testid="mobile-file-upload-button"]').trigger('click')
+    await wrapper.get('[data-testid="mobile-image-upload-button"]').trigger('click')
+
+    expect(fileClick).toHaveBeenCalledOnce()
+    expect(imageClick).toHaveBeenCalledOnce()
+    expect(wrapper.find('.receipt-header-actions').text()).toContain('清空文件')
+    expect(wrapper.find('.receipt-header-actions').text()).not.toContain('更多')
+    wrapper.unmount()
+  })
+
   it('lets desktop and mobile source rows correct a misclassified invoice, with explicit consequences and harmless cancellation', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]

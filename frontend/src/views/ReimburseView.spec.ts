@@ -5,7 +5,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, nextTick } from 'vue'
 
-import { getPublicConfig } from '@/api/auth'
+import { getPublicConfig, selectDepartmentFromTravelApproval } from '@/api/auth'
 import { calculateTotals } from '@/api/expenses'
 import { fetchReadiness } from '@/api/health'
 import {
@@ -43,6 +43,7 @@ vi.mock('@/api/health', () => ({ fetchReadiness: vi.fn() }))
 vi.mock('@/api/auth', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/api/auth')>(),
   getPublicConfig: vi.fn(),
+  selectDepartmentFromTravelApproval: vi.fn(),
 }))
 vi.mock('@/api/expenses', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/expenses')>()
@@ -203,11 +204,13 @@ const ExpenseItemsCardStub = defineComponent({
   name: 'ExpenseItemsCard',
   props: {
     durable: { type: Boolean, default: false },
+    mobile: { type: Boolean, default: false },
     readonly: { type: Boolean, default: false },
   },
   template: `<section
     data-testid="expense-items"
     :data-durable="String(durable)"
+    :data-mobile="String(mobile)"
     :data-readonly="String(readonly)"
   >费用明细</section>`,
 })
@@ -234,6 +237,7 @@ const TravelApprovalSelectorStub = defineComponent({
     readonly: { type: Boolean, default: false },
     requiredStartDate: { type: String, default: '' },
     requiredEndDate: { type: String, default: '' },
+    single: { type: Boolean, default: false },
   },
   emits: ['update:modelValue'],
   template: '<section data-testid="travel-selector">关联出差审批</section>',
@@ -251,6 +255,9 @@ function installServerMocks(): void {
   vi.mocked(fetchReadiness).mockResolvedValue({
     status: 'ready',
     checks: { database: 'ok', excelTemplate: 'ok', tempStorage: 'ok', ocr: 'disabled' },
+  })
+  vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
+    id: '100', name: '测试部门',
   })
   vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
   vi.mocked(getOaReimbursementOptions).mockResolvedValue(options)
@@ -318,7 +325,7 @@ function installServerMocks(): void {
   vi.mocked(submitOaReimbursement).mockResolvedValue(submissionResult())
 }
 
-async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void, realMaterials = false): Promise<{
+async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void, realMaterials = false, mobile = false): Promise<{
   wrapper: VueWrapper
   expense: ReturnType<typeof useExpenseStore>
   drafts: ReturnType<typeof useReimbursementDraftStore>
@@ -342,6 +349,7 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
   ]
   const wrapper = mount(ReimburseView, {
     attachTo: '#test-app',
+    props: { mobile },
     global: {
       plugins: [pinia, ElementPlus],
       stubs: {
@@ -396,6 +404,24 @@ describe('ReimburseView single-form OA flow', () => {
     const { wrapper } = await mountView()
 
     expect(wrapper.find('.current-user-id').text()).toContain('synthetic-user')
+    wrapper.unmount()
+  })
+
+  it('renders the /m presentation as four mobile steps while reusing the same expense editor', async () => {
+    const { wrapper } = await mountView(undefined, false, true)
+
+    expect(wrapper.find('.current-user-id').exists()).toBe(false)
+    expect(wrapper.findAll('.mobile-step-nav button').map((button) => button.text())).toEqual([
+      '1关联审批', '2范围补助', '3费用材料', '4核对提交',
+    ])
+    expect(wrapper.get('[data-testid="mobile-approval-step"]').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="expense-items"]').attributes('data-mobile')).toBe('true')
+
+    await wrapper.findAll('.mobile-step-nav button')[2]!.trigger('click')
+
+    expect(wrapper.get('[data-testid="mobile-approval-step"]').isVisible()).toBe(false)
+    expect(wrapper.get('[data-testid="mobile-material-step"]').isVisible()).toBe(true)
+    expect(wrapper.find('.mobile-step-footer').text()).toContain('¥44.89')
     wrapper.unmount()
   })
 
@@ -480,6 +506,39 @@ describe('ReimburseView single-form OA flow', () => {
       wrapper.unmount()
     },
   )
+
+  it('derives a multi-department user scope from the selected travel approval', async () => {
+    const { wrapper } = await mountView((auth) => {
+      auth.status = 'department_required'
+      auth.session!.selectedDepartment = null
+      auth.session!.departments = [
+        { id: '100', name: '技术管理中心' },
+        { id: '200', name: '工业物联二部' },
+      ]
+    })
+    vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
+      id: '200', name: '工业物联二部',
+    })
+
+    expect(wrapper.text()).not.toContain('选择本次报销部门')
+    expect(wrapper.text()).not.toContain('确认部门')
+    const selector = wrapper.findComponent(TravelApprovalSelectorStub)
+    expect(selector.props('single')).toBe(true)
+    selector.vm.$emit('update:modelValue', [selection])
+    await flushPromises()
+
+    expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(selection)
+    expect(useAuthStore().session?.selectedDepartment).toEqual({
+      id: '200', name: '工业物联二部',
+    })
+    expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledWith(
+      'draft-1',
+      expect.any(Number),
+      [selection],
+      { signal: expect.any(AbortSignal) },
+    )
+    wrapper.unmount()
+  })
 
   it('cancels a pending calculation when authentication ends', async () => {
     vi.useFakeTimers()

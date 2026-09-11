@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
 import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vue'
@@ -27,18 +27,27 @@ import {
   subsidyTripTypeForTravelLabel,
 } from '@/utils/travelTypes'
 
+const props = withDefaults(defineProps<{
+  mobile?: boolean
+}>(), {
+  mobile: false,
+})
+
 const auth = useAuthStore()
 const expense = useExpenseStore()
 const health = useHealthStore()
 const drafts = useReimbursementDraftStore()
 const submission = useReimbursementSubmissionStore()
 const expenseItemsCard = ref<InstanceType<typeof ExpenseItemsCard> | null>(null)
-const departmentId = ref('')
+const mobileStep = ref(0)
+const mobileSteps = ['关联审批', '范围补助', '费用材料', '核对提交'] as const
 const companyValue = ref('')
 const budgetCodeValue = ref('')
 const selectedRelatedApprovals = ref<ReimbursementRelatedApprovalSelection[]>([])
 const initializingWorkspace = ref(false)
 const initializationError = ref('')
+const departmentBindingError = ref('')
+const bindingApprovalDepartment = ref(false)
 const saving = ref(false)
 const saveError = ref('')
 const submitFlowPending = ref(false)
@@ -177,6 +186,9 @@ const submissionButtonReason = computed(() => formReadOnlyReason.value || submis
   || (drafts.busy ? '请等待材料处理完成' : '')
   || (pendingMaterialFiles.value.length ? `还有 ${pendingMaterialFiles.value.length} 份材料待确认用途` : '')
   || (missingMaterialItems.value.length ? `还有 ${missingMaterialItems.value.length} 笔费用需补材料` : ''))
+const mobileNextLabel = computed(() => mobileStep.value === mobileSteps.length - 1
+  ? '提交 OA'
+  : `下一步：${mobileSteps[mobileStep.value + 1]}`)
 const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({ item, missing: missingExpenseMaterials(item, drafts.files) }))
   .filter((entry) => entry.missing.length))
 const pendingMaterialFiles = computed(() => drafts.files.filter(needsMaterialConfirmation))
@@ -458,11 +470,67 @@ async function replaceOutdatedForm(): Promise<void> {
     if (sessionScope() === scope) initializingWorkspace.value = false
   }
 }
-async function chooseDepartment(): Promise<void> {
-  if (!departmentId.value) return
-  await auth.selectDepartment(departmentId.value)
-  initializedScope = ''
-  await initializeWorkspace(true)
+async function chooseTravelApprovalForDepartment(
+  selections: ReimbursementRelatedApprovalSelection[],
+): Promise<void> {
+  if (bindingApprovalDepartment.value) return
+  const selection = selections.at(-1)
+  selectedRelatedApprovals.value = selection ? [selection] : []
+  if (!selection) return
+  bindingApprovalDepartment.value = true
+  departmentBindingError.value = ''
+  try {
+    await auth.selectDepartmentFromTravelApproval(selection)
+    initializedScope = ''
+    await initializeWorkspace(true)
+    let opened = drafts.currentDraft
+    if (!opened) throw new Error(initializationError.value || '报销表单加载失败，请重试')
+    const alreadyLinked = opened.relatedApprovals.some(
+      (item) => item.processInstanceId === selection.processInstanceId,
+    )
+    if (alreadyLinked) return
+    if (!['DRAFT', 'REVIEW_READY'].includes(opened.status)) {
+      throw new Error('该部门有正在提交的报销，请先确认提交结果后再新建报销')
+    }
+    if (opened.relatedApprovals.length) {
+      await createBlankReimbursement()
+      opened = drafts.currentDraft
+      if (!opened) throw new Error('新报销准备失败，请重试')
+    }
+    selectedRelatedApprovals.value = [selection]
+    const updated = await drafts.saveRelatedApprovals([selection])
+    hydrate(updated)
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : '无法读取出差审批的所在部门，请重试'
+    departmentBindingError.value = message
+    if (auth.status === 'authenticated') initializationError.value = message
+  } finally {
+    bindingApprovalDepartment.value = false
+  }
+}
+function selectMobileStep(step: number): void {
+  if (!props.mobile || step < 0 || step >= mobileSteps.length) return
+  mobileStep.value = step
+}
+async function advanceMobileStep(): Promise<void> {
+  if (mobileStep.value === 0 && !selectedRelatedApprovals.value.length) {
+    ElMessage.warning('请至少关联一张已通过的出差审批')
+    return
+  }
+  if (mobileStep.value < mobileSteps.length - 1) {
+    mobileStep.value += 1
+    return
+  }
+  await confirmAndSubmit()
+}
+async function focusMobileMaterial(itemId?: string): Promise<void> {
+  if (props.mobile) {
+    mobileStep.value = 2
+    await nextTick()
+  }
+  expenseItemsCard.value?.focusMaterial(itemId)
 }
 async function retrySameSubmission(): Promise<void> {
   const draft = drafts.currentDraft
@@ -540,16 +608,20 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="page-shell">
+  <main
+    class="page-shell"
+    :class="{ 'page-shell--mobile': props.mobile }"
+  >
     <section
       class="hero"
+      :class="{ 'hero--mobile': props.mobile }"
       aria-labelledby="page-title"
     >
       <div>
         <p class="eyebrow">
           <span>钉钉工作台应用</span>
           <span
-            v-if="auth.session?.user.userId"
+            v-if="auth.session?.user.userId && !props.mobile"
             class="current-user-id"
             :title="`当前 userId：${auth.session.user.userId}`"
           >
@@ -560,12 +632,14 @@ onBeforeUnmount(() => {
           {{ auth.appTitle }}
         </h1>
         <p class="summary">
-          选预算、上传材料、核对费用，自动生成票据汇总和报销单并提交 OA。
+          {{ props.mobile
+            ? '关联审批、核对补助、整理材料，最后统一提交 OA。'
+            : '选预算、上传材料、核对费用，自动生成票据汇总和报销单并提交 OA。' }}
         </p>
       </div>
       <div class="hero-actions">
         <RouterLink
-          v-if="auth.isAdmin"
+          v-if="auth.isAdmin && !props.mobile"
           to="/admin/settings"
         >
           系统设置
@@ -614,29 +688,25 @@ onBeforeUnmount(() => {
       class="content-card"
     >
       <template #header>
-        <strong>选择本次报销部门</strong>
+        <strong>选择本次出差申请</strong>
       </template>
-      <el-select
-        v-model="departmentId"
-        placeholder="请选择部门"
-        aria-label="本次报销部门"
-        class="full-width"
-      >
-        <el-option
-          v-for="department in auth.session?.departments"
-          :key="department.id"
-          :label="department.name"
-          :value="department.id"
-        />
-      </el-select>
-      <el-button
-        class="block-action"
-        type="primary"
-        :disabled="!departmentId"
-        @click="chooseDepartment"
-      >
-        确认部门
-      </el-button>
+      <p class="field-help">
+        请选择本次报销对应的已通过出差审批，系统将按审批中的所在部门自动填写，无需再选部门。
+      </p>
+      <TravelApprovalSelector
+        :model-value="selectedRelatedApprovals"
+        :readonly="bindingApprovalDepartment"
+        single
+        @update:model-value="chooseTravelApprovalForDepartment"
+      />
+      <el-alert
+        v-if="departmentBindingError"
+        :title="departmentBindingError"
+        type="error"
+        :closable="false"
+        show-icon
+        class="workspace-alert"
+      />
     </el-card>
     <template v-else-if="auth.status === 'authenticated'">
       <el-card
@@ -669,276 +739,372 @@ onBeforeUnmount(() => {
           </template>
         </el-alert>
         <template v-if="drafts.currentDraft">
-          <el-card
-            shadow="never"
-            class="content-card reimbursement-card"
-            data-testid="reimbursement-basics-card"
+          <nav
+            v-if="props.mobile"
+            class="mobile-step-nav"
+            aria-label="报销填写步骤"
           >
-            <template #header>
-              <div class="card-header">
-                <strong>基本信息</strong>
-              </div>
-            </template>
-            <el-descriptions
-              :column="2"
-              border
-              class="identity-grid"
+            <button
+              v-for="(step, index) in mobileSteps"
+              :key="step"
+              type="button"
+              :class="{ 'is-active': mobileStep === index, 'is-done': mobileStep > index }"
+              :aria-current="mobileStep === index ? 'step' : undefined"
+              @click="selectMobileStep(index)"
             >
-              <el-descriptions-item label="姓名">
-                {{ auth.session?.user.name }}
-              </el-descriptions-item>
-              <el-descriptions-item label="部门">
-                {{ auth.session?.selectedDepartment?.name }}
-              </el-descriptions-item>
-            </el-descriptions>
-
-            <TravelApprovalSelector
-              v-model="selectedRelatedApprovals"
-              :linked-approvals="drafts.currentDraft.relatedApprovals"
-              :readonly="formReadOnly || drafts.processingFiles"
-            />
-            <el-alert
-              v-if="drafts.currentDraft.relatedApprovals.length && !drafts.currentDraft.input.accountingSourceVerified && !formReadOnly"
-              title="此报销需重新核验关联审批的所属公司和预算代码"
-              type="warning"
-              :closable="false"
-              class="accounting-verification-alert"
+              <span>{{ index + 1 }}</span>
+              <small>{{ step }}</small>
+            </button>
+          </nav>
+          <section
+            v-show="!props.mobile || mobileStep === 0"
+            class="mobile-step-panel"
+            data-testid="mobile-approval-step"
+          >
+            <header
+              v-if="props.mobile"
+              class="mobile-step-heading"
             >
-              <el-button
-                :disabled="drafts.busy || saving"
-                @click="reconfirmRelatedApprovals"
-              >
-                重新确认出差审批
-              </el-button>
-            </el-alert>
-
-            <section
-              class="derived-accounting-section"
-              data-testid="derived-accounting-summary"
-              aria-labelledby="derived-accounting-heading"
+              <h2>关联出差审批</h2>
+              <p>先选择本次报销对应的审批，报销范围和补助将自动生成。</p>
+            </header>
+            <el-card
+              shadow="never"
+              class="content-card reimbursement-card"
+              data-testid="reimbursement-basics-card"
             >
-              <div class="derived-accounting-heading">
-                <div>
-                  <h2 id="derived-accounting-heading">
-                    已自动带入
-                  </h2>
-                  <p>以所选出差审批为准，无需重复填写。</p>
+              <template #header>
+                <div class="card-header">
+                  <strong>基本信息</strong>
                 </div>
-              </div>
+              </template>
               <el-descriptions
-                :column="2"
+                :column="props.mobile ? 1 : 2"
                 border
-                class="derived-accounting-grid"
+                class="identity-grid"
               >
-                <el-descriptions-item label="所属公司">
-                  {{ companyLabel || '选择出差审批后自动填入' }}
+                <el-descriptions-item label="姓名">
+                  {{ auth.session?.user.name }}
                 </el-descriptions-item>
-                <el-descriptions-item label="预算代码 / 项目">
-                  {{ budgetLabel || '选择出差审批后自动填入' }}
-                </el-descriptions-item>
-                <el-descriptions-item label="出差类别">
-                  {{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}
-                </el-descriptions-item>
-                <el-descriptions-item label="出差日期">
-                  {{ selectedTravelPeriod || '选择出差审批后自动填入' }}
+                <el-descriptions-item label="部门">
+                  {{ auth.session?.selectedDepartment?.name }}
                 </el-descriptions-item>
               </el-descriptions>
-              <p class="field-help">
-                所属公司和预算代码由关联审批自动填入，不可修改；预算代码完整名称会填入报销单 Excel 的项目栏。
-              </p>
-            </section>
-            <el-alert
-              v-if="formReadOnlyReason"
-              :title="formReadOnlyReason"
-              type="info"
-              :closable="false"
-            />
-            <el-button
-              v-if="canReplaceOutdatedForm"
-              class="block-action"
-              type="primary"
-              :loading="replacingTemplate"
-              :disabled="drafts.busy"
-              @click="replaceOutdatedForm"
-            >
-              按新表单重新填写
-            </el-button>
-          </el-card>
+
+              <TravelApprovalSelector
+                v-model="selectedRelatedApprovals"
+                :linked-approvals="drafts.currentDraft.relatedApprovals"
+                :readonly="formReadOnly || drafts.processingFiles"
+              />
+              <el-alert
+                v-if="drafts.currentDraft.relatedApprovals.length && !drafts.currentDraft.input.accountingSourceVerified && !formReadOnly"
+                title="此报销需重新核验关联审批的所属公司和预算代码"
+                type="warning"
+                :closable="false"
+                class="accounting-verification-alert"
+              >
+                <el-button
+                  :disabled="drafts.busy || saving"
+                  @click="reconfirmRelatedApprovals"
+                >
+                  重新确认出差审批
+                </el-button>
+              </el-alert>
+
+              <section
+                class="derived-accounting-section"
+                data-testid="derived-accounting-summary"
+                aria-labelledby="derived-accounting-heading"
+              >
+                <div class="derived-accounting-heading">
+                  <div>
+                    <h2 id="derived-accounting-heading">
+                      已自动带入
+                    </h2>
+                    <p>以所选出差审批为准，无需重复填写。</p>
+                  </div>
+                </div>
+                <el-descriptions
+                  :column="props.mobile ? 1 : 2"
+                  border
+                  class="derived-accounting-grid"
+                >
+                  <el-descriptions-item label="所属公司">
+                    {{ companyLabel || '选择出差审批后自动填入' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="预算代码 / 项目">
+                    {{ budgetLabel || '选择出差审批后自动填入' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="出差类别">
+                    {{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="出差日期">
+                    {{ selectedTravelPeriod || '选择出差审批后自动填入' }}
+                  </el-descriptions-item>
+                </el-descriptions>
+                <p class="field-help">
+                  所属公司和预算代码由关联审批自动填入，不可修改；预算代码完整名称会填入报销单 Excel 的项目栏。
+                </p>
+              </section>
+              <el-alert
+                v-if="formReadOnlyReason"
+                :title="formReadOnlyReason"
+                type="info"
+                :closable="false"
+              />
+              <el-button
+                v-if="canReplaceOutdatedForm"
+                class="block-action"
+                type="primary"
+                :loading="replacingTemplate"
+                :disabled="drafts.busy"
+                @click="replaceOutdatedForm"
+              >
+                按新表单重新填写
+              </el-button>
+            </el-card>
+          </section>
           <fieldset
             class="editor-fieldset"
             :disabled="formReadOnly || drafts.processingFiles"
           >
-            <TripSubsidyCard
-              :readonly="formReadOnly"
-              :approvals="selectedSubsidyApprovals"
-              :approval-trip-type="selectedSubsidyTripType"
-            />
-            <ExpenseItemsCard
-              ref="expenseItemsCard"
-              :durable="true"
-              :readonly="formReadOnly"
-            />
-          </fieldset>
-          <ExpenseSummaryCard
-            :preview-disabled-reason="previewDisabledReason"
-            :before-preview="flushAutosave"
-          />
-          <el-card
-            shadow="never"
-            class="content-card submission-card"
-          >
-            <div class="submission-actions">
-              <div
-                role="status"
-                aria-live="polite"
-                data-testid="autosave-status"
-              >
-                <span>{{ saveLabel }}</span><el-button
-                  v-if="saveError"
-                  link
-                  type="primary"
-                  @click="flushAutosave().catch(() => undefined)"
-                >
-                  重试保存
-                </el-button>
-              </div>
-              <div class="primary-submit-area">
-                <p>OA 附件为两个文件：票据汇总.pdf（含行程单、付款凭证）＋报销单.xlsx。</p>
-                <el-button
-                  type="primary"
-                  size="large"
-                  :loading="submitFlowPending || submission.submitting"
-                  :disabled="Boolean(submissionButtonReason)"
-                  :title="submissionButtonReason"
-                  @click="confirmAndSubmit"
-                >
-                  提交 OA
-                </el-button>
-              </div>
-            </div>
-            <div
-              v-if="!formReadOnly && (missingMaterialItems.length || pendingMaterialFiles.length)"
-              class="material-checklist"
-              data-testid="material-checklist"
-              role="status"
-            >
-              <strong v-if="missingMaterialItems.length">还有 {{ missingMaterialItems.length }} 笔费用需补材料</strong>
-              <div
-                v-for="entry in missingMaterialItems"
-                :key="entry.item.id"
-                class="material-checklist-row"
-              >
-                <span>{{ entry.item.description || '费用明细' }} · ¥{{ entry.item.amount }} · 缺{{ entry.missing.join('、') }}</span>
-                <el-button
-                  link
-                  type="primary"
-                  @click="expenseItemsCard?.focusMaterial(entry.item.id)"
-                >
-                  去补齐
-                </el-button>
-              </div>
-              <div
-                v-if="pendingMaterialFiles.length"
-                class="material-checklist-row"
-              >
-                <span>{{ pendingMaterialFiles.length }} 份材料待确认用途</span>
-                <el-button
-                  link
-                  type="primary"
-                  @click="expenseItemsCard?.focusMaterial()"
-                >
-                  去确认
-                </el-button>
-              </div>
-              <p>补齐后可提交 OA；你仍可继续编辑和预览报销单。</p>
-            </div>
-            <el-alert
-              v-if="submissionServiceReason"
-              :title="submissionServiceReason"
-              type="warning"
-              :closable="false"
-              class="submission-status"
-              show-icon
-            >
-              <el-button
-                link
-                type="primary"
-                :loading="refreshingServiceStatus"
-                @click="refreshSubmissionService()"
-              >
-                刷新服务状态
-              </el-button>
-            </el-alert>
-            <el-alert
-              v-if="saveError"
-              :title="saveError"
-              type="error"
-              :closable="false"
-              class="submission-status"
-            />
             <section
-              v-if="submission.activeDraftId === drafts.currentDraft.id && (submission.progressLabel || submission.errorMessage)"
-              class="submission-status"
-              aria-live="polite"
-              data-testid="submission-status"
+              v-show="!props.mobile || mobileStep === 1"
+              class="mobile-step-panel"
+              data-testid="mobile-subsidy-step"
             >
-              <el-alert
-                :title="submission.progressLabel || '提交需要处理'"
-                :description="submission.errorMessage || undefined"
-                :type="submissionAlertType"
-                :closable="false"
-                show-icon
+              <header
+                v-if="props.mobile"
+                class="mobile-step-heading"
+              >
+                <h2>范围与补助</h2>
+                <p>所属公司、预算、类别和日期来自已关联审批，只需核对补助。</p>
+              </header>
+              <TripSubsidyCard
+                :readonly="formReadOnly"
+                :approvals="selectedSubsidyApprovals"
+                :approval-trip-type="selectedSubsidyTripType"
               />
-              <el-progress
-                :percentage="submissionProgressPercentage"
-                :status="submission.status === 'SUBMITTED' ? 'success' : submission.status === 'FAILED_FINAL' ? 'exception' : undefined"
-              />
-              <p v-if="submission.submission?.businessId">
-                审批编号：{{ submission.submission.businessId }}
-              </p>
-              <p v-if="submission.status === 'MANUAL_REVIEW'">
-                暂时无法确认提交结果，请联系管理员并提供提交编号 {{ submission.submission?.submissionId }}，不要重复发起报销。
-              </p>
-              <div class="submission-status-actions">
-                <el-button
-                  v-if="submission.status === 'MANUAL_REVIEW' && submission.submission?.processInstanceId"
-                  type="primary"
-                  :loading="submission.submitting"
-                  @click="submission.recheck()"
-                >
-                  重新核对（不会重复提交）
-                </el-button>
-                <a
-                  v-if="submission.status === 'SUBMITTED' && submission.submission?.approvalUrl?.trim()"
-                  :href="submission.submission.approvalUrl"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  data-testid="approval-link"
-                ><el-button type="primary">打开钉钉 OA</el-button></a>
-                <el-button
-                  v-if="canStartNewReimbursement"
-                  @click="newReimbursement"
-                >
-                  {{ submission.status === 'FAILED_FINAL' ? '重新填写' : '再报销一笔' }}
-                </el-button>
-                <el-button
-                  v-if="submission.submission && !submission.terminal"
-                  :loading="refreshingServiceStatus"
-                  @click="refreshSubmissionService(true)"
-                >
-                  刷新提交进度
-                </el-button>
-                <el-button
-                  v-if="submission.requestError && !submission.submission && submission.requestAction"
-                  :loading="submission.submitting"
-                  :disabled="submission.requestAction === 'retry' && submission.oaSubmissionEnabled !== true"
-                  @click="submission.requestAction === 'retry' ? retrySameSubmission() : retrySubmissionRecovery()"
-                >
-                  {{ submission.requestAction === 'retry' ? '重试本次提交' : '重新查找提交记录' }}
-                </el-button>
-              </div>
             </section>
-          </el-card>
+            <section
+              v-show="!props.mobile || mobileStep === 2"
+              class="mobile-step-panel"
+              data-testid="mobile-material-step"
+            >
+              <header
+                v-if="props.mobile"
+                class="mobile-step-heading"
+              >
+                <h2>费用与材料</h2>
+                <p>可从文件管理器或系统相册添加，失败文件可以单独重试。</p>
+              </header>
+              <ExpenseItemsCard
+                ref="expenseItemsCard"
+                :durable="true"
+                :mobile="props.mobile"
+                :readonly="formReadOnly"
+              />
+            </section>
+          </fieldset>
+          <section
+            v-show="!props.mobile || mobileStep === 3"
+            class="mobile-step-panel"
+            data-testid="mobile-review-step"
+          >
+            <header
+              v-if="props.mobile"
+              class="mobile-step-heading"
+            >
+              <h2>核对并提交</h2>
+              <p>确认金额、票据张数、材料完整性和即将生成的 OA 附件。</p>
+            </header>
+            <ExpenseSummaryCard
+              :preview-disabled-reason="previewDisabledReason"
+              :before-preview="flushAutosave"
+            />
+            <el-card
+              shadow="never"
+              class="content-card submission-card"
+            >
+              <div class="submission-actions">
+                <div
+                  role="status"
+                  aria-live="polite"
+                  data-testid="autosave-status"
+                >
+                  <span>{{ saveLabel }}</span><el-button
+                    v-if="saveError"
+                    link
+                    type="primary"
+                    @click="flushAutosave().catch(() => undefined)"
+                  >
+                    重试保存
+                  </el-button>
+                </div>
+                <div class="primary-submit-area">
+                  <p>OA 附件为两个文件：票据汇总.pdf（含行程单、付款凭证）＋报销单.xlsx。</p>
+                  <el-button
+                    type="primary"
+                    size="large"
+                    :loading="submitFlowPending || submission.submitting"
+                    :disabled="Boolean(submissionButtonReason)"
+                    :title="submissionButtonReason"
+                    @click="confirmAndSubmit"
+                  >
+                    提交 OA
+                  </el-button>
+                </div>
+              </div>
+              <div
+                v-if="!formReadOnly && (missingMaterialItems.length || pendingMaterialFiles.length)"
+                class="material-checklist"
+                data-testid="material-checklist"
+                role="status"
+              >
+                <strong v-if="missingMaterialItems.length">还有 {{ missingMaterialItems.length }} 笔费用需补材料</strong>
+                <div
+                  v-for="entry in missingMaterialItems"
+                  :key="entry.item.id"
+                  class="material-checklist-row"
+                >
+                  <span>{{ entry.item.description || '费用明细' }} · ¥{{ entry.item.amount }} · 缺{{ entry.missing.join('、') }}</span>
+                  <el-button
+                    link
+                    type="primary"
+                    @click="focusMobileMaterial(entry.item.id)"
+                  >
+                    去补齐
+                  </el-button>
+                </div>
+                <div
+                  v-if="pendingMaterialFiles.length"
+                  class="material-checklist-row"
+                >
+                  <span>{{ pendingMaterialFiles.length }} 份材料待确认用途</span>
+                  <el-button
+                    link
+                    type="primary"
+                    @click="focusMobileMaterial()"
+                  >
+                    去确认
+                  </el-button>
+                </div>
+                <p>补齐后可提交 OA；你仍可继续编辑和预览报销单。</p>
+              </div>
+              <el-alert
+                v-if="submissionServiceReason"
+                :title="submissionServiceReason"
+                type="warning"
+                :closable="false"
+                class="submission-status"
+                show-icon
+              >
+                <el-button
+                  link
+                  type="primary"
+                  :loading="refreshingServiceStatus"
+                  @click="refreshSubmissionService()"
+                >
+                  刷新服务状态
+                </el-button>
+              </el-alert>
+              <el-alert
+                v-if="saveError"
+                :title="saveError"
+                type="error"
+                :closable="false"
+                class="submission-status"
+              />
+              <section
+                v-if="submission.activeDraftId === drafts.currentDraft.id && (submission.progressLabel || submission.errorMessage)"
+                class="submission-status"
+                aria-live="polite"
+                data-testid="submission-status"
+              >
+                <el-alert
+                  :title="submission.progressLabel || '提交需要处理'"
+                  :description="submission.errorMessage || undefined"
+                  :type="submissionAlertType"
+                  :closable="false"
+                  show-icon
+                />
+                <el-progress
+                  :percentage="submissionProgressPercentage"
+                  :status="submission.status === 'SUBMITTED' ? 'success' : submission.status === 'FAILED_FINAL' ? 'exception' : undefined"
+                />
+                <p v-if="submission.submission?.businessId">
+                  审批编号：{{ submission.submission.businessId }}
+                </p>
+                <p v-if="submission.status === 'MANUAL_REVIEW'">
+                  暂时无法确认提交结果，请联系管理员并提供提交编号 {{ submission.submission?.submissionId }}，不要重复发起报销。
+                </p>
+                <div class="submission-status-actions">
+                  <el-button
+                    v-if="submission.status === 'MANUAL_REVIEW' && submission.submission?.processInstanceId"
+                    type="primary"
+                    :loading="submission.submitting"
+                    @click="submission.recheck()"
+                  >
+                    重新核对（不会重复提交）
+                  </el-button>
+                  <a
+                    v-if="submission.status === 'SUBMITTED' && submission.submission?.approvalUrl?.trim()"
+                    :href="submission.submission.approvalUrl"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="approval-link"
+                  ><el-button type="primary">打开钉钉 OA</el-button></a>
+                  <el-button
+                    v-if="canStartNewReimbursement"
+                    @click="newReimbursement"
+                  >
+                    {{ submission.status === 'FAILED_FINAL' ? '重新填写' : '再报销一笔' }}
+                  </el-button>
+                  <el-button
+                    v-if="submission.submission && !submission.terminal"
+                    :loading="refreshingServiceStatus"
+                    @click="refreshSubmissionService(true)"
+                  >
+                    刷新提交进度
+                  </el-button>
+                  <el-button
+                    v-if="submission.requestError && !submission.submission && submission.requestAction"
+                    :loading="submission.submitting"
+                    :disabled="submission.requestAction === 'retry' && submission.oaSubmissionEnabled !== true"
+                    @click="submission.requestAction === 'retry' ? retrySameSubmission() : retrySubmissionRecovery()"
+                  >
+                    {{ submission.requestAction === 'retry' ? '重试本次提交' : '重新查找提交记录' }}
+                  </el-button>
+                </div>
+              </section>
+            </el-card>
+          </section>
+          <footer
+            v-if="props.mobile"
+            class="mobile-step-footer"
+          >
+            <div class="mobile-footer-total">
+              <span>当前合计</span>
+              <strong>¥{{ expense.displayTotal }}</strong>
+            </div>
+            <div class="mobile-footer-actions">
+              <el-button
+                v-if="mobileStep > 0"
+                @click="selectMobileStep(mobileStep - 1)"
+              >
+                上一步
+              </el-button>
+              <el-button
+                type="primary"
+                :loading="mobileStep === 3 && (submitFlowPending || submission.submitting)"
+                :disabled="mobileStep === 3 && Boolean(submissionButtonReason)"
+                :title="mobileStep === 3 ? submissionButtonReason : ''"
+                @click="advanceMobileStep"
+              >
+                {{ mobileNextLabel }}
+              </el-button>
+            </div>
+          </footer>
         </template>
       </template>
     </template>
@@ -995,7 +1161,89 @@ onBeforeUnmount(() => {
 .material-checklist-row > span { min-width: 0; overflow-wrap: anywhere; }
 .material-checklist-row .el-button { flex-shrink: 0; }
 .material-checklist p { margin: 8px 0 0; color: #667085; }
+.page-shell--mobile {
+  width: min(100%, 560px);
+  padding: 16px 12px 0;
+}
+.hero--mobile {
+  align-items: center;
+  margin-bottom: 14px;
+}
+.hero--mobile h1 { margin: 2px 0 6px; font-size: 22px; }
+.hero--mobile .eyebrow { font-size: 12px; letter-spacing: .04em; }
+.hero--mobile .summary { font-size: 13px; line-height: 1.5; }
+.hero--mobile .hero-actions { flex-shrink: 0; }
+.mobile-step-nav {
+  position: sticky;
+  top: 0;
+  z-index: 9;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  margin: 0 -4px 14px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: rgb(244 247 251 / 94%);
+  backdrop-filter: blur(12px);
+}
+.mobile-step-nav button {
+  min-width: 0;
+  min-height: 52px;
+  padding: 6px 2px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--el-text-color-secondary);
+  background: transparent;
+}
+.mobile-step-nav button span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: 0 auto 3px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 50%;
+  background: var(--el-bg-color);
+  font-size: 11px;
+  font-weight: 700;
+}
+.mobile-step-nav button small { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-step-nav button.is-active { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+.mobile-step-nav button.is-active span { border-color: var(--el-color-primary); color: #fff; background: var(--el-color-primary); }
+.mobile-step-nav button.is-done { color: var(--el-color-success); }
+.mobile-step-nav button.is-done span { border-color: var(--el-color-success); color: #fff; background: var(--el-color-success); }
+.mobile-step-panel { min-width: 0; }
+.mobile-step-heading { padding: 2px 2px 12px; }
+.mobile-step-heading h2 { margin: 0; font-size: 20px; }
+.mobile-step-heading p { margin: 6px 0 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.55; }
+.page-shell--mobile :deep(.content-card) { border-radius: 16px; }
+.page-shell--mobile :deep(.el-card__header) { padding: 14px; }
+.page-shell--mobile :deep(.el-card__body) { padding: 14px; }
+.page-shell--mobile :deep(.totals-grid) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.page-shell--mobile .primary-submit-area .el-button { display: none; }
+.mobile-step-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  margin: 18px -12px 0;
+  padding: 10px 12px max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--el-border-color-lighter);
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 -8px 24px rgb(23 32 51 / 8%);
+  backdrop-filter: blur(12px);
+}
+.mobile-footer-total { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.mobile-footer-total span { color: var(--el-text-color-secondary); font-size: 12px; }
+.mobile-footer-total strong { font-size: 18px; }
+.mobile-footer-actions { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 10px; }
+.mobile-footer-actions .el-button { width: 100%; min-height: 46px; margin: 0; }
+.mobile-footer-actions .el-button:only-child { grid-column: 1 / -1; }
 @media (max-width: 640px) {
   .primary-submit-area { text-align: left; }
+}
+@media (max-width: 420px) {
+  .page-shell--mobile { width: 100%; padding-inline: 8px; }
+  .mobile-step-footer { margin-inline: -8px; }
+  .mobile-step-nav button small { font-size: 9px; }
 }
 </style>

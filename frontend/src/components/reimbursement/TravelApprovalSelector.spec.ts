@@ -76,6 +76,33 @@ describe('TravelApprovalSelector', () => {
     wrapper.unmount()
   })
 
+  it('uses a single approval to derive the reimbursement department', async () => {
+    const drafts = useReimbursementDraftStore()
+    const other = {
+      ...candidate,
+      processInstanceId: 'travel-2',
+      companyOption: { value: 'company-2', label: '无锡公司', key: null },
+      budgetCodeOption: { value: 'budget-2', label: '预算2', key: null },
+    }
+    drafts.travelApprovals = [candidate, other]
+    drafts.travelApprovalQueryWindow = selection.queryWindow
+    const wrapper = mount(TravelApprovalSelector, {
+      props: { modelValue: [selection], single: true },
+      global: { plugins: [ElementPlus] },
+    })
+
+    const replacement = wrapper.findAllComponents({ name: 'ElCheckbox' })[1]!
+    expect(replacement.props('disabled')).toBe(false)
+    replacement.vm.$emit('change', true)
+    await nextTick()
+
+    expect(wrapper.text()).toContain('无需再次选择部门')
+    expect(wrapper.emitted('update:modelValue')?.[0]).toEqual([[
+      { ...selection, processInstanceId: 'travel-2' },
+    ]])
+    wrapper.unmount()
+  })
+
   it('keeps a restored linked approval visible even when it is outside the latest search', () => {
     const drafts = useReimbursementDraftStore()
     drafts.travelApprovalsError = '暂不重新查询'

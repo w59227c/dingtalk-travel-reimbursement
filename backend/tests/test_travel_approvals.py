@@ -693,6 +693,7 @@ async def test_reverification_proves_membership_and_aggregates_one_travel_type()
 
     assert result.start_date == date(2026, 8, 1)
     assert result.end_date == date(2026, 8, 20)
+    assert result.department_id == "100"
     assert result.travel_type_option.value == "市外项目出差（短期）"
     assert [item.instance.instance_id for item in result.approvals] == ["first", "second"]
 
@@ -721,6 +722,51 @@ async def test_reverification_allows_a_gap_between_selected_approvals() -> None:
     assert [item.instance.instance_id for item in result.approvals] == ["first", "second"]
     assert result.start_date == date(2026, 8, 1)
     assert result.end_date == date(2026, 8, 5)
+
+
+@pytest.mark.asyncio
+async def test_reverification_rejects_approvals_from_different_departments() -> None:
+    window = _window()
+    workflow = FakeWorkflow(
+        {("PROC-A", 0): WorkflowInstanceIdPage(("first", "second"), None)},
+        {
+            "first": _instance("first"),
+            "second": replace(_instance("second"), originator_department_id="200"),
+        },
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await reverify_travel_approval_selection(
+            workflow,
+            _catalog(_profile("domestic", "PROC-A")),
+            current_user_id="employee-1",
+            selections=(
+                TravelApprovalSelection("domestic", "first", window),
+                TravelApprovalSelection("domestic", "second", window),
+            ),
+        )
+
+    assert caught.value.code == "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_reverification_rejects_an_approval_outside_the_draft_department() -> None:
+    window = _window()
+    workflow = FakeWorkflow(
+        {("PROC-A", 0): WorkflowInstanceIdPage(("trip",), None)},
+        {"trip": _instance("trip")},
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await reverify_travel_approval_selection(
+            workflow,
+            _catalog(_profile("domestic", "PROC-A")),
+            current_user_id="employee-1",
+            selections=(TravelApprovalSelection("domestic", "trip", window),),
+            expected_department_id="200",
+        )
+
+    assert caught.value.code == "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH"
 
 
 @pytest.mark.asyncio

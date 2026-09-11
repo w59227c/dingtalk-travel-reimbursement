@@ -13,6 +13,12 @@ const router = createRouter({
       component: ReimburseView,
     },
     {
+      path: '/m',
+      name: 'mobile-reimburse',
+      component: ReimburseView,
+      props: { mobile: true },
+    },
+    {
       path: '/admin/settings',
       name: 'admin-settings',
       component: () => import('@/views/SettingsAdminView.vue'),

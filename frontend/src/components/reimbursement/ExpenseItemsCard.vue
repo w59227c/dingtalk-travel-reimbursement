@@ -27,9 +27,11 @@ import { centsToMoney, moneyToCents } from '@/utils/money'
 
 const props = withDefaults(defineProps<{
   durable?: boolean
+  mobile?: boolean
   readonly?: boolean
 }>(), {
   durable: false,
+  mobile: false,
   readonly: false,
 })
 
@@ -38,6 +40,7 @@ const drafts = useReimbursementDraftStore()
 const auth = useAuthStore()
 const receiptInput = ref<HTMLInputElement | null>(null)
 const durableExpenseInput = ref<HTMLInputElement | null>(null)
+const durableImageInput = ref<HTMLInputElement | null>(null)
 const durableAttachmentInput = ref<HTMLInputElement | null>(null)
 const durableItineraryInput = ref<HTMLInputElement | null>(null)
 const durablePaymentProofInput = ref<HTMLInputElement | null>(null)
@@ -624,9 +627,12 @@ function readableWarning(warning: string): string {
   return warningLabels[warning] ?? '请核对识别结果'
 }
 
-function chooseReceiptFiles(): void {
+function chooseReceiptFiles(source: 'file' | 'image' = 'file'): void {
   if (props.readonly) return
-  if (props.durable) durableExpenseInput.value?.click()
+  if (props.durable) {
+    if (source === 'image') durableImageInput.value?.click()
+    else durableExpenseInput.value?.click()
+  }
   else receiptInput.value?.click()
 }
 
@@ -1347,7 +1353,10 @@ async function retryItemRecognition(id: string): Promise<void> {
           <strong>费用明细</strong>
           <span class="section-note">OCR 结果会直接填入，发现不准确时直接编辑</span>
         </div>
-        <div class="receipt-header-actions">
+        <div
+          class="receipt-header-actions"
+          :class="{ 'receipt-header-actions--mobile': props.mobile && props.durable }"
+        >
           <el-button
             v-if="props.durable"
             type="danger"
@@ -1366,13 +1375,39 @@ async function retryItemRecognition(id: string): Promise<void> {
           >
             手动添加
           </el-button>
+          <template v-if="props.mobile && props.durable">
+            <el-button
+              class="mobile-upload-button"
+              type="primary"
+              plain
+              :loading="durableBusy"
+              :disabled="Boolean(receiptUploadDisabledReason)"
+              :title="receiptUploadDisabledReason"
+              data-testid="mobile-file-upload-button"
+              @click="chooseReceiptFiles('file')"
+            >
+              上传文件
+            </el-button>
+            <el-button
+              class="mobile-upload-button"
+              type="primary"
+              :loading="durableBusy"
+              :disabled="Boolean(receiptUploadDisabledReason)"
+              :title="receiptUploadDisabledReason"
+              data-testid="mobile-image-upload-button"
+              @click="chooseReceiptFiles('image')"
+            >
+              上传图片
+            </el-button>
+          </template>
           <el-button
+            v-else
             class="receipt-upload-button"
             type="primary"
             :loading="props.durable ? durableBusy : expense.receiptBusy"
             :disabled="Boolean(receiptUploadDisabledReason)"
             :title="receiptUploadDisabledReason"
-            @click="chooseReceiptFiles"
+            @click="chooseReceiptFiles()"
           >
             {{ props.durable ? '上传报销材料' : '选择票据文件' }}
           </el-button>
@@ -1394,6 +1429,17 @@ async function retryItemRecognition(id: string): Promise<void> {
           class="visually-hidden"
           type="file"
           accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+          multiple
+          :disabled="Boolean(durableActionDisabledReason)"
+          @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'other', true)"
+        >
+        <input
+          v-if="props.durable && props.mobile"
+          ref="durableImageInput"
+          data-testid="durable-image-input"
+          class="visually-hidden"
+          type="file"
+          accept=".jpg,.jpeg,.png,image/jpeg,image/png"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'other', true)"
@@ -2585,6 +2631,13 @@ async function retryItemRecognition(id: string): Promise<void> {
 
 <style scoped>
 .receipt-upload-button { min-width: 148px; }
+.receipt-header-actions--mobile {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+}
+.receipt-header-actions--mobile :deep(.el-button) { width: 100%; margin: 0; }
+.mobile-upload-button { min-height: 64px; }
 .batch-progress { margin-top: 16px; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .batch-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; padding-top: 12px; }
 .batch-file > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

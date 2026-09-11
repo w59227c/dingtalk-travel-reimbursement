@@ -507,6 +507,7 @@ async def replace_related_approvals(
             catalog,
             current_user_id=actor.user_id,
             selections=domain_selections,
+            expected_department_id=actor.department_id,
         )
         if domain_selections
         else None

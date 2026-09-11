@@ -1,5 +1,6 @@
 import { http } from './http'
 import type { ApiEnvelope, AuthSession, Department, PublicConfig } from '@/types/auth'
+import type { ReimbursementRelatedApprovalSelection } from '@/types/reimbursements'
 
 export async function getPublicConfig(): Promise<PublicConfig> {
   const response = await http.get<ApiEnvelope<PublicConfig>>('/config/public')
@@ -25,6 +26,17 @@ export async function selectDepartment(departmentId: string): Promise<Department
   const response = await http.post<ApiEnvelope<{ selectedDepartment: Department }>>(
     '/me/department',
     { departmentId },
+  )
+  return response.data.data.selectedDepartment
+}
+
+export async function selectDepartmentFromTravelApproval(
+  selection: ReimbursementRelatedApprovalSelection,
+): Promise<Department> {
+  const response = await http.post<ApiEnvelope<{ selectedDepartment: Department }>>(
+    '/me/department/from-travel-approval',
+    selection,
+    { timeout: 60_000 },
   )
   return response.data.data.selectedDepartment
 }

@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import logging
 from datetime import timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from app.api import auth
 from app.core.security import token_hash
 from app.models.session import UserSession, utc_now
 
@@ -198,6 +200,61 @@ def test_multiple_departments_require_authoritative_selection(client_factory) ->
     )
     assert accepted.status_code == 200
     assert accepted.json()["data"]["selectedDepartment"] == {
+        "id": "20",
+        "name": "部门-20",
+    }
+
+
+def test_multiple_departments_bind_from_verified_travel_approval(
+    client_factory,
+    monkeypatch,
+) -> None:
+    transport, _calls = success_transport([10, 20])
+    client = client_factory(transport=transport)
+    login = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"})
+    session = login.json()["data"]
+    assert session["selectedDepartment"] is None
+
+    catalog = object()
+    monkeypatch.setattr(
+        auth,
+        "require_submission_ready_catalog",
+        lambda database: catalog,
+        raising=False,
+    )
+
+    async def verified_selection(workflow, received_catalog, **kwargs):
+        assert workflow is client.app.state.dingtalk_workflow
+        assert received_catalog is catalog
+        assert kwargs["current_user_id"] == "user-1"
+        [selection] = kwargs["selections"]
+        assert selection.process_instance_id == "travel-instance-20"
+        assert selection.profile_key == "domestic"
+        return SimpleNamespace(department_id="20")
+
+    monkeypatch.setattr(
+        auth,
+        "reverify_travel_approval_selection",
+        verified_selection,
+        raising=False,
+    )
+
+    selected = client.post(
+        "/api/me/department/from-travel-approval",
+        json={
+            "processInstanceId": "travel-instance-20",
+            "profileKey": "domestic",
+            "queryWindow": {"from": "2026-07-01", "to": "2026-07-31"},
+        },
+        headers={"X-CSRF-Token": session["csrfToken"]},
+    )
+
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["data"]["selectedDepartment"] == {
+        "id": "20",
+        "name": "部门-20",
+    }
+    assert client.get("/api/me").json()["data"]["selectedDepartment"] == {
         "id": "20",
         "name": "部门-20",
     }

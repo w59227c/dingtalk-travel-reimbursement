@@ -9,9 +9,11 @@ import {
   loginWithMock,
   logout as logoutRequest,
   selectDepartment as selectDepartmentRequest,
+  selectDepartmentFromTravelApproval as selectDepartmentFromTravelApprovalRequest,
 } from '@/api/auth'
 import { setCsrfToken, setUnauthorizedHandler } from '@/api/http'
 import type { AuthSession } from '@/types/auth'
+import type { ReimbursementRelatedApprovalSelection } from '@/types/reimbursements'
 import { requestDingTalkAuthCode } from '@/utils/dingtalk'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -137,6 +139,24 @@ export const useAuthStore = defineStore('auth', () => {
     status.value = 'authenticated'
   }
 
+  async function selectDepartmentFromTravelApproval(
+    selection: ReimbursementRelatedApprovalSelection,
+  ): Promise<void> {
+    if (!session.value) return
+    useExpenseStore().reset()
+    useReimbursementDraftStore().reset()
+    useReimbursementSubmissionStore().reset()
+    const selected = await selectDepartmentFromTravelApprovalRequest(selection)
+    session.value.departments = [
+      selected,
+      ...session.value.departments.filter(
+        (item) => item.id !== selected.id && item.name !== selected.name,
+      ),
+    ]
+    session.value.selectedDepartment = selected
+    status.value = 'authenticated'
+  }
+
   async function logout(): Promise<void> {
     status.value = 'loading'
     useExpenseStore().reset()
@@ -162,6 +182,7 @@ export const useAuthStore = defineStore('auth', () => {
     refreshPublicConfig,
     useDevelopmentMock,
     selectDepartment,
+    selectDepartmentFromTravelApproval,
     logout,
   }
 })

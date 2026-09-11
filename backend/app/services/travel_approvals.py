@@ -157,6 +157,7 @@ class TravelApprovalSelection:
 @dataclass(frozen=True, slots=True)
 class VerifiedTravelSelection:
     approvals: tuple[TravelApprovalCandidate, ...]
+    department_id: str
     travel_type_option: FormOption
     start_date: date
     end_date: date
@@ -264,6 +265,7 @@ async def reverify_travel_approval_selection(
     *,
     current_user_id: str,
     selections: tuple[TravelApprovalSelection, ...],
+    expected_department_id: str | None = None,
 ) -> VerifiedTravelSelection:
     """Re-prove list membership before trusting selected instance details."""
 
@@ -317,6 +319,26 @@ async def reverify_travel_approval_selection(
             409,
         )
     approvals = tuple(item for item in resolved if item is not None)
+    department_ids = {
+        _required_text(item.instance.originator_department_id, field="originator_department_id")
+        for item in approvals
+    }
+    if len(department_ids) != 1:
+        raise ApiError(
+            "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH",
+            "所选出差审批的所在部门不同，不能放在同一张报销单中",
+            422,
+        )
+    department_id = next(iter(department_ids))
+    if expected_department_id is not None and department_id != _required_text(
+        expected_department_id,
+        field="expected_department_id",
+    ):
+        raise ApiError(
+            "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH",
+            "所选出差审批不属于本次报销部门，请重新选择",
+            422,
+        )
     travel_type_values = {item.listed.travel_type_option.value for item in approvals}
     source_travel_type_values = [
         item.listed.source_travel_type_value
@@ -352,6 +374,7 @@ async def reverify_travel_approval_selection(
         )
     return VerifiedTravelSelection(
         approvals=approvals,
+        department_id=department_id,
         travel_type_option=approvals[0].listed.travel_type_option,
         start_date=min(item.start_date for item in approvals),
         end_date=max(item.end_date for item in approvals),

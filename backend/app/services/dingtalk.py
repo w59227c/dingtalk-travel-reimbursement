@@ -59,6 +59,37 @@ class DingTalkService:
         except DingTalkOpenAPIError:
             raise self._safe_error() from None
 
+    async def get_department_identity(self, department_id: str) -> DepartmentIdentity:
+        """Resolve the canonical DingTalk department selected by an OA instance."""
+
+        from app.integrations.dingtalk.client import DingTalkOpenAPIError
+
+        normalized_id = str(department_id).strip()
+        if not normalized_id:
+            raise ApiError("TRAVEL_APPROVAL_DEPARTMENT_INVALID", "出差审批缺少所在部门", 422)
+        raw_id: int | str = int(normalized_id) if normalized_id.isdecimal() else normalized_id
+        try:
+            department = await self._oapi(
+                "/topapi/v2/department/get",
+                {"dept_id": raw_id, "language": "zh_CN"},
+                retry_invalid_token=True,
+                retry_transient=True,
+            )
+        except DingTalkOpenAPIError:
+            raise ApiError(
+                "TRAVEL_APPROVAL_DEPARTMENT_LOOKUP_FAILED",
+                "无法读取出差审批的所在部门，请稍后重试",
+                502,
+            ) from None
+        name = str(department.get("name") or "").strip()
+        if not name:
+            raise ApiError(
+                "TRAVEL_APPROVAL_DEPARTMENT_INVALID",
+                "出差审批的所在部门已失效，请联系管理员",
+                422,
+            )
+        return DepartmentIdentity(normalized_id, name)
+
     async def _get_identity(self, auth_code: str) -> DingTalkIdentity:
         user_info = await self._oapi(
             "/topapi/v2/user/getuserinfo",

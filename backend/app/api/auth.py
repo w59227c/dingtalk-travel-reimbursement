@@ -10,7 +10,10 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.database.session import get_db
+from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
+from app.models.session import UserSession, utc_now
 from app.schemas.common import success
+from app.schemas.reimbursements import RelatedApprovalSelectionInput
 from app.services.application_settings import get_app_title
 from app.services.dingtalk import DepartmentIdentity, DingTalkIdentity, DingTalkService
 from app.services.file_coordination import (
@@ -18,6 +21,7 @@ from app.services.file_coordination import (
     SessionFileCoordinator,
     SessionFilesRetired,
 )
+from app.services.oa_template_profiles import require_submission_ready_catalog
 from app.services.sessions import (
     CurrentSession,
     create_session,
@@ -25,9 +29,15 @@ from app.services.sessions import (
     require_csrf,
     rotate_csrf,
     selectable_departments,
+    serialize_departments,
     session_payload,
 )
 from app.services.temp_files import delete_session_files
+from app.services.travel_approvals import (
+    TravelApprovalQueryWindow,
+    TravelApprovalSelection,
+    reverify_travel_approval_selection,
+)
 
 router = APIRouter(tags=["authentication"])
 logger = logging.getLogger(__name__)
@@ -169,6 +179,55 @@ def select_department(
         raise ApiError("INVALID_DEPARTMENT", "只能选择当前用户所属的部门", 400)
     current.record.current_department_id = selected.id
     current.record.current_department_name = selected.name
+    database.commit()
+    return success({"selectedDepartment": {"id": selected.id, "name": selected.name}})
+
+
+@router.post("/me/department/from-travel-approval")
+async def select_department_from_travel_approval(
+    body: RelatedApprovalSelectionInput,
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_csrf)],
+) -> dict[str, object]:
+    """Bind reimbursement scope to the department recorded by a verified travel OA."""
+
+    catalog = require_submission_ready_catalog(database)
+    workflow: DingTalkWorkflowClient = request.app.state.dingtalk_workflow
+    service: DingTalkService = request.app.state.dingtalk_service
+    selection = TravelApprovalSelection(
+        profile_key=body.profile_key,
+        process_instance_id=body.process_instance_id,
+        query_window=TravelApprovalQueryWindow.from_dates(
+            body.query_window.from_date,
+            body.query_window.to_date,
+        ),
+    )
+    session_id_hash = current.record.session_id_hash
+    current_departments = current.departments
+    current_user_id = current.record.dingtalk_user_id
+    database.rollback()
+    verified = await reverify_travel_approval_selection(
+        workflow,
+        catalog,
+        current_user_id=current_user_id,
+        selections=(selection,),
+    )
+    selected = await service.get_department_identity(verified.department_id)
+    if selected.name.startswith("其他"):
+        raise ApiError(
+            "TRAVEL_APPROVAL_DEPARTMENT_INVALID",
+            "出差审批的所在部门不能用于报销，请重新选择",
+            422,
+        )
+
+    database.expire_all()
+    record = database.get(UserSession, session_id_hash)
+    if record is None or record.expires_at <= utc_now():
+        raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
+    record.departments_json = serialize_departments((selected, *current_departments))
+    record.current_department_id = selected.id
+    record.current_department_name = selected.name
     database.commit()
     return success({"selectedDepartment": {"id": selected.id, "name": selected.name}})
 

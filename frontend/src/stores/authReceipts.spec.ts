@@ -6,6 +6,7 @@ import {
   getPublicConfig,
   logout as logoutRequest,
   selectDepartment as selectDepartmentRequest,
+  selectDepartmentFromTravelApproval as selectDepartmentFromTravelApprovalRequest,
 } from '@/api/auth'
 import { getOaReimbursementOptions } from '@/api/reimbursements'
 import { useAuthStore } from '@/stores/auth'
@@ -29,6 +30,7 @@ vi.mock('@/api/auth', () => ({
   loginWithMock: vi.fn(),
   logout: vi.fn().mockResolvedValue(undefined),
   selectDepartment: vi.fn(),
+  selectDepartmentFromTravelApproval: vi.fn(),
 }))
 
 vi.mock('@/api/expenses', () => ({
@@ -244,6 +246,30 @@ describe('authentication clears scoped client memory', () => {
     expect(selectDepartmentRequest).toHaveBeenCalledWith('200')
     expect(auth.session?.selectedDepartment?.id).toBe('200')
     expect(expense.receiptFiles).toEqual([])
+    expect(drafts.drafts).toEqual([])
+  })
+
+  it('binds reimbursement scope from a travel approval without manual department input', async () => {
+    const auth = useAuthStore()
+    auth.session = { ...session(), selectedDepartment: null }
+    auth.status = 'department_required'
+    seedReceiptMemory()
+    const drafts = seedDraftMemory()
+    const selection = {
+      processInstanceId: 'travel-instance-20',
+      profileKey: 'domestic',
+      queryWindow: { from: '2026-07-01', to: '2026-07-31' },
+    }
+    vi.mocked(selectDepartmentFromTravelApprovalRequest).mockResolvedValue({
+      id: '200', name: '工业物联二部',
+    })
+
+    await auth.selectDepartmentFromTravelApproval(selection)
+
+    expect(selectDepartmentFromTravelApprovalRequest).toHaveBeenCalledWith(selection)
+    expect(auth.status).toBe('authenticated')
+    expect(auth.session?.selectedDepartment).toEqual({ id: '200', name: '工业物联二部' })
+    expect(auth.session?.departments[0]).toEqual({ id: '200', name: '工业物联二部' })
     expect(drafts.drafts).toEqual([])
   })
 
