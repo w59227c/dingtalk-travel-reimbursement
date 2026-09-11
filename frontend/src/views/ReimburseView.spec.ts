@@ -357,7 +357,10 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
       stubs: {
         ExpenseItemsCard: realMaterials ? false : ExpenseItemsCardStub,
         ExpenseSummaryCard: ExpenseSummaryCardStub,
-        RouterLink: { template: '<a><slot /></a>' },
+        RouterLink: {
+          props: ['to'],
+          template: '<a :data-to="to"><slot /></a>',
+        },
         TravelApprovalSelector: TravelApprovalSelectorStub,
         TripSubsidyCard: TripSubsidyCardStub,
       },
@@ -414,6 +417,7 @@ describe('ReimburseView single-form OA flow', () => {
 
     expect(wrapper.find('.current-user-id').exists()).toBe(false)
     expect(wrapper.get('.hero-actions').text()).toContain('系统设置')
+    expect(wrapper.get('.hero-actions a').attributes('data-to')).toBe('/m/settings')
     expect(wrapper.findAll('.mobile-step-nav button').map((button) => button.text())).toEqual([
       '1关联审批', '2范围补助', '3费用材料', '4核对提交',
     ])

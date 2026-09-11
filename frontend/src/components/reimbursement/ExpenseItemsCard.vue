@@ -596,6 +596,11 @@ function chooseReceiptFiles(): void {
   durableExpenseInput.value?.click()
 }
 
+function chooseItineraryFiles(): void {
+  if (durableActionDisabledReason.value || receiptUploadDisabledReason.value) return
+  durableItineraryInput.value?.click()
+}
+
 function choosePaymentProof(item: ExpenseItem, replaceId?: string, kind: 'payment_proof' | 'hotel_bill' = 'payment_proof'): void {
   if (durableActionDisabledReason.value || receiptUploadDisabledReason.value || !drafts.currentDraft) return
   paymentTarget.value = { itemId: item.id, draftId: drafts.currentDraft.id,
@@ -1287,7 +1292,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           data-testid="durable-itinerary-input"
           class="visually-hidden"
           type="file"
-          accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+          :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'itinerary')"
@@ -1568,6 +1573,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       v-else
       :data="expense.sortedItems"
       class="expense-table"
+      :class="{ 'expense-table--hidden': props.mobile }"
     >
       <el-table-column
         label="类型"
@@ -1771,7 +1777,10 @@ async function retryItemRecognition(id: string): Promise<void> {
         </template>
       </el-table-column>
     </el-table>
-    <div class="expense-mobile-list">
+    <div
+      class="expense-mobile-list"
+      :class="{ 'expense-mobile-list--active': props.mobile }"
+    >
       <article
         v-for="item in expense.sortedItems"
         :key="item.id"
@@ -2058,6 +2067,8 @@ async function retryItemRecognition(id: string): Promise<void> {
     width="min(520px, calc(100% - 24px))"
   >
     <el-form
+      class="expense-editor-form"
+      :class="{ 'expense-editor-form--mobile': props.mobile }"
       label-position="top"
       :disabled="props.readonly || batchActive"
     >
@@ -2256,14 +2267,29 @@ async function retryItemRecognition(id: string): Promise<void> {
           <p class="field-help">
             默认关联一个文件；一个文件可包含多次行程。只有材料分在多个文件中时才需补充。
           </p>
-          <el-button
-            v-if="!expandedItinerarySelection"
-            link
-            type="primary"
-            @click="expandedItinerarySelection = true"
-          >
-            ＋ 补充行程单文件
-          </el-button>
+          <div class="itinerary-editor-actions">
+            <el-button
+              link
+              type="primary"
+              :disabled="Boolean(durableActionDisabledReason)"
+              data-testid="editor-itinerary-upload"
+              @click="chooseItineraryFiles"
+            >
+              ＋ 上传新的行程单
+            </el-button>
+            <el-button
+              v-if="!expandedItinerarySelection && editorItineraryOptions.length > 1"
+              link
+              type="primary"
+              @click="expandedItinerarySelection = true"
+            >
+              关联多个已上传文件
+            </el-button>
+            <span
+              v-else-if="expandedItinerarySelection"
+              class="field-help itinerary-multiple-status"
+            >已开启多文件关联</span>
+          </div>
           <template v-if="editor.itineraryAutoMatchDisabled && editorSourceInvoice">
             <p class="field-help">
               已保留你的手动选择，刷新后也不会自动改变。需要重新匹配时，请先清空选择；重新匹配将保存当前编辑。
@@ -2341,6 +2367,47 @@ async function retryItemRecognition(id: string): Promise<void> {
 
 <style scoped>
 .receipt-upload-button { min-width: 148px; }
+.expense-table.expense-table--hidden { display: none; }
+.expense-mobile-list.expense-mobile-list--active { display: grid; gap: 12px; }
+.expense-mobile-list--active .expense-mobile-card {
+  padding: 14px;
+  border: 1px solid #e4e7ed;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgb(16 24 40 / 4%);
+}
+.expense-mobile-list--active .expense-mobile-card > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.expense-mobile-list--active .expense-mobile-card > div:first-child span {
+  color: #0958d9;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.expense-mobile-list--active .expense-mobile-card p {
+  margin: 8px 0 0;
+  color: #667085;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.expense-mobile-list--active .mobile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #f0f2f5;
+}
+.expense-mobile-list--active .mobile-actions :deep(.el-button) { margin-left: 0; }
+.expense-editor-form--mobile .trip-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+.expense-editor-form--mobile :deep(.el-input-number),
+.expense-editor-form--mobile :deep(.el-date-editor) { width: 100%; }
+.itinerary-editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; width: 100%; }
+.itinerary-editor-actions :deep(.el-button) { margin-left: 0; }
+.itinerary-multiple-status { margin: 0; }
 .receipt-header-actions--mobile {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

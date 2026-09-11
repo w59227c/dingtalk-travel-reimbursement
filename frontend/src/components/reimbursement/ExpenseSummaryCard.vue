@@ -78,8 +78,6 @@ async function downloadExcel(): Promise<void> {
         v-if="props.mobile"
         tag="a"
         :href="disabledReason ? undefined : mobilePreviewUrl"
-        :target="disabledReason ? undefined : '_blank'"
-        rel="noopener noreferrer"
         :disabled="Boolean(disabledReason)"
         data-testid="mobile-excel-preview-link"
       >
@@ -104,7 +102,7 @@ async function downloadExcel(): Promise<void> {
         class="field-help excel-preview-help"
       >
         {{ props.mobile
-          ? '点击后由钉钉直接打开或下载当前报销单；正式提交时仍会重新生成最终文件。'
+          ? '点击后在当前钉钉窗口下载报销单；正式提交时仍会重新生成最终文件。'
           : '预览前会自动保存当前内容；正式提交时生成最终报销单和票据汇总 PDF。' }}
       </p>
     </div>

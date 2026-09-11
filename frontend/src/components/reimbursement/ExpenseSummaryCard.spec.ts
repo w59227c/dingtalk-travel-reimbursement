@@ -87,7 +87,7 @@ describe('ExpenseSummaryCard', () => {
     wrapper.unmount()
   })
 
-  it('uses a real same-origin download link on mobile instead of an asynchronous Blob click', () => {
+  it('keeps the same-origin mobile download inside the DingTalk webview session', () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft()
     const wrapper = mount(ExpenseSummaryCard, {
@@ -99,7 +99,7 @@ describe('ExpenseSummaryCard', () => {
     expect(link.attributes('href')).toBe(
       '/api/reimbursements/drafts/draft-1/excel-preview?expectedRevision=2',
     )
-    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('target')).toBeUndefined()
     wrapper.unmount()
   })
 

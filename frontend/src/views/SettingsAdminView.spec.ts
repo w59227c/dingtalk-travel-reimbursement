@@ -93,6 +93,25 @@ describe('SettingsAdminView receipt keywords', () => {
     })
   })
 
+  it('returns mobile administrators to the mobile reimbursement entry', () => {
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile: true },
+      global: {
+        plugins: [createPinia(), ElementPlus],
+        stubs: {
+          RouterLink: {
+            props: ['to'],
+            template: '<a :data-to="to"><slot /></a>',
+          },
+        },
+      },
+    })
+
+    const reimbursementLink = wrapper.findAll('a').find((link) => link.text().trim() === '报销单')!
+    expect(reimbursementLink.attributes('data-to')).toBe('/m')
+    wrapper.unmount()
+  })
+
   it('lets an administrator add a fallback classification keyword', async () => {
     const wrapper = mount(SettingsAdminView, {
       global: {

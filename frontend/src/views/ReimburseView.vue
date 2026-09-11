@@ -642,7 +642,7 @@ onBeforeUnmount(() => {
       <div class="hero-actions">
         <RouterLink
           v-if="auth.isAdmin"
-          to="/admin/settings"
+          :to="props.mobile ? '/m/settings' : '/admin/settings'"
         >
           系统设置
         </RouterLink>

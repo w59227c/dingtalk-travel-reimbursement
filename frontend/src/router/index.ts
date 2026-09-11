@@ -24,13 +24,22 @@ const router = createRouter({
       component: () => import('@/views/SettingsAdminView.vue'),
       meta: { requiresAdmin: true },
     },
+    {
+      path: '/m/settings',
+      name: 'mobile-admin-settings',
+      component: () => import('@/views/SettingsAdminView.vue'),
+      props: { mobile: true },
+      meta: { requiresAdmin: true },
+    },
   ],
 })
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore(pinia)
   await auth.bootstrap()
-  if (to.meta.requiresAdmin && !auth.isAdmin) return { name: 'reimburse' }
+  if (to.meta.requiresAdmin && !auth.isAdmin) {
+    return { name: to.name === 'mobile-admin-settings' ? 'mobile-reimburse' : 'reimburse' }
+  }
   return true
 })
 

@@ -264,6 +264,26 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it('uses the readable card layout and one-column editor when mobile is explicit', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    expense.items = [{ id: 'mobile-item', source: 'manual', category: 'local_transport',
+      date: '2026-09-01', displayDate: '2026-09-01', description: '机场到酒店',
+      amount: '88.00', receiptCount: 1 }]
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.expense-table').classes()).toContain('expense-table--hidden')
+    expect(wrapper.get('.expense-mobile-list').classes()).toContain('expense-mobile-list--active')
+    expect(wrapper.get('.expense-mobile-card').text()).toContain('市内交通费')
+    await wrapper.get('.expense-mobile-card .mobile-actions button').trigger('click')
+    expect(wrapper.get('.expense-editor-form').classes()).toContain('expense-editor-form--mobile')
+    wrapper.unmount()
+  })
+
   it('offers one mixed-material upload entry and keeps unknown material out of expense totals', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
@@ -805,13 +825,40 @@ describe('ExpenseItemsCard durable files', () => {
     expect(field.findComponent({ name: 'ElSelect' }).props('multiple')).toBe(false)
     expect(field.findAllComponents({ name: 'ElOption' })[0]!.text()).toContain('合计 ¥60.00')
     expect(field.findAllComponents({ name: 'ElOption' })[0]!.text()).toContain('合肥机场 → 滨湖酒店')
-    await field.findAll('button').find((button) => button.text().includes('补充行程单文件'))!.trigger('click')
+    await field.findAll('button').find((button) => button.text().includes('关联多个已上传文件'))!.trigger('click')
     field.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', ['proof-1', 'proof-2'])
     await flushPromises()
     await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
     expect(expense.items[0]?.itineraryFileIds).toEqual(['proof-1', 'proof-2'])
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     expect(field.findComponent({ name: 'ElSelect' }).props('multiple')).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('opens the itinerary file picker from the editor without removing the upload entry', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const invoice = taxiInvoice()
+    drafts.files = [invoice]
+    expense.upsertDraftOcrItem(invoice)
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+    await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
+    await flushPromises()
+    const input = wrapper.get('[data-testid="durable-itinerary-input"]')
+    const click = vi.spyOn(input.element as HTMLInputElement, 'click')
+    const upload = wrapper.get('[data-testid="editor-itinerary-upload"]')
+
+    await upload.trigger('click')
+
+    expect(click).toHaveBeenCalledOnce()
+    expect(wrapper.get('[data-testid="editor-itinerary-upload"]').text()).toContain('上传新的行程单')
+    expect(input.attributes('accept')).toBeUndefined()
     wrapper.unmount()
   })
 
