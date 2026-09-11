@@ -17,6 +17,7 @@ import {
   listReimbursementDrafts,
   markReimbursementDraftReviewReady,
   recognizeReimbursementDraftFile,
+  reimbursementDraftExcelPreviewUrl,
   replaceReimbursementRelatedApprovals,
   submitOaReimbursement,
   updateReimbursementDraft,
@@ -55,6 +56,12 @@ const input: ReimbursementDraftInput = {
 describe('persistent reimbursement API', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  it('builds an encoded same-origin Excel preview URL for a native browser download', () => {
+    expect(reimbursementDraftExcelPreviewUrl('draft/一', 9)).toBe(
+      '/api/reimbursements/drafts/draft%2F%E4%B8%80/excel-preview?expectedRevision=9',
+    )
   })
 
   it('fetches an original attachment as a blob through the authenticated API client', async () => {

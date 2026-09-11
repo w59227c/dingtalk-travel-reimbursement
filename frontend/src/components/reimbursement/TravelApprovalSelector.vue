@@ -12,12 +12,14 @@ import { mappedTravelTypeOption } from '@/utils/travelTypes'
 const props = withDefaults(defineProps<{
   modelValue: ReimbursementRelatedApprovalSelection[]
   linkedApprovals?: ReimbursementRelatedApproval[]
+  mobile?: boolean
   readonly?: boolean
   single?: boolean
   requiredStartDate?: string
   requiredEndDate?: string
 }>(), {
   linkedApprovals: () => [],
+  mobile: false,
   readonly: false,
   single: false,
   requiredStartDate: '',
@@ -247,12 +249,15 @@ function accountingLabel(row: ApprovalRow): string {
       class="plain-fieldset"
       :disabled="readonly"
     >
-      <div class="travel-query-grid">
+      <div
+        class="travel-query-grid"
+        :class="{ 'travel-query-grid--mobile': props.mobile }"
+      >
         <el-date-picker
           v-model="fromDate"
           type="date"
           value-format="YYYY-MM-DD"
-          placeholder="查询开始日期"
+          :placeholder="props.mobile ? '开始日期' : '查询开始日期'"
           aria-label="出差审批查询开始日期"
           class="full-width"
         />
@@ -260,7 +265,7 @@ function accountingLabel(row: ApprovalRow): string {
           v-model="toDate"
           type="date"
           value-format="YYYY-MM-DD"
-          placeholder="查询结束日期"
+          :placeholder="props.mobile ? '结束日期' : '查询结束日期'"
           aria-label="出差审批查询结束日期"
           class="full-width"
         />
@@ -409,6 +414,29 @@ function accountingLabel(row: ApprovalRow): string {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(180px, 1.2fr) auto;
   gap: 10px;
+}
+
+.travel-query-grid--mobile {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.travel-query-grid--mobile > * {
+  min-width: 0;
+  width: 100%;
+}
+
+.travel-query-grid--mobile > :nth-child(3),
+.travel-query-grid--mobile > :nth-child(4) {
+  grid-column: 1 / -1;
+}
+
+.travel-query-grid--mobile :deep(.el-date-editor) {
+  min-width: 0;
+  width: 100%;
+}
+
+.travel-query-grid--mobile :deep(.el-button) {
+  margin-left: 0;
 }
 
 .travel-query-alert,

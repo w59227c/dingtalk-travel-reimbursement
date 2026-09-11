@@ -935,6 +935,34 @@ def test_excel_preview_recalculates_from_saved_draft_without_submission_side_eff
         assert database.scalar(select(func.count()).select_from(ReimbursementUpload)) == 0
 
 
+def test_excel_preview_can_be_opened_by_a_same_origin_mobile_link(
+    client_factory,
+    monkeypatch,
+) -> None:
+    from test_reimbursement_drafts import _catalog
+
+    from app.services import reimbursement_files
+
+    monkeypatch.setattr(
+        reimbursement_files, "require_submission_ready_catalog", lambda _: _catalog()
+    )
+    client = client_factory(auth_mock_enabled=True)
+    mock_login(client)
+    draft_id = _insert_draft(client, amount="44.89")
+
+    response = client.get(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+        params={"expectedRevision": 1},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_excel_preview_releases_sync_session_before_generation(
     client_factory,
     monkeypatch,

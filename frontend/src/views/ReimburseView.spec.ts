@@ -217,9 +217,10 @@ const ExpenseItemsCardStub = defineComponent({
 const TripSubsidyCardStub = defineComponent({
   name: 'TripSubsidyCard',
   props: {
+    mobile: { type: Boolean, default: false },
     readonly: { type: Boolean, default: false },
   },
-  template: '<section :data-readonly="String(readonly)">出差补助</section>',
+  template: '<section :data-mobile="String(mobile)" :data-readonly="String(readonly)">出差补助</section>',
 })
 const ExpenseSummaryCardStub = defineComponent({
   name: 'ExpenseSummaryCard',
@@ -232,6 +233,7 @@ const ExpenseSummaryCardStub = defineComponent({
 const TravelApprovalSelectorStub = defineComponent({
   name: 'TravelApprovalSelector',
   props: {
+    mobile: { type: Boolean, default: false },
     modelValue: { type: Array, required: true },
     linkedApprovals: { type: Array, default: () => [] },
     readonly: { type: Boolean, default: false },
@@ -411,11 +413,14 @@ describe('ReimburseView single-form OA flow', () => {
     const { wrapper } = await mountView(undefined, false, true)
 
     expect(wrapper.find('.current-user-id').exists()).toBe(false)
+    expect(wrapper.get('.hero-actions').text()).toContain('系统设置')
     expect(wrapper.findAll('.mobile-step-nav button').map((button) => button.text())).toEqual([
       '1关联审批', '2范围补助', '3费用材料', '4核对提交',
     ])
     expect(wrapper.get('[data-testid="mobile-approval-step"]').isVisible()).toBe(true)
     expect(wrapper.get('[data-testid="expense-items"]').attributes('data-mobile')).toBe('true')
+    expect(wrapper.findComponent(TravelApprovalSelectorStub).props('mobile')).toBe(true)
+    expect(wrapper.findComponent(TripSubsidyCardStub).props('mobile')).toBe(true)
 
     await wrapper.findAll('.mobile-step-nav button')[2]!.trigger('click')
 

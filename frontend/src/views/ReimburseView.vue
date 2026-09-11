@@ -193,7 +193,9 @@ const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({
   .filter((entry) => entry.missing.length))
 const pendingMaterialFiles = computed(() => drafts.files.filter(needsMaterialConfirmation))
 const previewDisabledReason = computed(() => expense.itemReadinessError
-  || (!budgetCodeValue.value ? '请先选择预算代码' : '') || (submitFlowPending.value ? '正在提交，请稍候' : ''))
+  || (!budgetCodeValue.value ? '请先选择预算代码' : '')
+  || (props.mobile && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
+  || (submitFlowPending.value ? '正在提交，请稍候' : ''))
 const unresolvedOcrFiles = computed(() => drafts.files.filter((file) =>
   file.status === 'ACTIVE' && file.role === 'EXPENSE_SOURCE'
   && !expense.items.some((item) => item.sourceFileId === file.id)
@@ -639,7 +641,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="hero-actions">
         <RouterLink
-          v-if="auth.isAdmin && !props.mobile"
+          v-if="auth.isAdmin"
           to="/admin/settings"
         >
           系统设置
@@ -695,6 +697,7 @@ onBeforeUnmount(() => {
       </p>
       <TravelApprovalSelector
         :model-value="selectedRelatedApprovals"
+        :mobile="props.mobile"
         :readonly="bindingApprovalDepartment"
         single
         @update:model-value="chooseTravelApprovalForDepartment"
@@ -793,6 +796,7 @@ onBeforeUnmount(() => {
 
               <TravelApprovalSelector
                 v-model="selectedRelatedApprovals"
+                :mobile="props.mobile"
                 :linked-approvals="drafts.currentDraft.relatedApprovals"
                 :readonly="formReadOnly || drafts.processingFiles"
               />
@@ -881,6 +885,7 @@ onBeforeUnmount(() => {
                 <p>所属公司、预算、类别和日期来自已关联审批，只需核对补助。</p>
               </header>
               <TripSubsidyCard
+                :mobile="props.mobile"
                 :readonly="formReadOnly"
                 :approvals="selectedSubsidyApprovals"
                 :approval-trip-type="selectedSubsidyTripType"
@@ -918,8 +923,9 @@ onBeforeUnmount(() => {
               <p>确认金额、票据张数、材料完整性和即将生成的 OA 附件。</p>
             </header>
             <ExpenseSummaryCard
+              :mobile="props.mobile"
               :preview-disabled-reason="previewDisabledReason"
-              :before-preview="flushAutosave"
+              :before-preview="props.mobile ? undefined : flushAutosave"
             />
             <el-card
               shadow="never"

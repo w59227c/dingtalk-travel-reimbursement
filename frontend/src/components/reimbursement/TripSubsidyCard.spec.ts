@@ -45,6 +45,26 @@ describe('TripSubsidyCard', () => {
     expect(wrapper.findAll('input[type="radio"]')).toHaveLength(8)
   })
 
+  it('uses a full-width approval heading in the explicit mobile presentation', () => {
+    const expense = useExpenseStore()
+    const selected = [{
+      processInstanceId: 'approval-long',
+      title: '王广硕提交的境内出差申请',
+      startDate: '2026-09-01',
+      endDate: '2026-09-03',
+    }]
+    expense.setTripType('business')
+    expense.syncSubsidyApprovals(selected)
+    expense.setSubsidyIncluded(true)
+    const wrapper = mount(TripSubsidyCard, {
+      props: { mobile: true, approvals: selected, approvalTripType: 'business' },
+      global: { plugins: [ElementPlus] },
+    })
+
+    expect(wrapper.get('.subsidy-item__heading').classes()).toContain('subsidy-item__heading--mobile')
+    expect(wrapper.get('.subsidy-approval-title').text()).toBe('王广硕提交的境内出差申请')
+  })
+
   it('merges overlapping approvals into one subsidy editor and keeps gaps separate', () => {
     const selected = [
       { processInstanceId: 'approval-1', title: '合肥一期', startDate: '2026-09-01', endDate: '2026-09-03' },

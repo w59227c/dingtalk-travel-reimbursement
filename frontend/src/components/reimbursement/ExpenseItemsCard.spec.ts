@@ -302,7 +302,7 @@ describe('ExpenseItemsCard durable files', () => {
     const fileClick = vi.spyOn(fileInput.element as HTMLInputElement, 'click')
     const imageClick = vi.spyOn(imageInput.element as HTMLInputElement, 'click')
 
-    expect(fileInput.attributes('accept')).toContain('.pdf')
+    expect(fileInput.attributes('accept')).toBeUndefined()
     expect(imageInput.attributes('accept')).not.toContain('.pdf')
     expect(imageInput.attributes('accept')).toContain('image/jpeg')
     await wrapper.get('[data-testid="mobile-file-upload-button"]').trigger('click')

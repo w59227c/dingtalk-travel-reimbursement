@@ -14,10 +14,12 @@ interface SubsidyApproval {
 }
 
 const props = withDefaults(defineProps<{
+  mobile?: boolean
   readonly?: boolean
   approvals?: readonly SubsidyApproval[]
   approvalTripType?: TripType | null
 }>(), {
+  mobile: false,
   readonly: false,
   approvals: () => [],
   approvalTripType: null,
@@ -145,10 +147,13 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           :key="group.key"
           class="subsidy-item"
         >
-          <div class="subsidy-item__heading">
+          <div
+            class="subsidy-item__heading"
+            :class="{ 'subsidy-item__heading--mobile': props.mobile }"
+          >
             <div>
               <strong>补助 {{ index + 1 }}</strong>
-              <p>
+              <p class="subsidy-approval-title">
                 {{ group.trips.map((item) => approvalFor(item)?.title || '出差审批').join('、') }}
               </p>
               <small v-if="group.trips.length > 1">由 {{ group.trips.length }} 张审批合并</small>
@@ -271,6 +276,30 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 16px;
+}
+
+.subsidy-item__heading > div {
+  min-width: 0;
+}
+
+.subsidy-item__heading.subsidy-item__heading--mobile {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
+.subsidy-item__heading.subsidy-item__heading--mobile .subsidy-approval-title {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.55;
+  overflow-wrap: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.subsidy-item__heading.subsidy-item__heading--mobile > span {
+  margin-top: 0;
+  white-space: normal;
 }
 
 .subsidy-item__heading p {

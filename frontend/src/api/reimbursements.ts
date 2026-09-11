@@ -51,6 +51,13 @@ function draftUrl(draftId: string): string {
   return `/reimbursements/drafts/${encodeURIComponent(draftId)}`
 }
 
+export function reimbursementDraftExcelPreviewUrl(
+  draftId: string,
+  expectedRevision: number,
+): string {
+  return `/api${draftUrl(draftId)}/excel-preview?expectedRevision=${encodeURIComponent(expectedRevision)}`
+}
+
 function fileUrl(draftId: string, fileId: string): string {
   return `${draftUrl(draftId)}/files/${encodeURIComponent(fileId)}`
 }

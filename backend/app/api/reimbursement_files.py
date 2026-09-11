@@ -378,6 +378,40 @@ async def preview_excel(
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(require_csrf)],
 ) -> StreamingResponse:
+    return await _excel_preview_response(
+        draft_id=draft_id,
+        expected_revision=body.expected_revision,
+        request=request,
+        database=database,
+        current=current,
+    )
+
+
+@router.get("/reimbursements/drafts/{draft_id}/excel-preview")
+async def open_excel_preview(
+    draft_id: str,
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(get_current_session)],
+    expected_revision: Annotated[int, Query(alias="expectedRevision", ge=1)],
+) -> StreamingResponse:
+    return await _excel_preview_response(
+        draft_id=draft_id,
+        expected_revision=expected_revision,
+        request=request,
+        database=database,
+        current=current,
+    )
+
+
+async def _excel_preview_response(
+    *,
+    draft_id: str,
+    expected_revision: int,
+    request: Request,
+    database: Session,
+    current: CurrentSession,
+) -> StreamingResponse:
     actor = draft_actor(current)
     employee_name = current.record.name
     database.rollback()
@@ -385,12 +419,15 @@ async def preview_excel(
         actor=actor,
         employee_name=employee_name,
         draft_id=draft_id,
-        expected_revision=body.expected_revision,
+        expected_revision=expected_revision,
         settings=request.app.state.settings,
         session_factory=request.app.state.database_session_factory,
     )
     return StreamingResponse(
         iter((result.content,)),
         media_type=XLSX_MEDIA_TYPE,
-        headers={"Content-Disposition": content_disposition(result.filename)},
+        headers={
+            "Content-Disposition": content_disposition(result.filename),
+            "Cache-Control": "no-store",
+        },
     )

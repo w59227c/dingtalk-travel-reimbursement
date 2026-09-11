@@ -1304,7 +1304,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           data-testid="durable-expense-input"
           class="visually-hidden"
           type="file"
-          accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+          :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'other', true)"

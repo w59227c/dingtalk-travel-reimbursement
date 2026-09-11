@@ -60,6 +60,16 @@ describe('TravelApprovalSelector', () => {
     }
   })
 
+  it('uses an explicit mobile query layout instead of relying on the WebView viewport', () => {
+    const wrapper = mount(TravelApprovalSelector, {
+      props: { modelValue: [], mobile: true },
+      global: { plugins: [ElementPlus] },
+    })
+
+    expect(wrapper.get('.travel-query-grid').classes()).toContain('travel-query-grid--mobile')
+    wrapper.unmount()
+  })
+
   it('emits the server profile and exact query window for a selected candidate', async () => {
     const drafts = useReimbursementDraftStore()
     drafts.travelApprovals = [candidate]
