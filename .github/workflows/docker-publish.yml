@@ -44,9 +44,7 @@ jobs:
         run: uv run --frozen --extra dev pytest
       - name: Lint backend and model downloader
         working-directory: backend
-        run: >-
-          uv run --frozen --extra dev ruff check app tests migrations scripts
-          ../scripts/render-production-env.py ../scripts/dispatch-deploy.py
+        run: uv run --frozen --extra dev ruff check app tests migrations scripts
 
   frontend:
     name: Frontend tests, lint and production build
@@ -121,10 +119,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      backend_image: ${{ steps.release.outputs.backend_image }}
-      web_image: ${{ steps.release.outputs.web_image }}
-      revision: ${{ steps.release.outputs.revision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -187,7 +181,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push tested images and write release manifest
-        id: release
         env:
           BACKEND_REPOSITORY: ${{ steps.names.outputs.backend }}
           WEB_REPOSITORY: ${{ steps.names.outputs.web }}
@@ -232,28 +225,11 @@ jobs:
                   raise SystemExit(f"Pushed {service} digest differs from the tested image")
               release[f"{service}_image"] = refs[0]
           Path("release.json").write_text(json.dumps(release, indent=2) + "\n")
-          with open(os.environ["GITHUB_OUTPUT"], "a") as outputs:
-              for name in ("backend_image", "web_image", "revision"):
-                  outputs.write(f"{name}={release[name]}\n")
           PY
-      - name: Retain the complete deployable release
+      - name: Retain the published image manifest
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-${{ github.sha }}-${{ github.run_attempt }}
           path: release.json
           if-no-files-found: error
           retention-days: 90
-
-  deploy:
-    name: Deploy protected version
-    needs: images
-    if: >-
-      github.event_name == 'push' && github.ref_type == 'tag' &&
-      startsWith(github.ref_name, 'v') && github.ref_protected &&
-      vars.DEPLOY_ENABLED == 'true'
-    uses: ./.github/workflows/deploy.yml
-    with:
-      backend_image: ${{ needs.images.outputs.backend_image }}
-      web_image: ${{ needs.images.outputs.web_image }}
-      revision: ${{ needs.images.outputs.revision }}
-    secrets: inherit

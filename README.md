@@ -383,10 +383,10 @@ Compose 将短期解析文件保留在 `/tmp/expense` 的 tmpfs，同时把报�
 
 ### 最短生产部署路径
 
-GitHub Actions 自动构建/发布与 SSH 自动部署见
-[镜像发布与部署配置](docs/GITHUB_ACTIONS_SETUP.md)。该路径在构建时下载并校验 OCR 模型，
-镜像内置模型、Excel 模板和 Nginx 配置；生产凭据由 GitHub Environment 在部署时注入。
-以下保留本地构建、宿主模型挂载的部署方式。
+GitHub Actions 自动构建和发布见
+[镜像构建与发布配置](docs/GITHUB_ACTIONS_SETUP.md)。该流程在构建时下载并校验 OCR 模型，
+镜像内置模型、Excel 模板和 Nginx 配置；流水线不读取生产 `.env`，也不执行服务器部署。
+以下保留本地构建和宿主模型挂载的部署方式。
 
 目标服务器使用 Linux x86_64/amd64。Apple Silicon Mac 上的 Docker Compose 会通过
 `TARGET_PLATFORM=linux/amd64` 将前后端统一构建为目标架构；本机运行时使用模拟架构，适合

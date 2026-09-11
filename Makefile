@@ -15,8 +15,7 @@ backend-test:
 	cd backend && uv run --frozen --extra dev pytest
 
 backend-lint:
-	cd backend && uv run --frozen --extra dev ruff check app tests migrations scripts \
-		../scripts/render-production-env.py ../scripts/dispatch-deploy.py
+	cd backend && uv run --frozen --extra dev ruff check app tests migrations scripts
 
 backend-format:
 	cd backend && uv run --frozen --extra dev ruff format app tests migrations
