@@ -39,6 +39,8 @@ const health = useHealthStore()
 const drafts = useReimbursementDraftStore()
 const submission = useReimbursementSubmissionStore()
 const expenseItemsCard = ref<InstanceType<typeof ExpenseItemsCard> | null>(null)
+const mobileFooterDock = ref<HTMLElement | null>(null)
+const mobileFooterHeight = ref(0)
 const mobileStep = ref(0)
 const mobileSteps = ['关联审批', '范围补助', '费用材料', '核对提交'] as const
 const companyValue = ref('')
@@ -62,6 +64,7 @@ let savePromise: Promise<void> | null = null
 let initializationScope = ''
 let initializedScope = ''
 let disposed = false
+let mobileFooterResizeObserver: ResizeObserver | undefined
 
 const companyOptions = computed(() => drafts.reimbursementOptions?.companyOptions ?? [])
 const budgetOptions = computed(() => drafts.reimbursementOptions?.budgetCodeOptions ?? [])
@@ -178,6 +181,9 @@ const saveLabel = computed(() => trackedSubmission.value && submission.succeeded
   : trackedSubmission.value || drafts.currentDraft?.status === 'LOCKED' ? '内容已锁定'
   : saveError.value ? '保存失败，内容仍保留在本页'
   : saving.value ? '正在保存…' : formDirty.value ? '等待保存…' : '已保存')
+const mobileShellStyle = computed(() => props.mobile && mobileFooterHeight.value > 0
+  ? { '--mobile-footer-height': `${mobileFooterHeight.value}px` }
+  : undefined)
 const submissionServiceReason = computed(() => submission.oaSubmissionEnabled === false
   ? (trackedSubmission.value || drafts.currentDraft?.status === 'LOCKED'
       ? 'OA提交服务未开启，请保留本次提交并稍后核对' : 'OA提交服务未开启，可继续填写')
@@ -599,11 +605,26 @@ watch(() => [
 function warnBeforeUnload(event: BeforeUnloadEvent): void {
   if (!formReadOnly.value && formDirty.value) { event.preventDefault(); event.returnValue = '' }
 }
+function updateMobileFooterHeight(): void {
+  const height = Math.ceil(mobileFooterDock.value?.getBoundingClientRect().height ?? 0)
+  if (height > 0) mobileFooterHeight.value = height
+}
+watch(mobileFooterDock, (footer) => {
+  mobileFooterResizeObserver?.disconnect()
+  mobileFooterResizeObserver = undefined
+  mobileFooterHeight.value = 0
+  if (!props.mobile || !footer) return
+  updateMobileFooterHeight()
+  if (typeof ResizeObserver === 'undefined') return
+  mobileFooterResizeObserver = new ResizeObserver(updateMobileFooterHeight)
+  mobileFooterResizeObserver.observe(footer)
+}, { flush: 'post' })
 onMounted(() => window.addEventListener('beforeunload', warnBeforeUnload))
 onBeforeUnmount(() => {
   disposed = true
   if (calculationTimer) clearTimeout(calculationTimer)
   if (autosaveTimer) clearTimeout(autosaveTimer)
+  mobileFooterResizeObserver?.disconnect()
   window.removeEventListener('beforeunload', warnBeforeUnload)
   submission.abort()
 })
@@ -613,6 +634,7 @@ onBeforeUnmount(() => {
   <main
     class="page-shell"
     :class="{ 'page-shell--mobile': props.mobile }"
+    :style="mobileShellStyle"
   >
     <section
       class="hero"
@@ -1086,6 +1108,7 @@ onBeforeUnmount(() => {
           </section>
           <div
             v-if="props.mobile"
+            ref="mobileFooterDock"
             class="mobile-step-footer-dock"
           >
             <footer class="mobile-step-footer">
@@ -1174,7 +1197,7 @@ onBeforeUnmount(() => {
   min-height: 100vh;
   min-height: 100dvh;
   width: min(100%, 560px);
-  padding: 16px 12px 0;
+  padding: 16px 12px var(--mobile-footer-height, 116px);
 }
 .hero--mobile {
   align-items: center;
@@ -1233,11 +1256,13 @@ onBeforeUnmount(() => {
 .page-shell--mobile :deep(.totals-grid) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .page-shell--mobile .primary-submit-area .el-button { display: none; }
 .mobile-step-footer-dock {
-  position: sticky;
+  position: fixed;
+  left: 50%;
   bottom: 0;
   z-index: 10;
-  margin: auto -12px 0;
+  width: min(100%, 560px);
   padding-top: 18px;
+  transform: translateX(-50%);
 }
 .mobile-step-footer {
   padding: 10px 12px max(12px, env(safe-area-inset-bottom));
@@ -1257,7 +1282,6 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 420px) {
   .page-shell--mobile { width: 100%; padding-inline: 8px; }
-  .mobile-step-footer-dock { margin-inline: -8px; }
   .mobile-step-nav button small { font-size: 9px; }
 }
 </style>

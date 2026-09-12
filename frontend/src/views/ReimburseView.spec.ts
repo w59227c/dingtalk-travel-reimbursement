@@ -434,6 +434,15 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it('reserves the measured height of the fixed mobile footer', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ height: 128 } as DOMRect)
+    const { wrapper } = await mountView(undefined, false, true)
+
+    expect(wrapper.get('.page-shell--mobile').attributes('style')).toContain('--mobile-footer-height: 128px')
+    expect(wrapper.get('.mobile-step-footer-dock').find('.mobile-step-footer').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it.each(['success', 'failure'] as const)('clears slow uploaded files without autosaving deleted references (%s)', async (outcome) => {
     vi.useFakeTimers()
     serverFiles = [activeFile, { ...activeFile, id: 'file-2', name: '第二张发票.pdf' }]
