@@ -1084,32 +1084,34 @@ onBeforeUnmount(() => {
               </section>
             </el-card>
           </section>
-          <footer
+          <div
             v-if="props.mobile"
-            class="mobile-step-footer"
+            class="mobile-step-footer-dock"
           >
-            <div class="mobile-footer-total">
-              <span>当前合计</span>
-              <strong>¥{{ expense.displayTotal }}</strong>
-            </div>
-            <div class="mobile-footer-actions">
-              <el-button
-                v-if="mobileStep > 0"
-                @click="selectMobileStep(mobileStep - 1)"
-              >
-                上一步
-              </el-button>
-              <el-button
-                type="primary"
-                :loading="mobileStep === 3 && (submitFlowPending || submission.submitting)"
-                :disabled="mobileStep === 3 && Boolean(submissionButtonReason)"
-                :title="mobileStep === 3 ? submissionButtonReason : ''"
-                @click="advanceMobileStep"
-              >
-                {{ mobileNextLabel }}
-              </el-button>
-            </div>
-          </footer>
+            <footer class="mobile-step-footer">
+              <div class="mobile-footer-total">
+                <span>当前合计</span>
+                <strong>¥{{ expense.displayTotal }}</strong>
+              </div>
+              <div class="mobile-footer-actions">
+                <el-button
+                  v-if="mobileStep > 0"
+                  @click="selectMobileStep(mobileStep - 1)"
+                >
+                  上一步
+                </el-button>
+                <el-button
+                  type="primary"
+                  :loading="mobileStep === 3 && (submitFlowPending || submission.submitting)"
+                  :disabled="mobileStep === 3 && Boolean(submissionButtonReason)"
+                  :title="mobileStep === 3 ? submissionButtonReason : ''"
+                  @click="advanceMobileStep"
+                >
+                  {{ mobileNextLabel }}
+                </el-button>
+              </div>
+            </footer>
+          </div>
         </template>
       </template>
     </template>
@@ -1167,6 +1169,10 @@ onBeforeUnmount(() => {
 .material-checklist-row .el-button { flex-shrink: 0; }
 .material-checklist p { margin: 8px 0 0; color: #667085; }
 .page-shell--mobile {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  min-height: 100dvh;
   width: min(100%, 560px);
   padding: 16px 12px 0;
 }
@@ -1226,11 +1232,14 @@ onBeforeUnmount(() => {
 .page-shell--mobile :deep(.el-card__body) { padding: 14px; }
 .page-shell--mobile :deep(.totals-grid) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .page-shell--mobile .primary-submit-area .el-button { display: none; }
-.mobile-step-footer {
+.mobile-step-footer-dock {
   position: sticky;
   bottom: 0;
   z-index: 10;
-  margin: 18px -12px 0;
+  margin: auto -12px 0;
+  padding-top: 18px;
+}
+.mobile-step-footer {
   padding: 10px 12px max(12px, env(safe-area-inset-bottom));
   border-top: 1px solid var(--el-border-color-lighter);
   background: rgb(255 255 255 / 96%);
@@ -1248,7 +1257,7 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 420px) {
   .page-shell--mobile { width: 100%; padding-inline: 8px; }
-  .mobile-step-footer { margin-inline: -8px; }
+  .mobile-step-footer-dock { margin-inline: -8px; }
   .mobile-step-nav button small { font-size: 9px; }
 }
 </style>
