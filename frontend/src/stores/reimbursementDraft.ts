@@ -16,6 +16,7 @@ import {
   listReimbursementDrafts,
   markReimbursementDraftReviewReady,
   recognizeReimbursementDraftFile,
+  requestReimbursementDraftExcelPreviewTicket,
   replaceReimbursementRelatedApprovals,
   updateReimbursementDraft,
   updateReimbursementDraftFile,
@@ -23,6 +24,7 @@ import {
 } from '@/api/reimbursements'
 import type { ListOaTravelApprovalsOptions } from '@/api/reimbursements'
 import { downloadBlob } from '@/api/excel'
+import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import type {
   OaReimbursementOptions,
   OaTravelApproval,
@@ -1144,6 +1146,74 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     }
   }
 
+  async function openExcelPreviewInDingTalk(): Promise<void> {
+    const target = requireCurrentDraft()
+    const draftId = target.id
+    const revision = target.revision
+    const intentVersion = currentIntentVersion
+    const refreshGuard = draftReadGuard(draftId, intentVersion)
+    const requestVersion = ++previewRequestVersion
+    activePreviewController?.abort()
+    const context = requestContext()
+    activePreviewController = context.controller
+    downloadingPreview.value = true
+    mutationError.value = ''
+    revisionConflict.value = false
+    try {
+      const ticket = await requestReimbursementDraftExcelPreviewTicket(draftId, revision, {
+        signal: context.controller.signal,
+      })
+      if (
+        !accepts(context)
+        || intentVersion !== currentIntentVersion
+        || requestVersion !== previewRequestVersion
+        || currentDraft.value?.id !== draftId
+        || currentDraft.value.revision !== revision
+      ) return
+      await downloadAndOpenDingTalkDocument({
+        url: new URL(ticket.downloadUrl, window.location.origin).href,
+        headers: { 'X-Reimbursement-Download-Token': ticket.downloadToken },
+        fileType: ticket.fileType,
+      })
+    } catch (error) {
+      if (
+        accepts(context)
+        && apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
+      ) {
+        const refreshed = await reloadAuthoritativeDraft(context, refreshGuard)
+        if (
+          accepts(context)
+          && intentVersion === currentIntentVersion
+          && requestVersion === previewRequestVersion
+          && currentDraft.value?.id === draftId
+        ) {
+          revisionConflict.value = true
+          mutationError.value = refreshed
+            ? '报销内容已在其他页面更新，已加载最新内容；请检查后重新操作'
+            : '报销内容已在其他页面更新，最新内容加载失败；请手动重新加载'
+        }
+      } else if (
+        accepts(context)
+        && intentVersion === currentIntentVersion
+        && requestVersion === previewRequestVersion
+        && currentDraft.value?.id === draftId
+        && !isCancellation(error)
+      ) {
+        mutationError.value = apiErrorMessage(error, 'Excel 预览打开失败，请重试')
+      }
+      throw error
+    } finally {
+      releaseRequest(context)
+      if (
+        context.epoch === lifecycleEpoch
+        && requestVersion === previewRequestVersion
+      ) {
+        downloadingPreview.value = false
+        if (activePreviewController === context.controller) activePreviewController = null
+      }
+    }
+  }
+
   function reset(): void {
     if (filePipeline) cancelFilePipeline(filePipeline.id)
     lifecycleEpoch += 1
@@ -1237,6 +1307,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     clearFiles,
     recognizeFile,
     downloadExcelPreview,
+    openExcelPreviewInDingTalk,
     reset,
   }
 })

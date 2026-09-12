@@ -110,6 +110,7 @@ from app.services.reimbursement_submissions import (
     reset_rejected_upload_commit,
 )
 from app.services.travel_approvals import (
+    dingtalk_process_query_ranges,
     travel_accounting_options,
     travel_approval_dates,
     travel_instance_type_option,
@@ -721,32 +722,42 @@ class SnapshotSubmissionMaterializer:
         expected_ids: set[str],
         heartbeat: WorkHeartbeat,
     ) -> frozenset[str]:
-        next_token = 0
         listed_ids: set[str] = set()
-        for _ in range(50):
-            page = await _call_with_heartbeat(
-                heartbeat,
-                lambda token=next_token: self._workflow.list_process_instance_ids(
-                    process_code=process_code,
-                    start_time=listed_from_ms,
-                    end_time=listed_to_ms,
-                    next_token=token,
-                    max_results=20,
-                    user_ids=(user_id,),
-                    statuses=("COMPLETED",),
-                ),
-            )
-            listed_ids.update(page.instance_ids)
-            if expected_ids.issubset(listed_ids):
-                return frozenset(listed_ids)
-            if page.next_token is None:
-                return frozenset(listed_ids)
-            next_token = page.next_token
-        raise ApiError(
-            "TRAVEL_APPROVAL_RESULT_LIMIT",
-            "关联出差审批查询结果过多，请缩小日期范围",
-            422,
-        )
+        page_count = 0
+        for range_start, range_end in dingtalk_process_query_ranges(
+            listed_from_ms,
+            listed_to_ms,
+        ):
+            next_token = 0
+            while True:
+                if page_count >= 50:
+                    raise ApiError(
+                        "TRAVEL_APPROVAL_RESULT_LIMIT",
+                        "关联出差审批查询结果过多，请缩小日期范围",
+                        422,
+                    )
+                page_count += 1
+                page = await _call_with_heartbeat(
+                    heartbeat,
+                    lambda token=next_token, start=range_start, end=range_end: (
+                        self._workflow.list_process_instance_ids(
+                            process_code=process_code,
+                            start_time=start,
+                            end_time=end,
+                            next_token=token,
+                            max_results=20,
+                            user_ids=(user_id,),
+                            statuses=("COMPLETED",),
+                        )
+                    ),
+                )
+                listed_ids.update(page.instance_ids)
+                if expected_ids.issubset(listed_ids):
+                    return frozenset(listed_ids)
+                if page.next_token is None:
+                    break
+                next_token = page.next_token
+        return frozenset(listed_ids)
 
 
 class DatabaseSubmissionState:
@@ -1513,7 +1524,7 @@ class DurableOAReimbursementWorker:
         except Exception as exc:
             # A processor must persist expected business failures itself. An
             # unexpected bug is intentionally left to lease-expiry recovery.
-            logger.error(
+            logger.exception(
                 "Reimbursement worker iteration failed",
                 extra={
                     "submission_id": lease.submission_id,
@@ -1617,6 +1628,18 @@ class OAReimbursementProcessor:
 
         try:
             await self._materializer.validate(job, heartbeat=heartbeat)
+        except ValueError:
+            logger.exception(
+                "Reimbursement validation rejected invalid local data",
+                extra={"submission_id": job.id},
+            )
+            await self._transition(
+                lease,
+                to_status=ReimbursementSubmissionStatus.FAILED_FINAL,
+                error_code="REIMBURSEMENT_VALIDATION_INVALID",
+                error_message="报销提交校验失败，请返回检查内容后重试",
+            )
+            return
         except ApiError as exc:
             if _is_retryable_validation_error(exc):
                 await self._schedule_retry(

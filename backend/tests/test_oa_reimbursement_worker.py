@@ -977,6 +977,22 @@ async def test_transient_validation_failure_is_retried_from_validation_phase() -
     assert state.job.resume_status is ReimbursementSubmissionStatus.VALIDATING
 
 
+async def test_invalid_local_validation_fails_instead_of_remaining_stuck() -> None:
+    state = FakeState(_job(ReimbursementSubmissionStatus.VALIDATING))
+    processor = OAReimbursementProcessor(
+        state=state,
+        materializer=FailingValidationMaterializer(ValueError("invalid local query range")),
+        workflow=FakeWorkflow(),
+        storage=FakeStorage(),
+        lease_seconds=30,
+        clock=lambda: NOW,
+    )
+
+    await processor.process(_lease(ReimbursementSubmissionStatus.VALIDATING))
+
+    assert state.job.status is ReimbursementSubmissionStatus.FAILED_FINAL
+
+
 async def test_validation_heartbeat_cas_failure_stops_before_next_remote_boundary() -> None:
     state = LeaseLosingState(
         _job(ReimbursementSubmissionStatus.VALIDATING),

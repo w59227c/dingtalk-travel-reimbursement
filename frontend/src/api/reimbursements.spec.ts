@@ -17,7 +17,7 @@ import {
   listReimbursementDrafts,
   markReimbursementDraftReviewReady,
   recognizeReimbursementDraftFile,
-  reimbursementDraftExcelPreviewUrl,
+  requestReimbursementDraftExcelPreviewTicket,
   replaceReimbursementRelatedApprovals,
   submitOaReimbursement,
   updateReimbursementDraft,
@@ -58,9 +58,19 @@ describe('persistent reimbursement API', () => {
     vi.clearAllMocks()
   })
 
-  it('builds an encoded same-origin Excel preview URL for a native browser download', () => {
-    expect(reimbursementDraftExcelPreviewUrl('draft/一', 9)).toBe(
-      '/api/reimbursements/drafts/draft%2F%E4%B8%80/excel-preview?expectedRevision=9',
+  it('requests a short-lived native Excel download ticket', async () => {
+    const ticket = {
+      downloadUrl: '/api/reimbursements/drafts/draft%2F%E4%B8%80/excel-preview/native',
+      downloadToken: 'signed-ticket',
+      fileType: 'xlsx' as const,
+    }
+    vi.mocked(http.post).mockResolvedValue({ data: { data: ticket } })
+
+    await expect(requestReimbursementDraftExcelPreviewTicket('draft/一', 9)).resolves.toBe(ticket)
+    expect(http.post).toHaveBeenCalledWith(
+      '/reimbursements/drafts/draft%2F%E4%B8%80/excel-preview-ticket',
+      { expectedRevision: 9 },
+      { signal: undefined },
     )
   })
 

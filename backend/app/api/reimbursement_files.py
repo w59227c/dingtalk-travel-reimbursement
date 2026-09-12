@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session, sessionmaker
@@ -12,9 +13,15 @@ from app.core.config import Settings
 from app.core.errors import ApiError
 from app.database.session import get_db
 from app.models.reimbursement import ReimbursementAttachmentKind, ReimbursementDraftFileRole
+from app.models.session import UserSession, utc_now
 from app.schemas.common import success
 from app.schemas.reimbursements import DraftRevisionRequest
 from app.services.excel_generator import XLSX_MEDIA_TYPE, content_disposition
+from app.services.excel_preview_tickets import (
+    InvalidExcelPreviewTicket,
+    issue_excel_preview_ticket,
+    verify_excel_preview_ticket,
+)
 from app.services.file_coordination import (
     SessionFileCoordinator,
     SessionFilesRetired,
@@ -52,6 +59,7 @@ from app.services.reimbursement_staging import (
 )
 from app.services.sessions import (
     CurrentSession,
+    deserialize_departments,
     get_current_session,
     require_csrf,
     require_fresh_active_file_session,
@@ -59,6 +67,7 @@ from app.services.sessions import (
 from app.services.temp_files import close_upload_file, new_upload_budget
 
 router = APIRouter(tags=["reimbursement-files"])
+_EXCEL_PREVIEW_TICKET_LIFETIME = timedelta(seconds=60)
 
 
 class StrictRequest(BaseModel):
@@ -398,6 +407,93 @@ async def open_excel_preview(
     return await _excel_preview_response(
         draft_id=draft_id,
         expected_revision=expected_revision,
+        request=request,
+        database=database,
+        current=current,
+    )
+
+
+@router.post("/reimbursements/drafts/{draft_id}/excel-preview-ticket")
+def create_excel_preview_ticket(
+    draft_id: str,
+    body: DraftRevisionRequest,
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_csrf)],
+) -> dict[str, object]:
+    actor = draft_actor(current)
+    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    if draft.revision != body.expected_revision:
+        raise ApiError(
+            "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
+            "报销内容已在其他页面更新，请刷新后重试",
+            409,
+        )
+    token = issue_excel_preview_ticket(
+        draft_id=draft_id,
+        expected_revision=body.expected_revision,
+        session_id_hash=current.record.session_id_hash,
+        secret=request.app.state.settings.session_secret,
+        lifetime=_EXCEL_PREVIEW_TICKET_LIFETIME,
+    )
+    return success(
+        {
+            "downloadUrl": (
+                f"/api/reimbursements/drafts/{quote(draft_id, safe='')}/excel-preview/native"
+            ),
+            "downloadToken": token,
+            "fileType": "xlsx",
+        }
+    )
+
+
+@router.get("/reimbursements/drafts/{draft_id}/excel-preview/native")
+async def download_native_excel_preview(
+    draft_id: str,
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    download_token: Annotated[
+        str | None,
+        Header(alias="X-Reimbursement-Download-Token"),
+    ] = None,
+) -> StreamingResponse:
+    settings: Settings = request.app.state.settings
+    try:
+        ticket = verify_excel_preview_ticket(
+            download_token or "",
+            secret=settings.session_secret,
+        )
+    except InvalidExcelPreviewTicket as exc:
+        raise ApiError(
+            "EXCEL_PREVIEW_TICKET_INVALID",
+            "Excel 预览凭证已失效，请返回钉钉重新打开",
+            401,
+        ) from exc
+    if ticket.draft_id != draft_id:
+        raise ApiError(
+            "EXCEL_PREVIEW_TICKET_INVALID",
+            "Excel 预览凭证已失效，请返回钉钉重新打开",
+            401,
+        )
+    record = database.get(UserSession, ticket.session_id_hash)
+    if (
+        record is None
+        or record.expires_at <= utc_now()
+        or record.corp_id != settings.dingtalk_corp_id
+        or not str(record.dingtalk_union_id or "").strip()
+    ):
+        raise ApiError(
+            "EXCEL_PREVIEW_TICKET_INVALID",
+            "登录状态已失效，请从公司钉钉工作台重新进入",
+            401,
+        )
+    current = CurrentSession(
+        record=record,
+        departments=deserialize_departments(record.departments_json),
+    )
+    return await _excel_preview_response(
+        draft_id=draft_id,
+        expected_revision=ticket.expected_revision,
         request=request,
         database=database,
         current=current,

@@ -4,7 +4,7 @@ const bridge = vi.hoisted(() => ({}) as Record<string, unknown>)
 
 vi.mock('dingtalk-jsapi', () => ({ default: bridge }))
 
-import { requestDingTalkAuthCode } from './dingtalk'
+import { downloadAndOpenDingTalkDocument, requestDingTalkAuthCode } from './dingtalk'
 
 describe('requestDingTalkAuthCode', () => {
   beforeEach(() => {
@@ -55,5 +55,46 @@ describe('requestDingTalkAuthCode', () => {
     await vi.advanceTimersByTimeAsync(8_000)
 
     await result
+  })
+})
+
+describe('downloadAndOpenDingTalkDocument', () => {
+  beforeEach(() => {
+    for (const key of Object.keys(bridge)) delete bridge[key]
+  })
+
+  it('downloads with the native API and opens the returned local document', async () => {
+    bridge.ready = (callback: () => void) => callback()
+    bridge.downloadFile = vi.fn((input: {
+      success?: (result: { filePath: string }) => void
+    }) => input.success?.({ filePath: 'file:///local/preview.xlsx' }))
+    bridge.openDocument = vi.fn((input: {
+      success?: (result: Record<string, never>) => void
+    }) => input.success?.({}))
+
+    await downloadAndOpenDingTalkDocument({
+      url: 'https://expense.example/api/preview/native',
+      headers: { 'X-Reimbursement-Download-Token': 'signed-ticket' },
+      fileType: 'xlsx',
+    })
+
+    expect(bridge.downloadFile).toHaveBeenCalledWith(expect.objectContaining({
+      url: 'https://expense.example/api/preview/native',
+      header: { 'X-Reimbursement-Download-Token': 'signed-ticket' },
+    }))
+    expect(bridge.openDocument).toHaveBeenCalledWith(expect.objectContaining({
+      filePath: 'file:///local/preview.xlsx',
+      fileType: 'xlsx',
+    }))
+  })
+
+  it('reports an unsupported DingTalk client instead of opening a browser', async () => {
+    bridge.ready = (callback: () => void) => callback()
+
+    await expect(downloadAndOpenDingTalkDocument({
+      url: 'https://expense.example/api/preview/native',
+      headers: {},
+      fileType: 'xlsx',
+    })).rejects.toThrow('当前钉钉客户端不支持文件预览')
   })
 })

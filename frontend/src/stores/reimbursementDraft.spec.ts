@@ -14,12 +14,14 @@ import {
   listReimbursementDrafts,
   markReimbursementDraftReviewReady,
   recognizeReimbursementDraftFile,
+  requestReimbursementDraftExcelPreviewTicket,
   replaceReimbursementRelatedApprovals,
   updateReimbursementDraft,
   updateReimbursementDraftFile,
   uploadReimbursementDraftFile,
 } from '@/api/reimbursements'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
+import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import type {
   ReimbursementDraft,
   ReimbursementDraftFile,
@@ -39,11 +41,13 @@ vi.mock('@/api/reimbursements', () => ({
   listReimbursementDrafts: vi.fn(),
   markReimbursementDraftReviewReady: vi.fn(),
   recognizeReimbursementDraftFile: vi.fn(),
+  requestReimbursementDraftExcelPreviewTicket: vi.fn(),
   replaceReimbursementRelatedApprovals: vi.fn(),
   updateReimbursementDraft: vi.fn(),
   updateReimbursementDraftFile: vi.fn(),
   uploadReimbursementDraftFile: vi.fn(),
 }))
+vi.mock('@/utils/dingtalk', () => ({ downloadAndOpenDingTalkDocument: vi.fn() }))
 
 const input: ReimbursementDraftInput = {
   ocrDispositionVersion: 1,
@@ -1210,6 +1214,31 @@ describe('persistent reimbursement draft store', () => {
 
     expect(downloadBlob).not.toHaveBeenCalled()
     expect(store.downloadingPreview).toBe(false)
+  })
+
+  it('opens a mobile Excel ticket with DingTalk native APIs and no browser navigation', async () => {
+    vi.mocked(createReimbursementDraft).mockResolvedValue(draft())
+    vi.mocked(requestReimbursementDraftExcelPreviewTicket).mockResolvedValue({
+      downloadUrl: '/api/reimbursements/drafts/draft-1/excel-preview/native',
+      downloadToken: 'signed-ticket',
+      fileType: 'xlsx',
+    })
+    vi.mocked(downloadAndOpenDingTalkDocument).mockResolvedValue(undefined)
+    const store = useReimbursementDraftStore()
+    await store.createDraft(input)
+
+    await store.openExcelPreviewInDingTalk()
+
+    expect(requestReimbursementDraftExcelPreviewTicket).toHaveBeenCalledWith(
+      'draft-1',
+      1,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(downloadAndOpenDingTalkDocument).toHaveBeenCalledWith({
+      url: 'http://localhost/api/reimbursements/drafts/draft-1/excel-preview/native',
+      headers: { 'X-Reimbursement-Download-Token': 'signed-ticket' },
+      fileType: 'xlsx',
+    })
   })
 
   it('refreshes a conflicted preview without replaying its POST', async () => {

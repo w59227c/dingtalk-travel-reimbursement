@@ -935,7 +935,7 @@ def test_excel_preview_recalculates_from_saved_draft_without_submission_side_eff
         assert database.scalar(select(func.count()).select_from(ReimbursementUpload)) == 0
 
 
-def test_excel_preview_can_be_opened_by_a_same_origin_mobile_link(
+def test_excel_preview_native_ticket_survives_external_download_without_session_cookie(
     client_factory,
     monkeypatch,
 ) -> None:
@@ -947,12 +947,21 @@ def test_excel_preview_can_be_opened_by_a_same_origin_mobile_link(
         reimbursement_files, "require_submission_ready_catalog", lambda _: _catalog()
     )
     client = client_factory(auth_mock_enabled=True)
-    mock_login(client)
+    csrf = str(mock_login(client)["csrfToken"])
     draft_id = _insert_draft(client, amount="44.89")
 
+    issued = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview-ticket",
+        headers={"X-CSRF-Token": csrf},
+        json={"expectedRevision": 1},
+    )
+    assert issued.status_code == 200, issued.text
+    ticket = issued.json()["data"]
+
+    client.cookies.clear()
     response = client.get(
-        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
-        params={"expectedRevision": 1},
+        ticket["downloadUrl"],
+        headers={"X-Reimbursement-Download-Token": ticket["downloadToken"]},
     )
 
     assert response.status_code == 200, response.text
@@ -961,6 +970,31 @@ def test_excel_preview_can_be_opened_by_a_same_origin_mobile_link(
     )
     assert "attachment" in response.headers["content-disposition"]
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_excel_preview_native_ticket_rejects_tampering_without_session_cookie(
+    client_factory,
+) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    issued = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview-ticket",
+        headers={"X-CSRF-Token": csrf},
+        json={"expectedRevision": 1},
+    )
+    ticket = issued.json()["data"]
+    token = ticket["downloadToken"]
+    tampered = f"{token[:-1]}{'0' if token[-1] != '0' else '1'}"
+
+    client.cookies.clear()
+    response = client.get(
+        ticket["downloadUrl"],
+        headers={"X-Reimbursement-Download-Token": tampered},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "EXCEL_PREVIEW_TICKET_INVALID"
 
 
 def test_excel_preview_releases_sync_session_before_generation(

@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
 import { computed } from 'vue'
-
-import { reimbursementDraftExcelPreviewUrl } from '@/api/reimbursements'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 
@@ -30,11 +28,6 @@ const disabledReason = computed(() => {
   if (drafts.pendingMutations > 0 && !props.beforePreview) return '请等待内容保存完成'
   return ''
 })
-const mobilePreviewUrl = computed(() => {
-  const draft = drafts.currentDraft
-  return draft ? reimbursementDraftExcelPreviewUrl(draft.id, draft.revision) : ''
-})
-
 async function downloadExcel(): Promise<void> {
   if (disabledReason.value) {
     ElMessage.warning(disabledReason.value)
@@ -42,8 +35,13 @@ async function downloadExcel(): Promise<void> {
   }
   try {
     await props.beforePreview?.()
-    await drafts.downloadExcelPreview()
-    ElMessage.success('已生成报销单 Excel 预览')
+    if (props.mobile) {
+      await drafts.openExcelPreviewInDingTalk()
+      ElMessage.success('已在钉钉中打开 Excel 预览')
+    } else {
+      await drafts.downloadExcelPreview()
+      ElMessage.success('已生成报销单 Excel 预览')
+    }
   } catch (error) {
     ElMessage.error(
       drafts.mutationError
@@ -75,21 +73,12 @@ async function downloadExcel(): Promise<void> {
     />
     <div class="excel-download-action">
       <el-button
-        v-if="props.mobile"
-        tag="a"
-        :href="disabledReason ? undefined : mobilePreviewUrl"
-        :disabled="Boolean(disabledReason)"
-        data-testid="mobile-excel-preview-link"
-      >
-        打开 Excel
-      </el-button>
-      <el-button
-        v-else
         :loading="drafts.downloadingPreview"
         :disabled="Boolean(disabledReason)"
+        :data-testid="props.mobile ? 'mobile-excel-preview-button' : undefined"
         @click="downloadExcel"
       >
-        预览 Excel
+        {{ props.mobile ? '打开 Excel' : '预览 Excel' }}
       </el-button>
       <p
         v-if="disabledReason"
@@ -102,7 +91,7 @@ async function downloadExcel(): Promise<void> {
         class="field-help excel-preview-help"
       >
         {{ props.mobile
-          ? '点击后在当前钉钉窗口下载报销单；正式提交时仍会重新生成最终文件。'
+          ? '点击后由钉钉下载并打开报销单；正式提交时仍会重新生成最终文件。'
           : '预览前会自动保存当前内容；正式提交时生成最终报销单和票据汇总 PDF。' }}
       </p>
     </div>

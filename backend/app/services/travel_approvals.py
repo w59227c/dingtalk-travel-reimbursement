@@ -453,16 +453,37 @@ async def _list_approval_references(
 def _dingtalk_query_windows(
     query_window: TravelApprovalQueryWindow,
 ) -> tuple[TravelApprovalQueryWindow, ...]:
-    windows: list[TravelApprovalQueryWindow] = []
-    from_date = query_window.from_date
-    while from_date <= query_window.to_date:
-        to_date = min(
-            from_date + timedelta(days=_DINGTALK_MAX_QUERY_DAYS - 1),
-            query_window.to_date,
+    ranges = dingtalk_process_query_ranges(
+        query_window.start_time_ms,
+        query_window.end_time_ms,
+    )
+    return tuple(
+        TravelApprovalQueryWindow(
+            from_date=datetime.fromtimestamp(start / 1000, _DINGTALK_TIME_ZONE).date(),
+            to_date=datetime.fromtimestamp(end / 1000, _DINGTALK_TIME_ZONE).date(),
+            start_time_ms=start,
+            end_time_ms=end,
         )
-        windows.append(TravelApprovalQueryWindow.from_dates(from_date, to_date))
-        from_date = to_date + timedelta(days=1)
-    return tuple(windows)
+        for start, end in ranges
+    )
+
+
+def dingtalk_process_query_ranges(
+    start_time_ms: int,
+    end_time_ms: int,
+) -> tuple[tuple[int, int], ...]:
+    """Split one inclusive business window into DingTalk-safe query ranges."""
+
+    if start_time_ms < 0 or end_time_ms < start_time_ms:
+        raise ValueError("invalid process instance query time range")
+    max_duration_ms = _DINGTALK_MAX_QUERY_DAYS * 24 * 60 * 60 * 1000
+    ranges: list[tuple[int, int]] = []
+    start = start_time_ms
+    while start <= end_time_ms:
+        end = min(start + max_duration_ms - 1, end_time_ms)
+        ranges.append((start, end))
+        start = end + 1
+    return tuple(ranges)
 
 
 async def _resolve_details(

@@ -87,19 +87,20 @@ describe('ExpenseSummaryCard', () => {
     wrapper.unmount()
   })
 
-  it('keeps the same-origin mobile download inside the DingTalk webview session', () => {
+  it('uses the DingTalk native document flow on mobile instead of a browser link', async () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft()
+    const preview = vi.spyOn(drafts, 'openExcelPreviewInDingTalk').mockResolvedValue(undefined)
     const wrapper = mount(ExpenseSummaryCard, {
       props: { mobile: true },
       global: { plugins: [ElementPlus] },
     })
 
-    const link = wrapper.get('[data-testid="mobile-excel-preview-link"]')
-    expect(link.attributes('href')).toBe(
-      '/api/reimbursements/drafts/draft-1/excel-preview?expectedRevision=2',
-    )
-    expect(link.attributes('target')).toBeUndefined()
+    const button = wrapper.get('[data-testid="mobile-excel-preview-button"]')
+    expect(button.element.tagName).toBe('BUTTON')
+    await button.trigger('click')
+
+    expect(preview).toHaveBeenCalledOnce()
     wrapper.unmount()
   })
 

@@ -18,6 +18,7 @@ import type {
   ReimbursementDraftList,
   ReimbursementDraftOcrInput,
   ReimbursementExcelPreview,
+  ReimbursementExcelPreviewTicket,
   ReimbursementRelatedApprovalSelection,
   ReimbursementSubmission,
   SubmitReimbursementInput,
@@ -49,13 +50,6 @@ export interface ListOaTravelApprovalsOptions extends ReimbursementRequestOption
 
 function draftUrl(draftId: string): string {
   return `/reimbursements/drafts/${encodeURIComponent(draftId)}`
-}
-
-export function reimbursementDraftExcelPreviewUrl(
-  draftId: string,
-  expectedRevision: number,
-): string {
-  return `/api${draftUrl(draftId)}/excel-preview?expectedRevision=${encodeURIComponent(expectedRevision)}`
 }
 
 function fileUrl(draftId: string, fileId: string): string {
@@ -320,6 +314,19 @@ export async function getReimbursementDraftExcelPreview(
       DRAFT_EXCEL_PREVIEW_FILENAME,
     ),
   }
+}
+
+export async function requestReimbursementDraftExcelPreviewTicket(
+  draftId: string,
+  expectedRevision: number,
+  options: ReimbursementRequestOptions = {},
+): Promise<ReimbursementExcelPreviewTicket> {
+  const response = await http.post<ApiEnvelope<ReimbursementExcelPreviewTicket>>(
+    `${draftUrl(draftId)}/excel-preview-ticket`,
+    { expectedRevision },
+    { signal: options.signal },
+  )
+  return response.data.data
 }
 
 export async function getReimbursementFileContent(

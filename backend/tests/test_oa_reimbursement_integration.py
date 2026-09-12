@@ -12,7 +12,7 @@ from conftest import mock_login
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from pypdf import PdfReader
-from sqlalchemy import select
+from sqlalchemy import select, update
 from test_receipt_bundle import image_bytes, pdf_bytes
 
 from app.api import reimbursement_submissions as submission_api
@@ -929,6 +929,76 @@ def test_validation_shares_membership_pages_across_related_approvals(
     assert asyncio.run(worker.run_once()) is False
     assert workflow.query_calls == 2
     assert workflow.travel_detail_calls == 2
+
+
+def test_validation_splits_a_180_day_membership_window_before_querying_dingtalk(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+
+    class RangeCheckingWorkflow(LocalWorkflowBoundary):
+        def __init__(self) -> None:
+            super().__init__(reimbursement_schema, travel_schema)
+            self.query_ranges: list[tuple[int, int]] = []
+
+        async def list_process_instance_ids(
+            self,
+            *,
+            process_code: str,
+            start_time: int,
+            end_time: int,
+            next_token: int,
+            **_kwargs,
+        ) -> WorkflowInstanceIdPage:
+            assert process_code == TRAVEL_PROCESS_CODE
+            assert next_token == 0
+            assert end_time - start_time < 120 * 24 * 60 * 60 * 1000
+            self.query_calls += 1
+            self.query_ranges.append((start_time, end_time))
+            return WorkflowInstanceIdPage(
+                () if len(self.query_ranges) == 1 else (TRAVEL_INSTANCE_ID,),
+                None,
+            )
+
+    workflow = RangeCheckingWorkflow()
+    storage = LocalStorageBoundary()
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    listed_from_ms = 1_773_590_400_000
+    listed_to_ms = 1_789_142_399_999
+    with client.app.state.database_session_factory() as database:
+        database.execute(
+            update(ReimbursementDraftRelatedApproval)
+            .where(ReimbursementDraftRelatedApproval.draft_id == draft_id)
+            .values(
+                listed_from_ms=listed_from_ms,
+                listed_to_ms=listed_to_ms,
+            )
+        )
+        database.commit()
+
+    submitted = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 4},
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "66666666-6666-4666-8666-777777777777",
+        },
+    )
+    assert submitted.status_code == 202, submitted.text
+
+    assert asyncio.run(_worker(client, workflow, storage).run_once()) is True
+
+    result = client.get(
+        f"/api/oa/reimbursements/submissions/{submitted.json()['data']['submissionId']}"
+    )
+    assert result.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value
+    assert workflow.query_ranges[0][0] == listed_from_ms
+    assert workflow.query_ranges[-1][1] == listed_to_ms
+    assert workflow.query_ranges[0][1] + 1 == workflow.query_ranges[1][0]
+    assert len(workflow.query_ranges) == 2
+    assert workflow.create_calls == 1
 
 
 def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(

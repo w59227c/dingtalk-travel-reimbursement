@@ -591,6 +591,31 @@ function readableWarning(warning: string): string {
   return warningLabels[warning] ?? '请核对识别结果'
 }
 
+function mobileItemNeedsAttention(item: ExpenseItem): boolean {
+  return moneyToCents(item.amount) === 0
+    || Boolean(item.warnings?.length)
+    || Boolean(durableFileError(durableFileByItemId(item.id)))
+    || Boolean(isForeignExpense(item) && !item.cnyAmountConfirmed)
+}
+
+function meaningfulMobileDescription(item: ExpenseItem): string {
+  const description = item.description.trim()
+  const category = categoryNames.value[item.category] ?? item.category
+  return description && description !== category ? description : ''
+}
+
+function readableMobileFileName(file: ReimbursementDraftFile | undefined): string {
+  if (!file) return ''
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12,64}(?:\.[a-z0-9]+)?$/i.test(file.name)) {
+    return file.name
+  }
+  const extension = file.name.includes('.') ? `.${file.name.split('.').at(-1)}` : ''
+  const label = file.role === 'EXPENSE_SOURCE'
+    ? '原始票据'
+    : attachmentKindLabels[file.attachmentKind ?? 'other']
+  return `${label}${extension}`
+}
+
 function chooseReceiptFiles(): void {
   if (props.readonly) return
   durableExpenseInput.value?.click()
@@ -1237,6 +1262,7 @@ async function retryItemRecognition(id: string): Promise<void> {
   <el-card
     shadow="never"
     class="content-card reimbursement-card"
+    :class="{ 'reimbursement-card--mobile': props.mobile }"
   >
     <template #header>
       <div class="card-header">
@@ -1249,8 +1275,10 @@ async function retryItemRecognition(id: string): Promise<void> {
           :class="{ 'receipt-header-actions--mobile': props.mobile }"
         >
           <el-button
+            class="clear-files-button"
             type="danger"
-            plain
+            :plain="!props.mobile"
+            :link="props.mobile"
             :disabled="Boolean(durableActionDisabledReason) || !clearableDurableFiles.length"
             :title="durableActionDisabledReason || '清空当前报销已上传的文件，保留手工费用和基本信息'"
             @click="clearDurableFiles"
@@ -1258,6 +1286,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             清空文件
           </el-button>
           <el-button
+            class="manual-item-button"
             :loading="expense.categoriesLoading"
             :disabled="!canAddExpenseItem"
             :title="newItemDisabledReason"
@@ -1342,11 +1371,15 @@ async function retryItemRecognition(id: string): Promise<void> {
       </div>
     </template>
     <el-alert
-      title="一次上传，自动整理报销材料"
-      description="发票、打车行程单、住宿明细和付款凭证可一起上传。每笔住宿都须关联住宿明细，超过 500 元还须付款凭证；不确定的用途请确认。"
+      :title="props.mobile ? '可一次上传全部报销材料' : '一次上传，自动整理报销材料'"
+      :description="props.mobile
+        ? '系统自动分类；住宿需附明细，超过 500 元需附付款凭证。'
+        : '发票、打车行程单、住宿明细和付款凭证可一起上传。每笔住宿都须关联住宿明细，超过 500 元还须付款凭证；不确定的用途请确认。'"
       type="info"
       :closable="false"
       show-icon
+      class="upload-guidance"
+      :class="{ 'upload-guidance--mobile': props.mobile }"
     />
     <el-alert
       v-if="expense.ocrUnavailable"
@@ -1786,11 +1819,22 @@ async function retryItemRecognition(id: string): Promise<void> {
         :key="item.id"
         class="expense-mobile-card"
       >
-        <div>
-          <strong>{{ categoryNames[item.category] ?? item.category }}</strong>
-          <span>{{ item.amount ? `¥${item.amount}` : '金额待补充' }}</span>
+        <div class="mobile-expense-heading">
+          <div class="mobile-expense-title">
+            <strong>{{ categoryNames[item.category] ?? item.category }}</strong>
+            <el-tag
+              v-if="mobileItemNeedsAttention(item)"
+              size="small"
+              type="warning"
+            >
+              待完善
+            </el-tag>
+          </div>
+          <span class="mobile-expense-amount">{{ item.amount ? `¥${item.amount}` : '金额待补充' }}</span>
         </div>
-        <p>{{ item.displayDate || '日期待补充' }} · {{ item.receiptCount }} 张</p>
+        <p class="mobile-expense-meta">
+          {{ item.displayDate || '日期待补充' }} · {{ item.receiptCount }} 张
+        </p>
         <p
           v-if="moneyToCents(item.amount) === 0"
           class="ocr-warning"
@@ -1798,7 +1842,9 @@ async function retryItemRecognition(id: string): Promise<void> {
         >
           金额为 0，请核实原票据
         </p>
-        <p>{{ item.description }}</p>
+        <p v-if="meaningfulMobileDescription(item)">
+          {{ meaningfulMobileDescription(item) }}
+        </p>
         <p
           v-if="item.source === 'ocr'"
           class="ocr-warning"
@@ -1818,9 +1864,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             :disabled="previewLoading"
             @click="previewItemReceipt(item.id)"
           >
-            {{ durableFileByItemId(item.id)?.name }} · 预览
+            {{ readableMobileFileName(durableFileByItemId(item.id)) }} · 预览
           </button>
-          <span v-else>{{ durableFileByItemId(item.id)?.name }}</span>
+          <span v-else>{{ readableMobileFileName(durableFileByItemId(item.id)) }}</span>
           <el-button
             v-if="!isPurgedFile(durableFileByItemId(item.id))"
             link
@@ -1842,9 +1888,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             :disabled="previewLoading"
             @click="previewDurableFile(file)"
           >
-            {{ attachmentKindLabels[file.attachmentKind] }}：{{ file.name }} · 预览
+            {{ attachmentKindLabels[file.attachmentKind] }}：{{ readableMobileFileName(file) }} · 预览
           </button>
-          <span v-else>{{ attachmentKindLabels[file.attachmentKind] }}：{{ file.name }}</span>
+          <span v-else>{{ attachmentKindLabels[file.attachmentKind] }}：{{ readableMobileFileName(file) }}</span>
           <el-button
             link
             :disabled="Boolean(durableActionDisabledReason)"
@@ -2410,11 +2456,33 @@ async function retryItemRecognition(id: string): Promise<void> {
 .itinerary-multiple-status { margin: 0; }
 .receipt-header-actions--mobile {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-areas:
+    "upload upload"
+    "manual clear";
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
   width: 100%;
 }
-.receipt-header-actions--mobile :deep(.el-button) { width: 100%; margin: 0; }
-.mobile-upload-button { grid-column: 1 / -1; min-height: 64px; }
+.receipt-header-actions--mobile :deep(.el-button) { margin: 0; }
+.receipt-header-actions--mobile .mobile-upload-button {
+  grid-area: upload;
+  width: 100%;
+  min-height: 48px;
+}
+.receipt-header-actions--mobile .manual-item-button { grid-area: manual; width: 100%; }
+.receipt-header-actions--mobile .clear-files-button { grid-area: clear; justify-self: end; width: auto; }
+.reimbursement-card--mobile :deep(.el-card__header) { padding: 16px; }
+.reimbursement-card--mobile :deep(.el-card__body) { padding: 16px; }
+.reimbursement-card--mobile .section-note { display: none; }
+.upload-guidance--mobile { margin-bottom: 14px; }
+.upload-guidance--mobile :deep(.el-alert__content) { min-width: 0; }
+.upload-guidance--mobile :deep(.el-alert__title) { font-size: 14px; }
+.upload-guidance--mobile :deep(.el-alert__description) { margin-top: 2px; line-height: 1.5; }
+.expense-mobile-list--active .mobile-expense-heading { align-items: flex-start; }
+.mobile-expense-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.mobile-expense-amount { flex: none; font-size: 18px; }
+.expense-mobile-list--active .mobile-expense-meta { margin-top: 6px; color: #98a2b3; font-size: 13px; }
 .batch-progress { margin-top: 16px; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .batch-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; padding-top: 12px; }
 .batch-file > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

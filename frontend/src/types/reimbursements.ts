@@ -264,6 +264,12 @@ export interface ReimbursementExcelPreview {
   filename: string
 }
 
+export interface ReimbursementExcelPreviewTicket {
+  downloadUrl: string
+  downloadToken: string
+  fileType: 'xlsx'
+}
+
 export type ReimbursementSubmissionStatus =
   | 'QUEUED'
   | 'VALIDATING'

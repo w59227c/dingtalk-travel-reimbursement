@@ -279,8 +279,41 @@ describe('ExpenseItemsCard durable files', () => {
     expect(wrapper.get('.expense-table').classes()).toContain('expense-table--hidden')
     expect(wrapper.get('.expense-mobile-list').classes()).toContain('expense-mobile-list--active')
     expect(wrapper.get('.expense-mobile-card').text()).toContain('市内交通费')
+    expect(wrapper.get('.upload-guidance--mobile').text()).toContain('可一次上传全部报销材料')
     await wrapper.get('.expense-mobile-card .mobile-actions button').trigger('click')
     expect(wrapper.get('.expense-editor-form').classes()).toContain('expense-editor-form--mobile')
+    wrapper.unmount()
+  })
+
+  it('de-emphasizes opaque upload names and highlights incomplete OCR on mobile', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'other', name: '其他', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const source = recognizedFile(
+      'file-opaque',
+      'a4625f82-3d16-47c2-9eaa-8c86ed935a15930.png',
+      '267.00',
+    )
+    source.ocrResult = {
+      ...source.ocrResult!,
+      categoryId: 'other',
+      categoryName: '其他',
+      description: '其他',
+      warnings: ['MISSING_DESCRIPTION'],
+    }
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const card = wrapper.get('.expense-mobile-card')
+    expect(card.text()).toContain('待完善')
+    expect(card.text()).toContain('原始票据.png')
+    expect(card.text()).not.toContain('a4625f82-3d16-47c2-9eaa-8c86ed935a15930')
     wrapper.unmount()
   })
 
