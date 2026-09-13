@@ -92,15 +92,15 @@ jobs:
           done
       - name: Build final images in parallel
         uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        env:
+          IMAGE_SOURCE: https://github.com/${{ github.repository }}
+          IMAGE_REVISION: ${{ github.sha }}
         with:
           source: .
           files: docker-bake.hcl
           targets: ci
           load: true
           provenance: false
-          vars: |
-            IMAGE_SOURCE=https://github.com/${{ github.repository }}
-            IMAGE_REVISION=${{ github.sha }}
       - name: Verify offline OCR and final image integration
         run: bash scripts/smoke-images.sh expense-backend:ci expense-web:ci
 
@@ -147,15 +147,15 @@ jobs:
           done
       - name: Build final images in parallel
         uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        env:
+          IMAGE_SOURCE: https://github.com/${{ github.repository }}
+          IMAGE_REVISION: ${{ github.sha }}
         with:
           source: .
           files: docker-bake.hcl
           targets: ci
           load: true
           provenance: false
-          vars: |
-            IMAGE_SOURCE=https://github.com/${{ github.repository }}
-            IMAGE_REVISION=${{ github.sha }}
       - name: Verify offline OCR and final image integration
         run: bash scripts/smoke-images.sh expense-backend:ci expense-web:ci
       - name: Log in to GHCR after all checks pass
@@ -166,18 +166,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push verified images with Buildx
         uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        env:
+          BACKEND_REPOSITORY: ${{ steps.names.outputs.backend }}
+          WEB_REPOSITORY: ${{ steps.names.outputs.web }}
+          PUBLISH_TAGS: ${{ steps.names.outputs.tags }}
+          IMAGE_SOURCE: https://github.com/${{ github.repository }}
+          IMAGE_REVISION: ${{ github.sha }}
         with:
           source: .
           files: docker-bake.hcl
           targets: publish
           push: true
           provenance: false
-          vars: |
-            BACKEND_REPOSITORY=${{ steps.names.outputs.backend }}
-            WEB_REPOSITORY=${{ steps.names.outputs.web }}
-            PUBLISH_TAGS=${{ steps.names.outputs.tags }}
-            IMAGE_SOURCE=https://github.com/${{ github.repository }}
-            IMAGE_REVISION=${{ github.sha }}
       - name: Verify published images and write release manifest
         env:
           BACKEND_REPOSITORY: ${{ steps.names.outputs.backend }}
