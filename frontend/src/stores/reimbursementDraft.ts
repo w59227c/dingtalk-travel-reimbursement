@@ -66,6 +66,7 @@ interface RevisionedResult {
 interface MutationOptions {
   reloadAfterFailure?: boolean
   pipeline?: FilePipeline
+  benignErrorCodes?: readonly string[]
 }
 
 interface FilePipeline {
@@ -756,8 +757,10 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       return result
     } catch (error) {
       const cancelled = isCancellation(error)
-      const conflict = apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
-      const shouldReload = !options.pipeline && (conflict || options.reloadAfterFailure === true)
+      const errorCode = apiErrorCode(error)
+      const conflict = errorCode === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
+      const benign = errorCode !== null && options.benignErrorCodes?.includes(errorCode) === true
+      const shouldReload = !benign && !options.pipeline && (conflict || options.reloadAfterFailure === true)
       const refreshed = accepts(context) && !cancelled && shouldReload
         ? await reloadAuthoritativeDraft(
           context,
@@ -770,7 +773,9 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && currentDraft.value?.id === draftId
         && !cancelled
       ) {
-        if (conflict) {
+        if (benign) {
+          mutationError.value = ''
+        } else if (conflict) {
           revisionConflict.value = true
           mutationError.value = refreshed
             ? '报销内容已在其他页面更新，已加载最新内容；请检查后重新操作'
@@ -972,12 +977,18 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         ),
         pipeline ? (result, draftId, context) => applyPipelineFileMutation(result, draftId, context, pipeline) : applyFileMutation,
         '文件上传失败，请检查格式后重试',
-        pipeline ? { pipeline } : { reloadAfterFailure: true },
+        pipeline
+          ? { pipeline, benignErrorCodes: ['REIMBURSEMENT_FILE_DUPLICATE'] }
+          : { reloadAfterFailure: true, benignErrorCodes: ['REIMBURSEMENT_FILE_DUPLICATE'] },
       )
       if (pipeline && isFilePipelineActive(pipeline.id)) pipeline.uploadedIds.add(result.file.id)
       return result
     } catch (error) {
-      if (pipeline && isFilePipelineActive(pipeline.id)) {
+      if (
+        pipeline
+        && isFilePipelineActive(pipeline.id)
+        && apiErrorCode(error) !== 'REIMBURSEMENT_FILE_DUPLICATE'
+      ) {
         pipeline.needsRefresh = true
         await refreshPipelineRevision(pipeline).catch(() => undefined)
       }

@@ -1358,6 +1358,59 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it('warns and skips an exact duplicate without retrying or recognizing it', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const duplicateError = Object.assign(new Error('duplicate'), {
+      isAxiosError: true,
+      response: {
+        status: 409,
+        data: {
+          error: {
+            code: 'REIMBURSEMENT_FILE_DUPLICATE',
+            message: '该文件已在本次报销中上传，已跳过：已上传.png',
+          },
+        },
+      },
+    })
+    vi.mocked(uploadReimbursementDraftFile)
+      .mockRejectedValueOnce(duplicateError)
+      .mockResolvedValueOnce({
+        draftId: 'draft-1',
+        revision: 2,
+        file: serverFile('file-1', '新票据.png', 'ATTACHMENT_ONLY'),
+      })
+    vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({
+      draftId: 'draft-1',
+      revision: 2,
+      file: recognizedFile('file-1', '新票据.png'),
+    })
+    const warning = vi.spyOn(ElMessage, 'warning')
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+
+    await selectFiles(wrapper, 'durable-expense-input', [
+      new File(['same'], '重复票据.png', { type: 'image/png' }),
+      new File(['new'], '新票据.png', { type: 'image/png' }),
+    ])
+    await flushPromises()
+
+    expect(uploadReimbursementDraftFile).toHaveBeenCalledTimes(2)
+    expect(recognizeReimbursementDraftFile).toHaveBeenCalledOnce()
+    expect(expense.items).toHaveLength(1)
+    expect(drafts.mutationError).toBe('')
+    expect(warning).toHaveBeenCalledWith('该文件已在本次报销中上传，已跳过：已上传.png')
+    const batch = wrapper.get('[data-testid="batch-progress"]')
+    expect(batch.text()).toContain('已跳过 1')
+    const duplicate = wrapper.findAll('[data-testid="batch-file"]')
+      .find((row) => row.text().includes('重复票据.png'))
+    expect(duplicate?.text()).toContain('重复，已跳过')
+    expect(duplicate?.text()).not.toContain('重试上传')
+
+    wrapper.unmount()
+  })
+
   it('uploads B while recognizing A, keeps one OCR lane, and publishes all rows only after the last result', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]

@@ -37,9 +37,12 @@ from app.services.reimbursement_staging import StagingLayoutError
 from app.services.sessions import require_fresh_active_file_session
 
 
-def _image_bytes(image_format: str = "PNG") -> bytes:
+def _image_bytes(
+    image_format: str = "PNG",
+    color: str | tuple[int, int, int] = "white",
+) -> bytes:
     output = io.BytesIO()
-    Image.new("RGB", (40, 20), "white").save(output, format=image_format)
+    Image.new("RGB", (40, 20), color).save(output, format=image_format)
     return output.getvalue()
 
 
@@ -107,11 +110,14 @@ def _upload(
     content_type: str = "application/octet-stream",
     role: str = "EXPENSE_SOURCE",
 ):
+    if content is None:
+        name_seed = sum(name.encode("utf-8")) % 256
+        content = _image_bytes(color=(name_seed, (name_seed * 3) % 256, (name_seed * 7) % 256))
     return client.post(
         f"/api/reimbursements/drafts/{draft_id}/files",
         params={"expectedRevision": revision, "role": role},
         headers={"X-CSRF-Token": csrf},
-        files=[("files[]", (name, content or _image_bytes(), content_type))],
+        files=[("files[]", (name, content, content_type))],
     )
 
 
@@ -148,6 +154,80 @@ def test_upload_is_durable_private_and_recovers_after_restart(client_factory) ->
         "revision": 2,
         "items": [data["file"]],
     }
+
+
+def test_upload_rejects_duplicate_content_without_changing_the_draft(client_factory) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    content = _image_bytes()
+
+    first = _upload(
+        client,
+        csrf,
+        draft_id,
+        revision=1,
+        name="原始票据.png",
+        content=content,
+    )
+    duplicate = _upload(
+        client,
+        csrf,
+        draft_id,
+        revision=2,
+        name="改名后的同一票据.png",
+        content=content,
+        role="ATTACHMENT_ONLY",
+    )
+
+    assert first.status_code == 201, first.text
+    assert duplicate.status_code == 409, duplicate.text
+    assert duplicate.json()["error"] == {
+        "code": "REIMBURSEMENT_FILE_DUPLICATE",
+        "message": "该文件已在本次报销中上传，已跳过：原始票据.png",
+    }
+
+    listed = client.get(f"/api/reimbursements/drafts/{draft_id}/files")
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"]["revision"] == 2
+    assert [item["name"] for item in listed.json()["data"]["items"]] == ["原始票据.png"]
+
+    with client.app.state.database_session_factory() as database:
+        assert (
+            database.scalar(
+                select(func.count())
+                .select_from(ReimbursementDraftFile)
+                .where(ReimbursementDraftFile.draft_id == draft_id)
+            )
+            == 1
+        )
+
+
+def test_upload_allows_a_reused_name_when_the_content_changed(client_factory) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+
+    first = _upload(
+        client,
+        csrf,
+        draft_id,
+        revision=1,
+        name="发票.png",
+        content=_image_bytes(color="white"),
+    )
+    changed = _upload(
+        client,
+        csrf,
+        draft_id,
+        revision=2,
+        name="发票.png",
+        content=_image_bytes(color="black"),
+    )
+
+    assert first.status_code == 201, first.text
+    assert changed.status_code == 201, changed.text
+    assert changed.json()["data"]["revision"] == 3
 
 
 def test_locked_draft_lists_only_purged_file_metadata_referenced_by_submitted_input(

@@ -305,6 +305,7 @@ async def persist_draft_upload(
         process_runner,
         supporting_pdf=processing_role is ReimbursementDraftFileRole.ATTACHMENT_ONLY,
     )
+    content_sha256 = await asyncio.to_thread(_sha256_file, worker_path)
 
     with session_factory() as database:
         draft = require_owned_draft(
@@ -314,6 +315,20 @@ async def persist_draft_upload(
             mutable=True,
         )
         _require_revision(draft, expected_revision)
+        duplicate_name = database.scalar(
+            select(ReimbursementDraftFile.original_name).where(
+                ReimbursementDraftFile.draft_id == draft.id,
+                ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,
+                ReimbursementDraftFile.size_bytes == size_bytes,
+                ReimbursementDraftFile.sha256 == content_sha256,
+            )
+        )
+        if duplicate_name is not None:
+            raise ApiError(
+                "REIMBURSEMENT_FILE_DUPLICATE",
+                f"该文件已在本次报销中上传，已跳过：{duplicate_name}",
+                409,
+            )
         retained_file_count = database.scalar(
             select(func.count())
             .select_from(ReimbursementDraftFile)
@@ -1125,6 +1140,14 @@ def _inspect_upload_spool(
     if not isinstance(spool_name, str) or not spool_name:
         raise ApiError("TEMP_STORAGE_INVALID", "上传缓存空间无效", 500)
     return size_bytes, first_bytes, Path(spool_name)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 async def _write_staging_cancellation_safe(

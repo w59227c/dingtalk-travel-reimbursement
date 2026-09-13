@@ -5,7 +5,7 @@ import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
 import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
 
 import { getReimbursementFileContent } from '@/api/reimbursements'
-import { apiErrorMessage } from '@/api/errors'
+import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -55,7 +55,7 @@ const materialEditorFile = ref<ReimbursementDraftFile | null>(null)
 const materialEditorKind = ref<ReimbursementAttachmentKind | 'expense'>('other')
 const durableOperating = ref(false)
 const durableErrors = reactive<Record<string, string>>({})
-type BatchFileStatus = 'queued' | 'uploading' | 'uploaded' | 'recognizing' | 'done' | 'failed'
+type BatchFileStatus = 'queued' | 'uploading' | 'uploaded' | 'recognizing' | 'done' | 'skipped' | 'failed'
 interface BatchFile {
   key: string
   name: string
@@ -78,16 +78,19 @@ let batchOriginalFileIds = new Set<string>()
 const batchActive = computed(() => batchPhase.value !== null && batchPhase.value !== 'done')
 const batchUploadedCount = computed(() => batchFiles.value.filter((file) => file.uploaded).length)
 const batchRecognizedCount = computed(() => batchFiles.value.filter((file) => file.recognized).length)
-const visibleBatchFiles = computed(() => batchActive.value ? batchFiles.value : batchFiles.value.filter((file) => file.status === 'failed'))
+const batchSkippedCount = computed(() => batchFiles.value.filter((file) => file.status === 'skipped').length)
+const visibleBatchFiles = computed(() => batchActive.value
+  ? batchFiles.value
+  : batchFiles.value.filter((file) => ['failed', 'skipped'].includes(file.status)))
 const batchProgress = computed(() => {
   const stages = batchNeedsOcr.value ? 2 : 1
   const completed = batchFiles.value.reduce((sum, file) => sum
-    + (file.status === 'done' || file.status === 'failed' ? stages
+    + (['done', 'failed', 'skipped'].includes(file.status) ? stages
       : file.status === 'uploaded' || file.status === 'recognizing' ? 1 : 0), 0)
   return batchFiles.value.length ? Math.round(completed / (batchFiles.value.length * stages) * 100) : 0
 })
 const batchStatusLabels: Record<BatchFileStatus, string> = {
-  queued: '等待上传', uploading: '上传中', uploaded: '等待识别', recognizing: '识别中', done: '已完成', failed: '需要处理',
+  queued: '等待上传', uploading: '上传中', uploaded: '等待识别', recognizing: '识别中', done: '已完成', skipped: '重复，已跳过', failed: '需要处理',
 }
 let durableOperationGeneration = 0
 let durableUnmounted = false
@@ -742,6 +745,15 @@ function readableOperationError(error: unknown, fallback: string): string {
     || (error instanceof Error && error.message ? error.message : fallback)
 }
 
+function skipDuplicateBatchFile(entry: BatchFile, error: unknown): boolean {
+  if (apiErrorCode(error) !== 'REIMBURSEMENT_FILE_DUPLICATE') return false
+  entry.status = 'skipped'
+  entry.source = undefined
+  entry.error = apiErrorMessage(error, '该文件已在本次报销中上传，已跳过')
+  ElMessage.warning(entry.error)
+  return true
+}
+
 async function recognizeDurableFile(
   file: ReimbursementDraftFile,
   scope: DurableOperationScope,
@@ -848,9 +860,11 @@ async function onDurableSelection(
         }
       } catch (error) {
         if (!acceptsDurableOperation(scope)) break
-        entry.status = 'failed'
-        entry.error = apiErrorMessage(error, '文件上传失败，请重试')
-        if (target) paymentErrors[target.itemId] = entry.error
+        if (!skipDuplicateBatchFile(entry, error)) {
+          entry.status = 'failed'
+          entry.error = apiErrorMessage(error, '文件上传失败，请重试')
+          if (target) paymentErrors[target.itemId] = entry.error
+        }
       }
     }
     if (pipelineId !== undefined) {
@@ -886,7 +900,7 @@ async function onDurableSelection(
       batchPipelineId = null
       if (batchPhase.value !== 'done') {
         for (const entry of entries) {
-          if (!['done', 'failed'].includes(entry.status)) {
+          if (!['done', 'failed', 'skipped'].includes(entry.status)) {
             entry.status = 'failed'
             entry.error = '本批处理已中断，请检查已上传材料后重试'
           }
@@ -976,8 +990,10 @@ async function retryFailedBatchUpload(entry: BatchFile): Promise<void> {
     }
   } catch (error) {
     if (!acceptsDurableOperation(scope)) return
-    entry.status = 'failed'
-    entry.error = readableOperationError(error, '文件上传失败，请重试')
+    if (!skipDuplicateBatchFile(entry, error)) {
+      entry.status = 'failed'
+      entry.error = readableOperationError(error, '文件上传失败，请重试')
+    }
   } finally {
     if (scope.generation === durableOperationGeneration) {
       if (pipelineId !== undefined) drafts.cancelFilePipeline(pipelineId)
@@ -1419,6 +1435,9 @@ async function retryItemRecognition(id: string): Promise<void> {
         已上传 {{ batchUploadedCount }}/{{ batchFiles.length }}
         <template v-if="batchNeedsOcr">
           · 已识别 {{ batchRecognizedCount }}/{{ batchFiles.length }}
+        </template>
+        <template v-if="batchSkippedCount">
+          · 已跳过 {{ batchSkippedCount }}
         </template>
       </p>
       <el-progress :percentage="batchProgress" />
