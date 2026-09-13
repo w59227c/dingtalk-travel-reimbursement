@@ -90,29 +90,17 @@ jobs:
           for directory in . backend frontend; do
             printf '%s\n' 'EXPENSE_CI_ENV_CANARY=never-bake-runtime-credentials-9c02e28f' > "$directory/.env.ci-canary"
           done
-      - name: Build final backend image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - name: Build final images in parallel
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
         with:
-          context: ./backend
-          platforms: linux/amd64
+          source: .
+          files: docker-bake.hcl
+          targets: ci
           load: true
-          push: false
           provenance: false
-          tags: expense-backend:ci
-          cache-from: type=gha,scope=backend-amd64
-          cache-to: type=gha,mode=max,scope=backend-amd64
-      - name: Build final Web image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: frontend/Dockerfile
-          platforms: linux/amd64
-          load: true
-          push: false
-          provenance: false
-          tags: expense-web:ci
-          cache-from: type=gha,scope=web-amd64
-          cache-to: type=gha,mode=max,scope=web-amd64
+          vars: |
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            IMAGE_REVISION=${{ github.sha }}
       - name: Verify offline OCR and final image integration
         run: bash scripts/smoke-images.sh expense-backend:ci expense-web:ci
 
@@ -143,41 +131,31 @@ jobs:
           repository="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
           printf 'backend=ghcr.io/%s-backend\n' "$repository" >> "$GITHUB_OUTPUT"
           printf 'web=ghcr.io/%s-web\n' "$repository" >> "$GITHUB_OUTPUT"
+          if [[ "$REF_TYPE" == branch && "$REF_NAME" == main ]]; then
+            printf 'tags=sha-%s,main\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          elif [[ "$REF_TYPE" == tag ]]; then
+            printf 'tags=sha-%s,%s\n' "$GITHUB_SHA" "$REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo 'Only main or a validated version tag may publish images.' >&2
+            exit 1
+          fi
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Add excluded environment canaries
         run: |
           for directory in . backend frontend; do
             printf '%s\n' 'EXPENSE_CI_ENV_CANARY=never-bake-runtime-credentials-9c02e28f' > "$directory/.env.ci-canary"
           done
-      - name: Build final backend image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - name: Build final images in parallel
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
         with:
-          context: ./backend
-          platforms: linux/amd64
+          source: .
+          files: docker-bake.hcl
+          targets: ci
           load: true
-          push: false
           provenance: false
-          tags: expense-backend:ci
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=backend-amd64
-          cache-to: type=gha,mode=max,scope=backend-amd64
-      - name: Build final Web image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: frontend/Dockerfile
-          platforms: linux/amd64
-          load: true
-          push: false
-          provenance: false
-          tags: expense-web:ci
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha,scope=web-amd64
-          cache-to: type=gha,mode=max,scope=web-amd64
+          vars: |
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            IMAGE_REVISION=${{ github.sha }}
       - name: Verify offline OCR and final image integration
         run: bash scripts/smoke-images.sh expense-backend:ci expense-web:ci
       - name: Log in to GHCR after all checks pass
@@ -186,31 +164,64 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push tested images and write release manifest
+      - name: Push verified images with Buildx
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        with:
+          source: .
+          files: docker-bake.hcl
+          targets: publish
+          push: true
+          provenance: false
+          vars: |
+            BACKEND_REPOSITORY=${{ steps.names.outputs.backend }}
+            WEB_REPOSITORY=${{ steps.names.outputs.web }}
+            PUBLISH_TAGS=${{ steps.names.outputs.tags }}
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            IMAGE_REVISION=${{ github.sha }}
+      - name: Verify published images and write release manifest
         env:
           BACKEND_REPOSITORY: ${{ steps.names.outputs.backend }}
           WEB_REPOSITORY: ${{ steps.names.outputs.web }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          for service in backend web; do
-            if [[ "$service" == backend ]]; then repository="$BACKEND_REPOSITORY"; else repository="$WEB_REPOSITORY"; fi
-            docker tag "expense-$service:ci" "$repository:sha-$GITHUB_SHA"
-            if [[ "$REF_TYPE" == branch && "$REF_NAME" == main ]]; then
-              docker tag "expense-$service:ci" "$repository:main"
-            fi
-            if [[ "$REF_TYPE" == tag ]]; then
-              docker tag "expense-$service:ci" "$repository:$REF_NAME"
-            fi
-            docker push --all-tags "$repository"
-          done
           python3 - <<'PY'
           import hashlib
           import json
           import os
-          import re
           import subprocess
           from pathlib import Path
+
+          def inspect_remote(reference):
+              raw = subprocess.check_output([
+                  "docker", "buildx", "imagetools", "inspect", "--raw", reference
+              ])
+              digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+              manifest = json.loads(raw)
+              if "config" in manifest:
+                  image_manifest = manifest
+              else:
+                  matches = [
+                      descriptor
+                      for descriptor in manifest.get("manifests", [])
+                      if descriptor.get("platform", {}).get("os") == "linux"
+                      and descriptor.get("platform", {}).get("architecture") == "amd64"
+                  ]
+                  if len(matches) != 1:
+                      raise SystemExit(f"Expected one linux/amd64 manifest for {reference}")
+                  child_digest = matches[0]["digest"]
+                  repository = reference.rsplit(":", 1)[0]
+                  child_raw = subprocess.check_output([
+                      "docker", "buildx", "imagetools", "inspect", "--raw",
+                      f"{repository}@{child_digest}",
+                  ])
+                  if "sha256:" + hashlib.sha256(child_raw).hexdigest() != child_digest:
+                      raise SystemExit(f"Registry returned inconsistent manifest for {reference}")
+                  image_manifest = json.loads(child_raw)
+              config_digest = image_manifest.get("config", {}).get("digest")
+              if not config_digest:
+                  raise SystemExit(f"Published image has no config digest: {reference}")
+              return digest, config_digest
 
           release = {
               "revision": os.environ["GITHUB_SHA"],
@@ -221,17 +232,24 @@ jobs:
           }
           for service in ("backend", "web"):
               repository = os.environ[f"{service.upper()}_REPOSITORY"]
-              tagged = f"{repository}:sha-{release['revision']}"
-              local = json.loads(subprocess.check_output(["docker", "image", "inspect", tagged]))[0]
-              refs = [ref for ref in local["RepoDigests"] if ref.startswith(repository + "@")]
-              if len(refs) != 1 or not re.fullmatch(re.escape(repository) + r"@sha256:[0-9a-f]{64}", refs[0]):
-                  raise SystemExit(f"Expected one pushed digest for {service}")
-              remote = json.loads(subprocess.check_output([
-                  "docker", "buildx", "imagetools", "inspect", "--raw", refs[0]
-              ]))
-              if remote.get("config", {}).get("digest") != local["Id"]:
-                  raise SystemExit(f"Pushed {service} digest differs from the tested image")
-              release[f"{service}_image"] = refs[0]
+              local = json.loads(subprocess.check_output([
+                  "docker", "image", "inspect", f"expense-{service}:ci"
+              ]))[0]
+              tags = [f"sha-{release['revision']}"]
+              if os.environ["REF_TYPE"] == "branch" and os.environ["REF_NAME"] == "main":
+                  tags.append("main")
+              elif os.environ["REF_TYPE"] == "tag":
+                  tags.append(os.environ["REF_NAME"])
+
+              published_digest = None
+              for tag in tags:
+                  digest, config_digest = inspect_remote(f"{repository}:{tag}")
+                  if config_digest != local["Id"]:
+                      raise SystemExit(f"Pushed {service}:{tag} differs from the tested image")
+                  if published_digest is not None and digest != published_digest:
+                      raise SystemExit(f"Published {service} tags do not reference the same manifest")
+                  published_digest = digest
+              release[f"{service}_image"] = f"{repository}@{published_digest}"
           Path("release.json").write_text(json.dumps(release, indent=2) + "\n")
           PY
       - name: Retain the published image manifest
