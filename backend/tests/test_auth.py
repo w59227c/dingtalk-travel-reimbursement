@@ -93,7 +93,7 @@ def success_transport(
     return httpx.MockTransport(handler), calls
 
 
-def test_single_department_login_session_cookie_and_csrf_rotation(client_factory) -> None:
+def test_single_department_login_session_cookie_and_stable_csrf(client_factory) -> None:
     transport, calls = success_transport()
     client = client_factory(transport=transport)
 
@@ -130,16 +130,11 @@ def test_single_department_login_session_cookie_and_csrf_rotation(client_factory
     me = client.get("/api/me")
     assert me.status_code == 200
     assert "union-id-must-stay-server-side" not in me.text
-    new_csrf = me.json()["data"]["csrfToken"]
-    assert new_csrf != old_csrf
-    stale = client.post(
-        "/api/auth/logout",
-        headers={"X-CSRF-Token": old_csrf},
-    )
-    assert stale.status_code == 403
+    same_csrf = me.json()["data"]["csrfToken"]
+    assert same_csrf == old_csrf
     current = client.post(
         "/api/auth/logout",
-        headers={"X-CSRF-Token": new_csrf},
+        headers={"X-CSRF-Token": old_csrf},
     )
     assert current.status_code == 200
     assert len([call for call in calls if "oauth2" in call[1]]) == 1

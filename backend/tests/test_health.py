@@ -66,6 +66,30 @@ def test_reimbursement_staging_is_reclaimed_on_startup_and_periodically(
     assert calls >= 2
 
 
+def test_interrupted_local_writes_are_reclaimed_once_on_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def record_reclaim(_coordinator: ReimbursementQuotaCoordinator) -> int:
+        nonlocal calls
+        calls += 1
+        return 0
+
+    monkeypatch.setattr(
+        ReimbursementQuotaCoordinator,
+        "reclaim_interrupted_local_writes",
+        record_reclaim,
+        raising=False,
+    )
+
+    with TestClient(create_app(make_test_settings(tmp_path))) as client:
+        assert client.get("/api/health").status_code == 200
+
+    assert calls == 1
+
+
 def test_startup_failure_closes_external_clients_and_database(tmp_path: Path) -> None:
     settings = Settings(
         app_env="test",

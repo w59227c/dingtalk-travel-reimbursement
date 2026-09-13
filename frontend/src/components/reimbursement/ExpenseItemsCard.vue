@@ -89,6 +89,12 @@ const batchProgress = computed(() => {
       : file.status === 'uploaded' || file.status === 'recognizing' ? 1 : 0), 0)
   return batchFiles.value.length ? Math.round(completed / (batchFiles.value.length * stages) * 100) : 0
 })
+const shouldPollDurableOcr = computed(() => Boolean(
+  drafts.currentDraft
+  && ['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status)
+  && drafts.files.some((file) =>
+    file.status === 'ACTIVE' && file.ocrStatus === 'RUNNING' && file.ocrStale !== true),
+))
 const batchStatusLabels: Record<BatchFileStatus, string> = {
   queued: '等待上传', uploading: '上传中', uploaded: '等待识别', recognizing: '识别中', done: '已完成', skipped: '重复，已跳过', failed: '需要处理',
 }
@@ -101,6 +107,7 @@ const receiptPreviewName = ref('')
 const receiptPreviewKind = ref<'image' | 'pdf'>('image')
 const previewLoading = ref(false)
 let previewController: AbortController | null = null
+let durableOcrPollTimer: number | null = null
 const editorVisible = ref(false)
 const editorRevision = ref(0)
 const paymentExpenseContext = ref<{ fileId: string; draftId: string; departmentId: string } | null>(null)
@@ -260,7 +267,27 @@ onBeforeUnmount(() => {
   if (batchScope?.generation === durableOperationGeneration - 1) drafts.processingFiles = false
   releaseReceiptPreview()
   previewController?.abort()
+  if (durableOcrPollTimer !== null) window.clearTimeout(durableOcrPollTimer)
 })
+
+function scheduleDurableOcrPoll(): void {
+  if (durableOcrPollTimer !== null) window.clearTimeout(durableOcrPollTimer)
+  durableOcrPollTimer = null
+  if (durableUnmounted || !shouldPollDurableOcr.value) return
+  durableOcrPollTimer = window.setTimeout(async () => {
+    durableOcrPollTimer = null
+    if (!shouldPollDurableOcr.value || durableUnmounted) return
+    try {
+      await drafts.refreshCurrentFiles()
+    } catch {
+      // A later poll retries transient status-read failures without blocking edits.
+    } finally {
+      scheduleDurableOcrPoll()
+    }
+  }, 2500)
+}
+
+watch(shouldPollDurableOcr, scheduleDurableOcrPoll, { immediate: true })
 
 watch(
   () => [
@@ -461,18 +488,19 @@ function durableStatusLabel(file: ReimbursementDraftFile): string {
   if (file.status === 'FAILED') return '上传失败'
   if (file.status === 'DELETING') return '删除中'
   if (file.status === 'PURGED') return '已删除'
+  if (file.ocrStale) return '识别已中断'
   if (needsMaterialConfirmation(file)) return file.materialClassification?.status === 'pending' ? '等待分类识别' : '待确认用途'
-  if (file.role === 'ATTACHMENT_ONLY' && file.attachmentKind !== 'itinerary') return '已上传'
   if (file.ocrStatus === 'RUNNING') return '识别中'
   if (file.ocrStatus === 'COMPLETE') return '识别完成'
   if (file.ocrStatus === 'FAILED') return '识别失败'
+  if (file.role === 'ATTACHMENT_ONLY' && file.attachmentKind !== 'itinerary') return '已上传'
   return '等待识别'
 }
 
 function durableStatusType(
   file: ReimbursementDraftFile,
 ): 'success' | 'warning' | 'danger' | 'info' {
-  if (file.status === 'FAILED' || file.ocrStatus === 'FAILED') return 'danger'
+  if (file.status === 'FAILED' || file.ocrStatus === 'FAILED' || file.ocrStale) return 'danger'
   if (needsMaterialConfirmation(file)) return 'warning'
   if (file.status !== 'ACTIVE' || file.ocrStatus === 'RUNNING') return 'warning'
   if (file.role === 'ATTACHMENT_ONLY' || file.ocrStatus === 'COMPLETE') return 'success'
@@ -548,7 +576,7 @@ function durableFileError(file: ReimbursementDraftFile | undefined): string {
   if (!file) return ''
   return durableErrors[file.id]
     ?? file.ocrResult?.error?.message
-    ?? ''
+    ?? (file.ocrStale ? '材料识别因服务中断未完成，请重新识别或修改用途' : '')
 }
 
 function durableOcrSummary(file: ReimbursementDraftFile): string {
@@ -570,8 +598,9 @@ function durableOcrSummary(file: ReimbursementDraftFile): string {
 function canRetryDurableRecognition(file: ReimbursementDraftFile | undefined): boolean {
   return Boolean(file
     && file.status === 'ACTIVE'
-    && (file.role === 'EXPENSE_SOURCE' || isActiveProof(file, 'itinerary') || needsMaterialConfirmation(file))
-    && file.ocrStatus !== 'RUNNING')
+    && (file.role === 'EXPENSE_SOURCE' || isActiveProof(file, 'itinerary')
+      || isActiveProof(file, 'hotel_bill') || needsMaterialConfirmation(file))
+    && (file.ocrStatus !== 'RUNNING' || file.ocrStale === true))
 }
 
 function canAdoptDurableRecognition(file: ReimbursementDraftFile): boolean {
@@ -1347,7 +1376,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           data-testid="durable-hotel-bill-input"
           class="visually-hidden"
           type="file"
-          accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+          :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'hotel_bill')"
@@ -1357,7 +1386,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           data-testid="durable-payment-proof-input"
           class="visually-hidden"
           type="file"
-          accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+          :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'payment_proof')"
@@ -1367,7 +1396,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           data-testid="durable-attachment-input"
           class="visually-hidden"
           type="file"
-          accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+          :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY')"

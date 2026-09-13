@@ -642,6 +642,101 @@ class ReimbursementQuotaCoordinator:
             database.delete(draft)
         return normalized_draft_id
 
+    def reclaim_interrupted_local_writes(self, *, now: datetime | None = None) -> int:
+        """Release local reservations that cannot survive an application restart.
+
+        This method is intentionally called only during startup, before requests
+        and workers begin. At that point every RESERVED/WRITING row belongs to a
+        process that no longer exists, even when its normal reservation TTL has
+        not elapsed yet.
+        """
+
+        schema = inspect(self._engine)
+        if not all(
+            schema.has_table(table_name)
+            for table_name in (
+                ReimbursementDraft.__tablename__,
+                ReimbursementDraftFile.__tablename__,
+                ReimbursementSubmission.__tablename__,
+                ReimbursementUpload.__tablename__,
+            )
+        ):
+            return 0
+
+        cutoff = _naive_utc(now) if now is not None else utc_now()
+        reclaimed = 0
+        with self._write_session() as database:
+            draft_records = database.scalars(
+                select(ReimbursementDraftFile)
+                .join(ReimbursementDraft, ReimbursementDraft.id == ReimbursementDraftFile.draft_id)
+                .where(
+                    ReimbursementDraftFile.file_status.in_(
+                        {
+                            ReimbursementDraftFileStatus.RESERVED.value,
+                            ReimbursementDraftFileStatus.WRITING.value,
+                        }
+                    ),
+                    ReimbursementDraft.status.in_(_ACTIVE_DRAFT_STATUSES),
+                    ReimbursementDraft.locked_at.is_(None),
+                    ~select(ReimbursementSubmission.id)
+                    .where(ReimbursementSubmission.draft_id == ReimbursementDraftFile.draft_id)
+                    .exists(),
+                    ~select(ReimbursementUpload.id)
+                    .where(ReimbursementUpload.source_draft_file_id == ReimbursementDraftFile.id)
+                    .exists(),
+                )
+            ).all()
+            for record in draft_records:
+                try:
+                    self._staging.discard_reservation(_draft_staging_reservation(record))
+                except (OSError, ReimbursementStagingError) as exc:
+                    _LOGGER.error(
+                        "Failed to reclaim interrupted draft file reservation",
+                        extra={"exception_type": type(exc).__name__},
+                    )
+                    continue
+                record.file_status = ReimbursementDraftFileStatus.PURGED.value
+                record.part_storage_key = None
+                record.reservation_expires_at = None
+                record.purged_at = cutoff
+                reclaimed += 1
+
+            upload_records = database.scalars(
+                select(ReimbursementUpload)
+                .join(
+                    ReimbursementSubmission,
+                    ReimbursementSubmission.id == ReimbursementUpload.submission_id,
+                )
+                .where(
+                    ReimbursementUpload.role.in_(_GENERATED_ROLES),
+                    ReimbursementUpload.local_status.in_(
+                        {
+                            ReimbursementUploadLocalStatus.RESERVED.value,
+                            ReimbursementUploadLocalStatus.WRITING.value,
+                        }
+                    ),
+                    ReimbursementUpload.upload_status == ReimbursementUploadStatus.PENDING.value,
+                    ReimbursementSubmission.process_instance_id.is_(None),
+                )
+            ).all()
+            for record in upload_records:
+                try:
+                    self._staging.discard_reservation(_upload_staging_reservation(record))
+                except (OSError, ReimbursementStagingError) as exc:
+                    _LOGGER.error(
+                        "Failed to reclaim interrupted generated upload reservation",
+                        extra={"exception_type": type(exc).__name__},
+                    )
+                    continue
+                record.upload_status = ReimbursementUploadStatus.DISCARDED.value
+                record.local_status = ReimbursementUploadLocalStatus.DELETED.value
+                record.local_part_storage_key = None
+                record.reservation_expires_at = None
+                record.local_deleted_at = cutoff
+                record.status_version += 1
+                reclaimed += 1
+        return reclaimed
+
     def reclaim_expired(self, *, now: datetime | None = None) -> int:
         """Delete expired drafts and release abandoned local write attempts.
 

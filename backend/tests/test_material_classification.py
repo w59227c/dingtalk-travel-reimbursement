@@ -10,7 +10,7 @@ import pytest
 from conftest import mock_login
 from pypdf import PdfWriter
 from test_itinerary_ocr import _digital_pdf
-from test_reimbursement_files import _draft_input, _image_bytes, _insert_draft
+from test_reimbursement_files import _draft_input, _image_bytes, _insert_draft, _named_image_bytes
 
 from app.core.errors import ApiError
 from app.domain.material_classification import material_classification
@@ -311,11 +311,13 @@ def test_auto_scan_cap_and_all_page_safety_are_retained(settings_factory, tmp_pa
 
 
 def _auto_upload(client, csrf, draft_id, *, content=None, name="material.png", revision=1):
+    if content is None:
+        content = _named_image_bytes(name)
     response = client.post(
         f"/api/reimbursements/drafts/{draft_id}/files",
         params={"expectedRevision": revision, "role": "ATTACHMENT_ONLY", "autoClassify": True},
         headers={"X-CSRF-Token": csrf},
-        files=[("files[]", (name, content or _image_bytes(), "application/octet-stream"))],
+        files=[("files[]", (name, content, "application/octet-stream"))],
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]

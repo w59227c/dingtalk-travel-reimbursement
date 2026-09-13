@@ -103,6 +103,7 @@ def _require_multipart(request: Request) -> None:
 @router.get("/reimbursements/drafts/{draft_id}/files")
 def get_files(
     draft_id: str,
+    request: Request,
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(get_current_session)],
 ) -> dict[str, object]:
@@ -115,7 +116,13 @@ def get_files(
         {
             "draftId": draft_id,
             "revision": revision,
-            "items": [serialize_draft_file(item) for item in files],
+            "items": [
+                serialize_draft_file(
+                    item,
+                    ocr_timeout_seconds=request.app.state.settings.ocr_timeout_seconds,
+                )
+                for item in files
+            ],
         }
     )
 
@@ -265,6 +272,7 @@ async def patch_file(
         processing_role=body.role,
         attachment_kind=body.attachment_kind,
         original_name=body.name,
+        settings=request.app.state.settings,
     )
     return success(
         {
@@ -291,6 +299,7 @@ async def delete_file(
         draft_id=draft_id,
         file_id=file_id,
         expected_revision=expected_revision,
+        settings=request.app.state.settings,
     )
     try:
         revision = await complete_draft_file_delete(
@@ -324,6 +333,7 @@ async def clear_files(
         actor=actor,
         draft_id=draft_id,
         expected_revision=body.expected_revision,
+        settings=request.app.state.settings,
     )
     try:
         await complete_draft_files_clear(

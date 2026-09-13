@@ -15,11 +15,151 @@ from app.models.reimbursement import (
     ReimbursementDraftFileStatus,
     ReimbursementDraftStatus,
     ReimbursementSubmission,
+    ReimbursementUpload,
     utc_now,
 )
 from app.schemas.reimbursement_submissions import SubmitReimbursementRequest
 from app.services.reimbursement_drafts import DraftActor
 from app.services.reimbursement_submissions import create_submission
+
+
+def _manual_review_checkpoint(client, submission_id: str) -> None:
+    from app.integrations.dingtalk.workflow import (
+        CreateProcessInstanceCommand,
+        CreateWorkflowFormValue,
+    )
+    from app.services.oa_reimbursement_payload import (
+        create_command_sha256,
+        serialize_create_command,
+    )
+
+    command = CreateProcessInstanceCommand(
+        "PROC-REIMBURSEMENT",
+        "owner-1",
+        100,
+        123,
+        (CreateWorkflowFormValue("金额", "199.00"),),
+    )
+    with client.app.state.database_session_factory() as database:
+        record = database.get(ReimbursementSubmission, submission_id)
+        record.status = "MANUAL_REVIEW"
+        record.oa_request_json = serialize_create_command(command)
+        record.oa_request_hash = create_command_sha256(command)
+        record.oa_create_started_at = utc_now()
+        database.commit()
+
+
+def test_admin_can_attach_known_instance_to_manual_review_submission(client_factory) -> None:
+    client = client_factory(
+        auth_mock_enabled=True,
+        auth_mock_user_id="admin-1",
+        auth_mock_departments="100:测试部门",
+        admin_user_ids="admin-1",
+        dingtalk_oa_worker_enabled=False,
+    )
+    login = mock_login(client)
+    _, submission_id = _persist_submission_for_mock_user(client)
+    _manual_review_checkpoint(client, submission_id)
+    client.app.state.settings.dingtalk_oa_worker_enabled = True
+    url = f"/api/admin/oa/reimbursements/submissions/{submission_id}/recover"
+
+    without_csrf = client.post(
+        url,
+        json={"action": "ATTACH_INSTANCE", "processInstanceId": "oa-1"},
+    )
+    assert without_csrf.status_code == 403
+    response = client.post(
+        url,
+        json={"action": "ATTACH_INSTANCE", "processInstanceId": "oa-1"},
+        headers={"X-CSRF-Token": login["csrfToken"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "VERIFYING"
+    assert response.json()["data"]["processInstanceId"] == "oa-1"
+
+
+def test_admin_confirmation_moves_no_instance_manual_review_to_cleanup(client_factory) -> None:
+    client = client_factory(
+        auth_mock_enabled=True,
+        auth_mock_user_id="admin-1",
+        auth_mock_departments="100:测试部门",
+        admin_user_ids="admin-1",
+        dingtalk_oa_worker_enabled=False,
+    )
+    login = mock_login(client)
+    _, submission_id = _persist_submission_for_mock_user(client)
+    _manual_review_checkpoint(client, submission_id)
+    client.app.state.settings.dingtalk_oa_worker_enabled = True
+
+    response = client.post(
+        f"/api/admin/oa/reimbursements/submissions/{submission_id}/recover",
+        json={"action": "CONFIRM_NOT_CREATED"},
+        headers={"X-CSRF-Token": login["csrfToken"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "ORPHAN_CLEANUP"
+    with client.app.state.database_session_factory() as database:
+        record = database.get(ReimbursementSubmission, submission_id)
+        assert record.orphan_confirmed_by_user_id == "admin-1"
+
+
+def test_admin_must_separately_confirm_unknown_remote_file_is_absent(client_factory) -> None:
+    client = client_factory(
+        auth_mock_enabled=True,
+        auth_mock_user_id="admin-1",
+        auth_mock_departments="100:测试部门",
+        admin_user_ids="admin-1",
+        dingtalk_oa_worker_enabled=False,
+    )
+    login = mock_login(client)
+    draft_id, submission_id = _persist_submission_for_mock_user(client)
+    _manual_review_checkpoint(client, submission_id)
+    with client.app.state.database_session_factory() as database:
+        source = database.query(ReimbursementDraftFile).filter_by(draft_id=draft_id).one()
+        upload = ReimbursementUpload(
+            submission_id=submission_id,
+            draft_id=draft_id,
+            source_draft_file_id=source.id,
+            role="ORIGINAL",
+            sort_order=0,
+            local_storage_key=source.storage_key,
+            local_status="READY",
+            reserved_bytes=source.reserved_bytes,
+            file_name=source.original_name,
+            file_type=source.extension,
+            media_type=source.media_type,
+            size_bytes=source.size_bytes,
+            sha256=source.sha256,
+            upload_status="COMMIT_UNCERTAIN",
+            status_version=1,
+            commit_started_at=utc_now(),
+        )
+        database.add(upload)
+        database.commit()
+        upload_id = upload.id
+    client.app.state.settings.dingtalk_oa_worker_enabled = True
+    url = f"/api/admin/oa/reimbursements/submissions/{submission_id}/recover"
+    headers = {"X-CSRF-Token": login["csrfToken"]}
+
+    blocked = client.post(url, json={"action": "CONFIRM_NOT_CREATED"}, headers=headers)
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "OA_REMOTE_FILE_CONFIRMATION_REQUIRED"
+
+    resumed = client.post(
+        url,
+        json={
+            "action": "CONFIRM_NOT_CREATED",
+            "confirmUncertainUploadsAbsent": True,
+        },
+        headers=headers,
+    )
+    assert resumed.status_code == 200, resumed.text
+    with client.app.state.database_session_factory() as database:
+        upload = database.get(ReimbursementUpload, upload_id)
+        assert upload.upload_status == "PENDING"
+        assert upload.commit_started_at is None
 
 
 @pytest.mark.parametrize("instance_id", [None, "existing-oa"])

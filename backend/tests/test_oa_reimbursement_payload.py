@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -731,7 +731,7 @@ async def test_workflow_transmits_the_same_json_contract_that_is_hashed(settings
     assert seen[0].decode("utf-8") == expected
 
 
-def test_collect_snapshot_source_reads_review_ready_state_without_mutating(
+def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
     client_factory,
     monkeypatch,
 ) -> None:
@@ -847,6 +847,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_mutating(
                 microapp_agent_id=4_951_124_324,
                 excel_template_path=client.app.state.settings.excel_template_path,
                 max_items=100,
+                ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
             )
         draft.input_json = calculation.canonical_json
         database.commit()
@@ -861,6 +862,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_mutating(
             microapp_agent_id=4_951_124_324,
             excel_template_path=client.app.state.settings.excel_template_path,
             max_items=100,
+            ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
         )
 
         assert source.draft_revision == 5
@@ -875,6 +877,29 @@ def test_collect_snapshot_source_reads_review_ready_state_without_mutating(
 
         file_record = database.get(ReimbursementDraftFile, "snapshot-source-file")
         assert file_record is not None
+        file_record.ocr_status = ReimbursementOcrStatus.RUNNING.value
+        file_record.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
+        file_record.updated_at = utc_now() - timedelta(
+            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+        )
+        database.commit()
+        recovered_source = collect_snapshot_source(
+            database,
+            staging=staging,
+            actor=actor,
+            originator_union_id="union-1",
+            originator_name="测试员工",
+            draft_id=draft.id,
+            expected_revision=5,
+            microapp_agent_id=4_951_124_324,
+            excel_template_path=client.app.state.settings.excel_template_path,
+            max_items=100,
+            ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
+        )
+        assert recovered_source.original_files[0].ocr_status == "FAILED"
+        database.refresh(file_record)
+        assert file_record.ocr_status == ReimbursementOcrStatus.FAILED.value
+
         file_record.sha256 = "0" * 64
         database.commit()
         with pytest.raises(ApiError) as changed:
@@ -889,6 +914,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_mutating(
                 microapp_agent_id=4_951_124_324,
                 excel_template_path=client.app.state.settings.excel_template_path,
                 max_items=100,
+                ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
             )
         assert changed.value.code == "REIMBURSEMENT_DRAFT_FILE_CHANGED"
         database.refresh(draft)

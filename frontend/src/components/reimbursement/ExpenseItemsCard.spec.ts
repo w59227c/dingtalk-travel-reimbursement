@@ -354,6 +354,9 @@ describe('ExpenseItemsCard durable files', () => {
     const fileClick = vi.spyOn(fileInput.element as HTMLInputElement, 'click')
 
     expect(fileInput.attributes('accept')).toBeUndefined()
+    expect(wrapper.get('[data-testid="durable-itinerary-input"]').attributes('accept')).toBeUndefined()
+    expect(wrapper.get('[data-testid="durable-hotel-bill-input"]').attributes('accept')).toBeUndefined()
+    expect(wrapper.get('[data-testid="durable-payment-proof-input"]').attributes('accept')).toBeUndefined()
     expect(wrapper.find('[data-testid="durable-image-input"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="mobile-image-upload-button"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="mobile-file-upload-button"]').text()).toBe('上传报销材料')
@@ -362,6 +365,25 @@ describe('ExpenseItemsCard durable files', () => {
     expect(fileClick).toHaveBeenCalledOnce()
     expect(wrapper.find('.receipt-header-actions').text()).toContain('清空文件')
     expect(wrapper.find('.receipt-header-actions').text()).not.toContain('更多')
+    wrapper.unmount()
+  })
+
+  it('shows interrupted hotel recognition and offers retry', async () => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    drafts.files = [serverFile('hotel-stale', '住宿明细.pdf', 'ATTACHMENT_ONLY', {
+      attachmentKind: 'hotel_bill',
+      ocrStatus: 'RUNNING',
+      ocrStale: true,
+    })]
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('识别已中断')
+    expect(wrapper.findAll('button').some((button) => button.text().trim() === '重新识别')).toBe(true)
     wrapper.unmount()
   })
 

@@ -7,7 +7,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import BinaryIO
@@ -73,6 +73,11 @@ from app.services.reimbursement_drafts import (
     require_owned_draft,
     validate_and_calculate_input,
 )
+from app.services.reimbursement_ocr_state import (
+    failed_ocr_payload,
+    ocr_is_actively_running,
+    recover_stale_running_ocr,
+)
 from app.services.reimbursement_quota import (
     DraftFileOwner,
     QuotaReservation,
@@ -100,7 +105,6 @@ from app.services.temp_files import (
 logger = logging.getLogger(__name__)
 
 _OCR_RUNNING_MARKER_KEY = "operationId"
-_OCR_STALE_GRACE_SECONDS = 30
 _PIPELINE_INPUT_HASH_KEY = "_pipelineInputSha256"
 
 
@@ -119,6 +123,7 @@ class DraftFileSnapshot:
     sha256: str
     ocr_status: str
     ocr_result_json: str | None
+    updated_at: datetime
     attachment_kind: str = "other"
 
 
@@ -151,7 +156,11 @@ class WorkbookPreviewSnapshot:
     totals: ExpenseTotals
 
 
-def serialize_draft_file(file: DraftFileSnapshot) -> dict[str, object]:
+def serialize_draft_file(
+    file: DraftFileSnapshot,
+    *,
+    ocr_timeout_seconds: int | None = None,
+) -> dict[str, object]:
     ocr_result: object | None = None
     payment_details: object | None = None
     hotel_bill_details: object | None = None
@@ -200,6 +209,14 @@ def serialize_draft_file(file: DraftFileSnapshot) -> dict[str, object]:
         "mediaType": file.media_type,
         "sizeBytes": file.size_bytes,
         "ocrStatus": file.ocr_status,
+        "ocrStale": bool(
+            ocr_timeout_seconds is not None
+            and file.ocr_status == ReimbursementOcrStatus.RUNNING.value
+            and not ocr_is_actively_running(
+                file,
+                ocr_timeout_seconds=ocr_timeout_seconds,
+            )
+        ),
         "ocrResult": ocr_result,
         "paymentDetails": payment_details,
         "materialClassification": material_classification(file.ocr_result_json),
@@ -434,6 +451,11 @@ async def validate_expense_source_conversion(
 ) -> None:
     draft = require_owned_draft(database, draft_id=draft_id, actor=actor, mutable=True)
     _require_revision(draft, expected_revision)
+    recover_stale_running_ocr(
+        database,
+        draft_id=draft.id,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+    )
     file = _require_active_file(database, draft_id=draft.id, file_id=file_id)
     if file.ocr_status == ReimbursementOcrStatus.RUNNING.value:
         raise ApiError("REIMBURSEMENT_FILE_BUSY", "材料正在识别，请稍后再修改", 409)
@@ -455,6 +477,7 @@ def update_draft_file(
     expected_revision: int,
     processing_role: ReimbursementDraftFileRole | None,
     original_name: str | None,
+    settings: Settings,
     attachment_kind: ReimbursementAttachmentKind | None = None,
 ) -> DraftFileMutationResult:
     draft = require_owned_draft(
@@ -464,6 +487,11 @@ def update_draft_file(
         mutable=True,
     )
     _require_revision(draft, expected_revision)
+    recover_stale_running_ocr(
+        database,
+        draft_id=draft.id,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+    )
     file = _require_active_file(database, draft_id=draft.id, file_id=file_id)
     if file.ocr_status == ReimbursementOcrStatus.RUNNING.value:
         raise ApiError(
@@ -531,11 +559,21 @@ def update_draft_file(
 
 
 def begin_draft_files_clear(
-    database: Session, *, actor: DraftActor, draft_id: str, expected_revision: int
+    database: Session,
+    *,
+    actor: DraftActor,
+    draft_id: str,
+    expected_revision: int,
+    settings: Settings,
 ) -> tuple[int, list[DraftFileDeletion]]:
     """Persist one atomic delete intent for the current revision's materials."""
     draft = require_owned_draft(database, draft_id=draft_id, actor=actor, mutable=True)
     _require_revision(draft, expected_revision)
+    recover_stale_running_ocr(
+        database,
+        draft_id=draft.id,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+    )
     files = list(
         database.scalars(
             select(ReimbursementDraftFile).where(
@@ -545,7 +583,8 @@ def begin_draft_files_clear(
         )
     )
     if any(
-        file.file_status in {"RESERVED", "WRITING"} or file.ocr_status == "RUNNING"
+        file.file_status in {"RESERVED", "WRITING"}
+        or ocr_is_actively_running(file, ocr_timeout_seconds=settings.ocr_timeout_seconds)
         for file in files
     ):
         raise ApiError("REIMBURSEMENT_FILE_BUSY", "文件仍在上传或识别，请完成后清空", 409)
@@ -641,6 +680,7 @@ def begin_draft_file_delete(
     draft_id: str,
     file_id: str,
     expected_revision: int,
+    settings: Settings,
 ) -> DraftFileDeletion:
     draft = require_owned_draft(
         database,
@@ -670,12 +710,19 @@ def begin_draft_file_delete(
             actor=actor,
             mutable=True,
         )
-        if file.ocr_status == ReimbursementOcrStatus.RUNNING.value:
+        if ocr_is_actively_running(file, ocr_timeout_seconds=settings.ocr_timeout_seconds):
             raise ApiError(
                 "REIMBURSEMENT_FILE_BUSY",
                 "票据正在识别，请稍后再删除",
                 409,
             )
+        if file.ocr_status == ReimbursementOcrStatus.RUNNING.value:
+            recover_stale_running_ocr(
+                database,
+                draft_id=draft.id,
+                ocr_timeout_seconds=settings.ocr_timeout_seconds,
+            )
+            database.refresh(file)
         referenced = database.scalar(
             select(ReimbursementUpload.id)
             .where(ReimbursementUpload.source_draft_file_id == file.id)
@@ -837,13 +884,7 @@ async def recognize_draft_file(
                 "仅票据来源或行程单材料可进行识别",
                 409,
             )
-        running_cutoff = utc_now() - timedelta(
-            seconds=settings.ocr_timeout_seconds + _OCR_STALE_GRACE_SECONDS
-        )
-        if (
-            file.ocr_status == ReimbursementOcrStatus.RUNNING.value
-            and file.updated_at > running_cutoff
-        ):
+        if ocr_is_actively_running(file, ocr_timeout_seconds=settings.ocr_timeout_seconds):
             raise ApiError(
                 "REIMBURSEMENT_FILE_OCR_RUNNING",
                 "票据正在识别，请稍后查看",
@@ -886,8 +927,12 @@ async def recognize_draft_file(
     if is_hotel_bill:
         # Stay OCR is advisory even if the model is unavailable or times out.
         # Keep failed expense-shaped candidates out of this attachment's data.
-        def failure_payload(_file_id: str, _code: str, _message: str) -> dict[str, object]:
+        def failure_payload(_file_id: str, code: str, message: str) -> dict[str, object]:
             return {
+                "status": "failed",
+                "kind": "hotel_bill",
+                "error": {"code": code, "message": message},
+                "warnings": ["HOTEL_BILL_INCOMPLETE", "HOTEL_BILL_REVIEW_REQUIRED"],
                 "hotelBillDetails": {
                     "warnings": ["HOTEL_BILL_INCOMPLETE", "HOTEL_BILL_REVIEW_REQUIRED"]
                 }
@@ -1047,6 +1092,11 @@ def _workbook_preview_snapshot(
 ) -> WorkbookPreviewSnapshot:
     draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
     _require_revision(draft, expected_revision)
+    recover_stale_running_ocr(
+        database,
+        draft_id=draft.id,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+    )
     if draft.status == ReimbursementDraftStatus.LOCKED.value:
         submission = database.scalar(
             select(ReimbursementSubmission).where(ReimbursementSubmission.draft_id == draft.id)
@@ -1384,7 +1434,8 @@ def _set_ocr_failed_without_revision(
     draft_id: str,
     file_id: str,
     marker: str,
-    payload: dict[str, object],
+    code: str,
+    message: str,
 ) -> None:
     with session_factory() as database:
         file = database.scalar(
@@ -1404,17 +1455,12 @@ def _set_ocr_failed_without_revision(
         )
         if file is None:
             return
-        classification = material_classification(marker)
-        if classification:
-            if classification.get("status") in PENDING_CLASSIFICATION_STATUSES:
-                classification = {
-                    **classification,
-                    "status": "needs_confirmation",
-                    "kind": "unknown",
-                    "reason": "材料识别已中断，请重试或确认用途",
-                }
-                payload = {}
-            payload[MATERIAL_CLASSIFICATION_KEY] = classification
+        payload = failed_ocr_payload(
+            file,
+            marker=marker,
+            code=code,
+            message=message,
+        )
         # The SELECT above only prepares the safe failure payload. A newer
         # retry can replace the marker before this write, so cleanup must CAS
         # the old marker too rather than flushing an ORM update by primary key.
@@ -1454,24 +1500,14 @@ def _mark_ocr_interrupted(
     file_id: str,
     marker: str,
 ) -> None:
-    classification = material_classification(marker)
-    failure_payload = (
-        failed_itinerary_payload
-        if classification and classification.get("kind") == "itinerary"
-        else failed_expense_payload
-    )
-    payload = failure_payload(
-        file_id,
-        "OCR_RESULT_CONFLICT",
-        "报销内容在识别期间已变更，请重试",
-    )
     _set_ocr_failed_without_revision(
         session_factory,
         actor,
         draft_id,
         file_id,
         marker,
-        payload,
+        "OCR_RESULT_CONFLICT",
+        "报销内容在识别期间已变更，请重试",
     )
 
 
@@ -1662,6 +1698,7 @@ def _snapshot(file: ReimbursementDraftFile) -> DraftFileSnapshot:
         sha256=file.sha256,
         ocr_status=file.ocr_status,
         ocr_result_json=file.ocr_result_json,
+        updated_at=file.updated_at,
         attachment_kind=file.attachment_kind,
     )
 

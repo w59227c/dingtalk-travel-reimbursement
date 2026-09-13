@@ -1431,6 +1431,66 @@ def test_review_uses_expense_item_dates_when_the_draft_has_no_trip(
     assert reviewed.json()["error"]["code"] == "REIMBURSEMENT_TRAVEL_DATE_MISMATCH"
 
 
+def test_review_recovers_stale_running_ocr_and_keeps_linked_material(
+    client_factory,
+    monkeypatch,
+) -> None:
+    catalog = _catalog_with_travel()
+    monkeypatch.setattr(
+        reimbursement_drafts,
+        "require_submission_ready_catalog",
+        lambda _database: catalog,
+    )
+    client = client_factory(auth_mock_enabled=True)
+    login = mock_login(client)
+    headers = {"X-CSRF-Token": login["csrfToken"]}
+    draft_id = _create(client, headers).json()["data"]["id"]
+    client.app.state.dingtalk_workflow = FakeTravelWorkflow()
+    related = client.put(
+        f"/api/reimbursements/drafts/{draft_id}/related-approvals",
+        json={"expectedRevision": 1, "selections": [_selection()]},
+        headers=headers,
+    )
+    assert related.status_code == 200, related.text
+    file_id = _add_active_file(
+        client,
+        draft_id,
+        ocr_status=ReimbursementOcrStatus.RUNNING.value,
+        record_disposition=False,
+    )
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        draft = database.get(ReimbursementDraft, draft_id)
+        assert file is not None and draft is not None
+        file.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
+        file.updated_at = utc_now() - timedelta(
+            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+        )
+        input_data = json.loads(draft.input_json)
+        input_data["items"][0]["sourceFileId"] = file_id
+        draft.input_json = json.dumps(
+            input_data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        database.commit()
+
+    reviewed = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/review",
+        json={"expectedRevision": 2},
+        headers=headers,
+    )
+
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["data"]["status"] == "REVIEW_READY"
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        assert file is not None
+        assert file.ocr_status == ReimbursementOcrStatus.FAILED.value
+        assert json.loads(file.ocr_result_json)["error"]["code"] == "OCR_INTERRUPTED"
+
+
 def test_review_rejects_running_file_work_and_catalog_relation_drift_atomically(
     client_factory,
     monkeypatch,

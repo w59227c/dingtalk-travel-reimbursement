@@ -46,6 +46,13 @@ def _image_bytes(
     return output.getvalue()
 
 
+def _named_image_bytes(name: str) -> bytes:
+    name_seed = sum(name.encode("utf-8")) % 256
+    return _image_bytes(
+        color=(name_seed, (name_seed * 3) % 256, (name_seed * 7) % 256),
+    )
+
+
 def _draft_input(*, amount: str = "44.89") -> dict[str, object]:
     return {
         "ocrDispositionVersion": 1,
@@ -109,13 +116,17 @@ def _upload(
     content: bytes | None = None,
     content_type: str = "application/octet-stream",
     role: str = "EXPENSE_SOURCE",
+    attachment_kind: str = "other",
 ):
     if content is None:
-        name_seed = sum(name.encode("utf-8")) % 256
-        content = _image_bytes(color=(name_seed, (name_seed * 3) % 256, (name_seed * 7) % 256))
+        content = _named_image_bytes(name)
     return client.post(
         f"/api/reimbursements/drafts/{draft_id}/files",
-        params={"expectedRevision": revision, "role": role},
+        params={
+            "expectedRevision": revision,
+            "role": role,
+            "attachmentKind": attachment_kind,
+        },
         headers={"X-CSRF-Token": csrf},
         files=[("files[]", (name, content, content_type))],
     )
@@ -717,6 +728,132 @@ def test_batch_clear_rejects_running_ocr_without_partial_changes(client_factory)
         )
 
 
+def test_batch_clear_allows_stale_running_ocr_after_restart(client_factory) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    stale_upload = _upload(client, csrf, draft_id, revision=1, name="stale.png")
+    current_upload = _upload(client, csrf, draft_id, revision=2, name="current.png")
+    assert stale_upload.status_code == 201
+    assert current_upload.status_code == 201
+    stale_file_id = stale_upload.json()["data"]["file"]["id"]
+    current_file_id = current_upload.json()["data"]["file"]["id"]
+
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, stale_file_id)
+        file.ocr_status = "RUNNING"
+        file.updated_at = utc_now() - timedelta(
+            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+        )
+        database.commit()
+
+    response = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/files/clear",
+        headers={"X-CSRF-Token": csrf},
+        json={"expectedRevision": 3},
+    )
+
+    assert response.status_code == 200, response.text
+    assert set(response.json()["data"]["deletedFileIds"]) == {
+        stale_file_id,
+        current_file_id,
+    }
+    with client.app.state.database_session_factory() as database:
+        stale_file = database.get(ReimbursementDraftFile, stale_file_id)
+        assert stale_file.file_status == "PURGED"
+        assert stale_file.ocr_status == "FAILED"
+        assert database.get(ReimbursementDraftFile, current_file_id).file_status == "PURGED"
+
+
+def test_delete_allows_stale_running_ocr_after_restart(client_factory) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    uploaded = _upload(client, csrf, draft_id, revision=1)
+    assert uploaded.status_code == 201
+    file_id = uploaded.json()["data"]["file"]["id"]
+
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        file.ocr_status = "RUNNING"
+        file.updated_at = utc_now() - timedelta(
+            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+        )
+        database.commit()
+
+    response = client.delete(
+        f"/api/reimbursements/drafts/{draft_id}/files/{file_id}",
+        params={"expectedRevision": 2},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["deletedFileId"] == file_id
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        assert file.file_status == "PURGED"
+        assert file.ocr_status == "FAILED"
+
+
+def test_listing_exposes_stale_running_ocr_without_mutating_from_get(client_factory) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    uploaded = _upload(client, csrf, draft_id, revision=1)
+    assert uploaded.status_code == 201
+    file_id = uploaded.json()["data"]["file"]["id"]
+
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        file.ocr_status = "RUNNING"
+        file.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
+        file.updated_at = utc_now() - timedelta(
+            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+        )
+        database.commit()
+
+    response = client.get(f"/api/reimbursements/drafts/{draft_id}/files")
+
+    assert response.status_code == 200, response.text
+    listed = response.json()["data"]["items"][0]
+    assert listed["ocrStatus"] == "RUNNING"
+    assert listed["ocrStale"] is True
+    with client.app.state.database_session_factory() as database:
+        assert database.get(ReimbursementDraftFile, file_id).ocr_status == "RUNNING"
+
+
+def test_listing_exposes_stale_hotel_ocr_as_retryable(client_factory) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    uploaded = _upload(
+        client,
+        csrf,
+        draft_id,
+        revision=1,
+        role="ATTACHMENT_ONLY",
+        attachment_kind="hotel_bill",
+    )
+    assert uploaded.status_code == 201
+    file_id = uploaded.json()["data"]["file"]["id"]
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        file.ocr_status = "RUNNING"
+        file.ocr_result_json = json.dumps({"operationId": "interrupted-hotel"})
+        file.updated_at = utc_now() - timedelta(
+            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+        )
+        database.commit()
+
+    response = client.get(f"/api/reimbursements/drafts/{draft_id}/files")
+
+    assert response.status_code == 200, response.text
+    listed = response.json()["data"]["items"][0]
+    assert listed["attachmentKind"] == "hotel_bill"
+    assert listed["ocrStatus"] == "RUNNING"
+    assert listed["ocrStale"] is True
+
+
 def test_patch_and_delete_use_revision_cas_and_delete_physical_first(client_factory) -> None:
     client = client_factory(auth_mock_enabled=True)
     csrf = str(mock_login(client)["csrfToken"])
@@ -1013,6 +1150,45 @@ def test_excel_preview_recalculates_from_saved_draft_without_submission_side_eff
     with client.app.state.database_session_factory() as database:
         assert database.scalar(select(func.count()).select_from(ReimbursementSubmission)) == 0
         assert database.scalar(select(func.count()).select_from(ReimbursementUpload)) == 0
+
+
+def test_excel_preview_recovers_stale_running_ocr_without_blocking(
+    client_factory,
+    monkeypatch,
+) -> None:
+    from test_reimbursement_drafts import _catalog
+
+    from app.services import reimbursement_files
+
+    monkeypatch.setattr(
+        reimbursement_files, "require_submission_ready_catalog", lambda _: _catalog()
+    )
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client, amount="44.89")
+    uploaded = _upload(client, csrf, draft_id, revision=1)
+    assert uploaded.status_code == 201
+    file_id = uploaded.json()["data"]["file"]["id"]
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        file.ocr_status = "RUNNING"
+        file.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
+        file.updated_at = utc_now() - timedelta(
+            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+        )
+        database.commit()
+
+    response = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+        headers={"X-CSRF-Token": csrf},
+        json={"expectedRevision": 2},
+    )
+
+    assert response.status_code == 200, response.text
+    with client.app.state.database_session_factory() as database:
+        file = database.get(ReimbursementDraftFile, file_id)
+        assert file.ocr_status == "FAILED"
+        assert json.loads(file.ocr_result_json)["error"]["code"] == "OCR_INTERRUPTED"
 
 
 def test_excel_preview_native_ticket_survives_external_download_without_session_cookie(

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request, status
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
@@ -22,12 +23,19 @@ from app.services.oa_reimbursement_payload import (
 from app.services.oa_template_profiles import load_fresh_submission_catalog
 from app.services.reimbursement_drafts import draft_actor
 from app.services.reimbursement_submissions import (
+    admin_confirm_manual_review_not_created,
+    admin_resume_manual_review_with_instance,
     create_or_get_submission,
     find_owned_submission_for_draft,
     request_submission_recheck,
     require_owned_submission,
 )
-from app.services.sessions import CurrentSession, get_current_session, require_csrf
+from app.services.sessions import (
+    CurrentSession,
+    get_current_session,
+    require_admin_csrf,
+    require_csrf,
+)
 
 router = APIRouter(tags=["reimbursement-submissions"])
 
@@ -38,6 +46,30 @@ _TERMINAL_STATUSES = frozenset(
         ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
     }
 )
+
+
+class AdminSubmissionRecoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["ATTACH_INSTANCE", "CONFIRM_NOT_CREATED"]
+    process_instance_id: str | None = Field(
+        default=None,
+        alias="processInstanceId",
+        min_length=1,
+        max_length=128,
+    )
+    confirm_uncertain_uploads_absent: bool = Field(
+        default=False,
+        alias="confirmUncertainUploadsAbsent",
+    )
+
+    @model_validator(mode="after")
+    def validate_action_fields(self) -> AdminSubmissionRecoveryRequest:
+        if self.action == "ATTACH_INSTANCE" and self.process_instance_id is None:
+            raise ValueError("ATTACH_INSTANCE requires processInstanceId")
+        if self.action == "CONFIRM_NOT_CREATED" and self.process_instance_id is not None:
+            raise ValueError("CONFIRM_NOT_CREATED does not accept processInstanceId")
+        return self
 
 
 @router.post(
@@ -97,6 +129,7 @@ async def submit_reimbursement(
         microapp_agent_id=agent_id,
         excel_template_path=settings.excel_template_path,
         max_items=settings.expense_max_items,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
     )
     snapshot = build_snapshot(source)
     snapshot_json = serialize_snapshot(snapshot)
@@ -131,6 +164,36 @@ def get_reimbursement_submission(
         actor=draft_actor(current),
         submission_id=submission_id,
     )
+    return success(_submission_data(submission))
+
+
+@router.post("/admin/oa/reimbursements/submissions/{submission_id}/recover")
+def recover_reimbursement_submission_as_admin(
+    submission_id: str,
+    body: AdminSubmissionRecoveryRequest,
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_admin_csrf)],
+) -> dict[str, object]:
+    """Resolve an otherwise terminal manual-review checkpoint without recreating OA."""
+
+    if not request.app.state.settings.dingtalk_oa_worker_enabled:
+        raise ApiError("OA_SUBMISSION_DISABLED", "审批处理服务尚未启用", 503)
+    if body.action == "ATTACH_INSTANCE":
+        submission = admin_resume_manual_review_with_instance(
+            database,
+            corp_id=current.record.corp_id,
+            submission_id=submission_id,
+            process_instance_id=body.process_instance_id or "",
+        )
+    else:
+        submission = admin_confirm_manual_review_not_created(
+            database,
+            corp_id=current.record.corp_id,
+            submission_id=submission_id,
+            admin_user_id=current.record.dingtalk_user_id,
+            confirm_uncertain_uploads_absent=body.confirm_uncertain_uploads_absent,
+        )
     return success(_submission_data(submission))
 
 

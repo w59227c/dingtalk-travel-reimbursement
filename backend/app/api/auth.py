@@ -26,8 +26,8 @@ from app.services.sessions import (
     CurrentSession,
     create_session,
     get_current_session,
+    get_session_csrf,
     require_csrf,
-    rotate_csrf,
     selectable_departments,
     serialize_departments,
     session_payload,
@@ -155,7 +155,15 @@ def me(
     current: Annotated[CurrentSession, Depends(get_current_session)],
 ) -> dict[str, object]:
     settings: Settings = request.app.state.settings
-    csrf_token = rotate_csrf(database, settings, current.record)
+    session_token = request.cookies.get(settings.session_cookie_name)
+    if not session_token:
+        raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
+    csrf_token = get_session_csrf(
+        database,
+        settings,
+        current.record,
+        session_token,
+    )
     return success(session_payload(current, csrf_token))
 
 

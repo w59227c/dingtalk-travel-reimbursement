@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import OaTemplateSettingsCard from '@/components/settings/OaTemplateSettingsCard.vue'
 import ReceiptKeywordSettingsCard from '@/components/settings/ReceiptKeywordSettingsCard.vue'
+import SubmissionRecoveryCard from '@/components/settings/SubmissionRecoveryCard.vue'
 import SubsidyRateSettingsCard from '@/components/settings/SubsidyRateSettingsCard.vue'
 
 const props = withDefaults(defineProps<{
@@ -37,6 +38,7 @@ const props = withDefaults(defineProps<{
 
     <ReceiptKeywordSettingsCard />
     <SubsidyRateSettingsCard />
+    <SubmissionRecoveryCard />
     <OaTemplateSettingsCard />
   </main>
 </template>

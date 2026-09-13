@@ -133,6 +133,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   let activeReimbursementOptionsController: AbortController | null = null
   let activeTravelApprovalsController: AbortController | null = null
   let activePreviewController: AbortController | null = null
+  let fileRefreshFlight: Promise<void> | null = null
   const controllers = new Set<AbortController>()
 
   const busy = computed(() =>
@@ -616,6 +617,40 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     }
   }
 
+  async function refreshCurrentFiles(): Promise<void> {
+    if (fileRefreshFlight) return fileRefreshFlight
+    const target = requireCurrentDraft()
+    const draftId = target.id
+    const revision = target.revision
+    const intentVersion = currentIntentVersion
+    const stateGeneration = draftStateGeneration(draftId)
+    const context = requestContext()
+    const operation = (async () => {
+      try {
+        const result = await listReimbursementDraftFiles(draftId, {
+          signal: context.controller.signal,
+        })
+        if (
+          accepts(context)
+          && currentIntentVersion === intentVersion
+          && draftStateGeneration(draftId) === stateGeneration
+          && currentDraft.value?.id === draftId
+          && currentDraft.value.revision === revision
+          && result.draftId === draftId
+          && result.revision === revision
+        ) {
+          files.value = result.items
+        }
+      } finally {
+        releaseRequest(context)
+      }
+    })().finally(() => {
+      if (fileRefreshFlight === operation) fileRefreshFlight = null
+    })
+    fileRefreshFlight = operation
+    return operation
+  }
+
   async function createDraft(input: ReimbursementDraftInput): Promise<ReimbursementDraft> {
     const intentVersion = ++currentIntentVersion
     invalidateDetailRead()
@@ -939,6 +974,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       ),
       applyDraftMutation,
       '报销内容检查失败，请核对内容后重试',
+      { reloadAfterFailure: true },
     )
   }
 
@@ -1302,6 +1338,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadTravelApprovals,
     loadDrafts,
     loadDraft,
+    refreshCurrentFiles,
     createDraft,
     saveDraft,
     deleteDraft,

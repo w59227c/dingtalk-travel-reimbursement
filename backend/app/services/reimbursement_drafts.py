@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings
 from app.core.errors import ApiError
 from app.domain.categories import ExpenseCategory
 from app.domain.expenses import calculate_expense_totals
@@ -37,6 +38,7 @@ from app.services.oa_template_profiles import (
     OaTemplateCatalogContract,
     require_submission_ready_catalog,
 )
+from app.services.reimbursement_ocr_state import recover_stale_running_ocr
 from app.services.sessions import CurrentSession, require_selected_department
 from app.services.subsidy_calculation import (
     calculate_trip_subsidies,
@@ -372,6 +374,7 @@ def mark_reimbursement_draft_review_ready(
     draft_id: str,
     expected_revision: int,
     max_items: int,
+    settings: Settings,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Validate a complete local snapshot and atomically mark it review-ready."""
@@ -386,6 +389,12 @@ def mark_reimbursement_draft_review_ready(
     )
     if draft.revision != expected_revision:
         raise _revision_conflict_error()
+    recover_stale_running_ocr(
+        database,
+        draft_id=draft.id,
+        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        now=changed_at,
+    )
     catalog = require_submission_ready_catalog(database)
     binding = CatalogBinding.from_catalog(catalog)
     _require_catalog_binding(draft, binding)
@@ -1249,7 +1258,10 @@ def _validate_file_snapshot(
             ReimbursementDraftFileStatus.WRITING.value,
             ReimbursementDraftFileStatus.DELETING.value,
         }
-        or item.ocr_status == ReimbursementOcrStatus.RUNNING.value
+        or (
+            item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
+            and item.ocr_status == ReimbursementOcrStatus.RUNNING.value
+        )
         or (
             item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
             and item.processing_role == ReimbursementDraftFileRole.EXPENSE_SOURCE.value

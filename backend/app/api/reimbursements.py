@@ -151,5 +151,6 @@ def review_draft(
             draft_id=draft_id,
             expected_revision=body.expected_revision,
             max_items=request.app.state.settings.expense_max_items,
+            settings=request.app.state.settings,
         )
     )

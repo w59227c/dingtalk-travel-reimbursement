@@ -194,6 +194,7 @@ export interface ReimbursementDraftFile {
   mediaType: string
   sizeBytes: number
   ocrStatus: ReimbursementDraftFileOcrStatus
+  ocrStale?: boolean
   ocrResult: OcrReceiptCandidate | ItineraryOcrResult | null
   paymentDetails?: {
     amount: string | null

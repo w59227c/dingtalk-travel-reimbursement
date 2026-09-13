@@ -290,7 +290,8 @@ def test_late_failure_cleanup_cannot_overwrite_a_new_marker_after_its_read(clien
         draft_id,
         file_id,
         old_marker,
-        {"status": "failed", "error": "old failure"},
+        "OCR_TEST_FAILURE",
+        "old failure",
     )
     with original_factory() as database:
         file = database.get(ReimbursementDraftFile, file_id)

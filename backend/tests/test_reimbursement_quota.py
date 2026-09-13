@@ -24,6 +24,7 @@ from app.models.reimbursement import (
     ReimbursementUpload,
     ReimbursementUploadLocalStatus,
     ReimbursementUploadRole,
+    ReimbursementUploadStatus,
     utc_now,
 )
 from app.services.reimbursement_drafts import DraftActor
@@ -618,6 +619,89 @@ def test_expired_draft_write_reclaims_its_installed_but_unfinalized_object(
             expected_size=staged.size_bytes,
             expected_sha256=staged.sha256,
         )
+
+    engine.dispose()
+
+
+def test_startup_reclaims_unexpired_interrupted_draft_write(tmp_path: Path) -> None:
+    engine = create_database_engine(f"sqlite:///{tmp_path / 'quota.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as database:
+        draft = _new_draft()
+        database.add(draft)
+        database.commit()
+        draft_id = draft.id
+    staging = ReimbursementStaging(
+        (tmp_path / "staging").resolve(),
+        max_object_bytes=100,
+    )
+    staging.prepare()
+    coordinator = ReimbursementQuotaCoordinator(engine, staging, max_bytes=100)
+    owner = DraftFileOwner("corp-test", "employee-1", draft_id, 1)
+    reservation = coordinator.reserve_draft_file(
+        owner,
+        sort_order=0,
+        processing_role=ReimbursementDraftFileRole.EXPENSE_SOURCE,
+        original_name="发票.pdf",
+        extension="pdf",
+        media_type="application/pdf",
+        reserved_bytes=70,
+        expires_at=utc_now() + timedelta(hours=1),
+    )
+    coordinator.mark_writing(owner, reservation)
+    staging.write_bytes(reservation.staging, b"interrupted-content")
+
+    assert coordinator.reclaim_interrupted_local_writes() == 1
+    assert coordinator.usage().reserved_bytes == 0
+    with Session(engine) as database:
+        record = database.get(ReimbursementDraftFile, reservation.record_id)
+        assert record is not None
+        assert record.file_status == ReimbursementDraftFileStatus.PURGED.value
+
+    engine.dispose()
+
+
+def test_startup_reclaims_unexpired_interrupted_generated_write(tmp_path: Path) -> None:
+    engine = create_database_engine(f"sqlite:///{tmp_path / 'quota.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as database:
+        draft = _new_draft()
+        database.add(draft)
+        database.flush()
+        submission = _new_generating_submission(draft)
+        database.add(submission)
+        database.commit()
+        submission_id = submission.id
+    staging = ReimbursementStaging(
+        (tmp_path / "staging").resolve(),
+        max_object_bytes=100,
+    )
+    staging.prepare()
+    coordinator = ReimbursementQuotaCoordinator(engine, staging, max_bytes=100)
+    lease = SubmissionLease(
+        "corp-test",
+        "employee-1",
+        submission_id,
+        "lease-token-1",
+        3,
+    )
+    reservation = coordinator.reserve_generated_upload(
+        lease,
+        sort_order=0,
+        file_name="差旅费报销单.xlsx",
+        reserved_bytes=70,
+        expires_at=utc_now() + timedelta(hours=1),
+    )
+    coordinator.mark_writing(lease, reservation)
+    staging.write_bytes(reservation.staging, b"interrupted-workbook")
+
+    assert coordinator.reclaim_interrupted_local_writes() == 1
+    assert coordinator.usage().reserved_bytes == 0
+    with Session(engine) as database:
+        upload = database.get(ReimbursementUpload, reservation.record_id)
+        assert upload is not None
+        assert upload.local_status == ReimbursementUploadLocalStatus.DELETED.value
+        assert upload.upload_status == ReimbursementUploadStatus.DISCARDED.value
 
     engine.dispose()
 

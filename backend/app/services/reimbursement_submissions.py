@@ -128,6 +128,199 @@ def request_submission_recheck(
     return require_owned_submission(database, actor=actor, submission_id=submission_id)
 
 
+def admin_resume_manual_review_with_instance(
+    database: Session,
+    *,
+    corp_id: str,
+    submission_id: str,
+    process_instance_id: str,
+) -> ReimbursementSubmission:
+    """Attach an OA id verified by an administrator and resume readback only."""
+
+    from app.services.oa_reimbursement_payload import parse_create_command
+
+    normalized_corp = _required_text(corp_id, maximum=128)
+    normalized_submission = _required_text(submission_id, maximum=36)
+    normalized_instance = _required_text(process_instance_id, maximum=128)
+    current = database.scalar(
+        select(ReimbursementSubmission).where(
+            ReimbursementSubmission.id == normalized_submission,
+            ReimbursementSubmission.corp_id == normalized_corp,
+        )
+    )
+    if current is None:
+        raise ApiError("REIMBURSEMENT_SUBMISSION_NOT_FOUND", "提交记录不存在", 404)
+    if current.status in {
+        ReimbursementSubmissionStatus.VERIFYING.value,
+        ReimbursementSubmissionStatus.SUBMITTED.value,
+    } and current.process_instance_id == normalized_instance:
+        return current
+    if (
+        current.status != ReimbursementSubmissionStatus.MANUAL_REVIEW.value
+        or current.process_instance_id is not None
+        or current.lease_token is not None
+    ):
+        raise ApiError("OA_ADMIN_RECOVERY_NOT_ALLOWED", "当前提交状态不能绑定审批编号", 409)
+    if (
+        not current.oa_request_json
+        or not current.oa_request_hash
+        or not current.oa_create_started_at
+    ):
+        raise ApiError("OA_CREATE_CHECKPOINT_MISSING", "审批提交快照缺失，不能自动核对", 409)
+    parse_create_command(current.oa_request_json, expected_sha256=current.oa_request_hash)
+    changed_at = utc_now()
+    try:
+        changed = database.execute(
+            update(ReimbursementSubmission)
+            .where(
+                ReimbursementSubmission.id == current.id,
+                ReimbursementSubmission.corp_id == normalized_corp,
+                ReimbursementSubmission.status
+                == ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
+                ReimbursementSubmission.status_version == current.status_version,
+                ReimbursementSubmission.process_instance_id.is_(None),
+                ReimbursementSubmission.lease_token.is_(None),
+            )
+            .values(
+                status=ReimbursementSubmissionStatus.VERIFYING.value,
+                process_instance_id=normalized_instance,
+                resume_status=None,
+                status_version=current.status_version + 1,
+                next_attempt_at=changed_at,
+                last_error_code=None,
+                last_error_message=None,
+                updated_at=changed_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if changed.rowcount != 1:
+            raise ReimbursementSubmissionConflict("manual-review submission changed")
+        database.commit()
+        database.expire_all()
+    except IntegrityError:
+        database.rollback()
+        raise ApiError("OA_INSTANCE_ALREADY_BOUND", "该审批编号已关联其他提交记录", 409) from None
+    except ReimbursementSubmissionConflict:
+        database.rollback()
+        raise ApiError("OA_ADMIN_RECOVERY_CONFLICT", "提交状态已变化，请刷新后重试", 409) from None
+    return database.get(ReimbursementSubmission, normalized_submission)
+
+
+def admin_confirm_manual_review_not_created(
+    database: Session,
+    *,
+    corp_id: str,
+    submission_id: str,
+    admin_user_id: str,
+    confirm_uncertain_uploads_absent: bool = False,
+) -> ReimbursementSubmission:
+    """Resume cleanup after an administrator confirms no OA was created.
+
+    A Storage commit whose response was lost is never guessed automatically.
+    The administrator must separately confirm that those remote files are also
+    absent before their checkpoints can safely return to the pre-commit state.
+    """
+
+    normalized_corp = _required_text(corp_id, maximum=128)
+    normalized_submission = _required_text(submission_id, maximum=36)
+    normalized_admin = _required_text(admin_user_id, maximum=128)
+    current = database.scalar(
+        select(ReimbursementSubmission).where(
+            ReimbursementSubmission.id == normalized_submission,
+            ReimbursementSubmission.corp_id == normalized_corp,
+        )
+    )
+    if current is None:
+        raise ApiError("REIMBURSEMENT_SUBMISSION_NOT_FOUND", "提交记录不存在", 404)
+    if (
+        current.status == ReimbursementSubmissionStatus.ORPHAN_CLEANUP.value
+        and current.process_instance_id is None
+        and current.orphan_confirmation_code == "ADMIN_CONFIRMED_NOT_CREATED"
+    ):
+        return current
+    if (
+        current.status != ReimbursementSubmissionStatus.MANUAL_REVIEW.value
+        or current.process_instance_id is not None
+        or current.lease_token is not None
+    ):
+        raise ApiError("OA_ADMIN_RECOVERY_NOT_ALLOWED", "当前提交状态不能确认未创建", 409)
+
+    uncertain_statuses = {
+        ReimbursementUploadStatus.COMMITTING.value,
+        ReimbursementUploadStatus.COMMIT_UNCERTAIN.value,
+    }
+    uncertain_upload = database.scalar(
+        select(ReimbursementUpload.id)
+        .where(
+            ReimbursementUpload.submission_id == current.id,
+            ReimbursementUpload.upload_status.in_(uncertain_statuses),
+        )
+        .limit(1)
+    )
+    if uncertain_upload is not None and not confirm_uncertain_uploads_absent:
+        database.rollback()
+        raise ApiError(
+            "OA_REMOTE_FILE_CONFIRMATION_REQUIRED",
+            "存在提交结果未知的附件，请先确认钉钉文件中不存在后再继续",
+            409,
+        )
+
+    changed_at = utc_now()
+    try:
+        changed = database.execute(
+            update(ReimbursementSubmission)
+            .where(
+                ReimbursementSubmission.id == current.id,
+                ReimbursementSubmission.corp_id == normalized_corp,
+                ReimbursementSubmission.status
+                == ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
+                ReimbursementSubmission.status_version == current.status_version,
+                ReimbursementSubmission.process_instance_id.is_(None),
+                ReimbursementSubmission.lease_token.is_(None),
+            )
+            .values(
+                status=ReimbursementSubmissionStatus.ORPHAN_CLEANUP.value,
+                resume_status=None,
+                status_version=current.status_version + 1,
+                next_attempt_at=changed_at,
+                orphan_confirmed_at=changed_at,
+                orphan_confirmation_code="ADMIN_CONFIRMED_NOT_CREATED",
+                orphan_confirmed_by_user_id=normalized_admin,
+                last_error_code=None,
+                last_error_message=None,
+                updated_at=changed_at,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if changed.rowcount != 1:
+            raise ReimbursementSubmissionConflict("manual-review submission changed")
+        if uncertain_upload is not None:
+            database.execute(
+                update(ReimbursementUpload)
+                .where(
+                    ReimbursementUpload.submission_id == current.id,
+                    ReimbursementUpload.upload_status.in_(uncertain_statuses),
+                )
+                .values(
+                    upload_status=ReimbursementUploadStatus.PENDING.value,
+                    status_version=ReimbursementUpload.status_version + 1,
+                    put_started_at=None,
+                    commit_started_at=None,
+                    space_id=None,
+                    file_id=None,
+                    last_error_code="ADMIN_CONFIRMED_REMOTE_FILE_ABSENT",
+                    updated_at=changed_at,
+                )
+                .execution_options(synchronize_session=False)
+            )
+        database.commit()
+        database.expire_all()
+    except ReimbursementSubmissionConflict:
+        database.rollback()
+        raise ApiError("OA_ADMIN_RECOVERY_CONFLICT", "提交状态已变化，请刷新后重试", 409) from None
+    return database.get(ReimbursementSubmission, normalized_submission)
+
+
 @dataclass(frozen=True, slots=True)
 class SubmissionCreateResult:
     submission_id: str

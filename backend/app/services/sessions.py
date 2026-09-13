@@ -164,7 +164,7 @@ def create_session(
             database.delete(existing)
 
     session_token = random_token()
-    csrf_token = random_token()
+    csrf_token = _csrf_token_for_session(settings, session_token)
     now = utc_now()
     selected = departments[0] if len(departments) == 1 else None
     record = UserSession(
@@ -188,10 +188,31 @@ def create_session(
     return record, session_token, csrf_token
 
 
-def rotate_csrf(database: Session, settings: Settings, record: UserSession) -> str:
-    csrf_token = random_token()
-    record.csrf_token_hash = token_hash(csrf_token, settings.session_secret)
-    database.commit()
+def _csrf_token_for_session(settings: Settings, session_token: str) -> str:
+    """Derive one stable CSRF token per login session.
+
+    Rotating the token from ``GET /me`` invalidated other DingTalk tabs that
+    shared the same HttpOnly session cookie. The session token already rotates
+    on login, so deriving the CSRF value from it keeps separate login sessions
+    isolated without introducing a cross-tab race.
+    """
+
+    return token_hash(f"csrf:{session_token}", settings.session_secret)
+
+
+def get_session_csrf(
+    database: Session,
+    settings: Settings,
+    record: UserSession,
+    session_token: str,
+) -> str:
+    csrf_token = _csrf_token_for_session(settings, session_token)
+    expected_hash = token_hash(csrf_token, settings.session_secret)
+    if not tokens_match(csrf_token, record.csrf_token_hash, settings.session_secret):
+        # Transparently migrate sessions created before stable CSRF tokens were
+        # introduced. This write happens once, not on every /me request.
+        record.csrf_token_hash = expected_hash
+        database.commit()
     return csrf_token
 
 

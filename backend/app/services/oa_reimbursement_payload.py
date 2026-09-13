@@ -74,6 +74,7 @@ from app.services.reimbursement_drafts import (
     validate_and_calculate_input,
     validate_draft_file_references,
 )
+from app.services.reimbursement_ocr_state import recover_stale_running_ocr
 from app.services.reimbursement_staging import (
     ReimbursementStaging,
     ReimbursementStagingError,
@@ -430,11 +431,13 @@ def collect_snapshot_source(
     microapp_agent_id: int,
     excel_template_path: Path,
     max_items: int,
+    ocr_timeout_seconds: int,
 ) -> SnapshotSource:
-    """Read one fail-closed submission view without locking or mutating it.
+    """Recover interrupted OCR, then read one fail-closed submission view.
 
+    Recovery may settle stale file markers without changing the draft revision.
     The caller must immediately claim the same draft/revision through the
-    submission state service in this Session before committing the snapshot.
+    submission state service in this Session after this function returns.
     """
 
     _require_positive_integer(expected_revision, "expected_revision")
@@ -450,6 +453,11 @@ def collect_snapshot_source(
         actor=actor,
         mutable=True,
         now=utc_now(),
+    )
+    recover_stale_running_ocr(
+        database,
+        draft_id=draft.id,
+        ocr_timeout_seconds=ocr_timeout_seconds,
     )
     if draft.status != ReimbursementDraftStatus.REVIEW_READY.value or draft.locked_at is not None:
         raise ApiError(
@@ -502,7 +510,10 @@ def collect_snapshot_source(
     ).all()
     if any(
         item.file_status in _TRANSITIONAL_FILE_STATUSES
-        or item.ocr_status == ReimbursementOcrStatus.RUNNING.value
+        or (
+            item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
+            and item.ocr_status == ReimbursementOcrStatus.RUNNING.value
+        )
         or (
             item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
             and item.processing_role == ReimbursementDraftFileRole.EXPENSE_SOURCE.value

@@ -9,7 +9,7 @@ from conftest import mock_login
 from openpyxl import load_workbook
 from pypdf import PdfWriter
 from test_reimbursement_drafts import _add_active_file, _create, _input, _install_catalog
-from test_reimbursement_files import _image_bytes, _insert_draft, _upload
+from test_reimbursement_files import _insert_draft, _named_image_bytes, _upload
 
 from app.core.errors import ApiError
 from app.excel.template_contract import EXCEL_TEMPLATE
@@ -321,7 +321,7 @@ def test_original_preview_is_authenticated_private_and_expires(client_factory):
     url = f"/api/reimbursements/drafts/{draft_id}/files/{uploaded['id']}/content"
     response = client.get(url)
     assert response.status_code == 200
-    assert response.content == _image_bytes()
+    assert response.content == _named_image_bytes("receipt.png")
     assert response.headers["cache-control"] == "no-store, private"
     assert response.headers["content-disposition"].startswith("inline;")
     with client.app.state.database_session_factory() as database:

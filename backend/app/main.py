@@ -157,6 +157,21 @@ def create_app(
                 extra={"reclaimed_count": reclaimed},
             )
 
+    def cleanup_interrupted_reimbursements() -> None:
+        try:
+            reclaimed = reimbursement_quota.reclaim_interrupted_local_writes()
+        except Exception as exc:
+            logger.error(
+                "Interrupted reimbursement staging cleanup failed",
+                extra={"exception_type": type(exc).__name__},
+            )
+            return
+        if reclaimed:
+            logger.info(
+                "Reclaimed interrupted reimbursement staging records",
+                extra={"reclaimed_count": reclaimed},
+            )
+
     async def periodic_temp_cleanup(stop: asyncio.Event) -> None:
         while not stop.is_set():
             try:
@@ -215,6 +230,7 @@ def create_app(
             prepare_spool_directory(runtime_settings)
             reimbursement_staging.prepare()
             cleanup_expired_temp_files(runtime_settings, file_coordinator)
+            cleanup_interrupted_reimbursements()
             cleanup_expired_reimbursements()
             with database_session_factory() as database:
                 purge_expired_sessions(database)
