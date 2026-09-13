@@ -44,7 +44,7 @@ jobs:
           uv sync --project backend --frozen --extra dev --extra ocr
       - name: Test backend and cross-stack calculation contract
         working-directory: backend
-        run: uv run --frozen --extra dev --extra ocr pytest -n 8
+        run: uv run --frozen --extra dev --extra ocr pytest -n 4
       - name: Lint backend and model downloader
         working-directory: backend
         run: uv run --frozen --extra dev ruff check app tests migrations scripts
