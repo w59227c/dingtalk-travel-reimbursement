@@ -65,6 +65,7 @@ interface RevisionedResult {
 
 interface MutationOptions {
   reloadAfterFailure?: boolean
+  retryRevisionConflictOnce?: boolean
   pipeline?: FilePipeline
   benignErrorCodes?: readonly string[]
 }
@@ -540,7 +541,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       draftCollectionVersion += 1
     } catch (error) {
       if (accepts(context) && requestVersion === listRequestVersion && !isCancellation(error)) {
-        listError.value = apiErrorMessage(error, '报销报销内容列表加载失败，请重试')
+        listError.value = apiErrorMessage(error, '报销内容列表加载失败，请重试')
       }
     } finally {
       releaseRequest(context)
@@ -606,7 +607,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       ) {
         tombstoneDraft(draftId)
       } else if (canHandleFailure) {
-        loadError.value = apiErrorMessage(error, '报销报销内容加载失败，请重试')
+        loadError.value = apiErrorMessage(error, '报销内容加载失败，请重试')
       }
     } finally {
       releaseRequest(context)
@@ -675,7 +676,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && intentVersion === currentIntentVersion
         && !isCancellation(error)
       ) {
-        mutationError.value = apiErrorMessage(error, '报销报销内容创建失败，请重试')
+        mutationError.value = apiErrorMessage(error, '报销内容创建失败，请重试')
       }
       throw error
     } finally {
@@ -771,7 +772,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   ): Promise<T> {
     const target = requireCurrentDraft()
     const draftId = target.id
-    const expectedRevision = target.revision
+    let expectedRevision = target.revision
+    let canRetryRevisionConflict = options.retryRevisionConflictOnce === true
     const intentVersion = currentIntentVersion
     advanceDraftState(draftId)
     const refreshGuard = draftReadGuard(draftId, intentVersion)
@@ -781,50 +783,70 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     mutationError.value = ''
     revisionConflict.value = false
     try {
-      const result = await request(draftId, expectedRevision, context.controller.signal)
-      if (
-        accepts(context)
-        && intentVersion === currentIntentVersion
-        && currentDraft.value?.id === draftId
-      ) {
-        apply(result, draftId, context)
-      }
-      return result
-    } catch (error) {
-      const cancelled = isCancellation(error)
-      const errorCode = apiErrorCode(error)
-      const conflict = errorCode === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
-      const benign = errorCode !== null && options.benignErrorCodes?.includes(errorCode) === true
-      const shouldReload = !benign && !options.pipeline && (conflict || options.reloadAfterFailure === true)
-      const refreshed = accepts(context) && !cancelled && shouldReload
-        ? await reloadAuthoritativeDraft(
-          context,
-          refreshGuard,
-        )
-        : false
-      if (
-        accepts(context)
-        && intentVersion === currentIntentVersion
-        && currentDraft.value?.id === draftId
-        && !cancelled
-      ) {
-        if (benign) {
-          mutationError.value = ''
-        } else if (conflict) {
-          revisionConflict.value = true
-          mutationError.value = refreshed
-            ? '报销内容已在其他页面更新，已加载最新内容；请检查后重新操作'
-            : '报销内容已在其他页面更新，最新内容加载失败；请手动重新加载'
-        } else {
-          const message = apiErrorMessage(error, fallbackMessage)
-          mutationError.value = options.reloadAfterFailure
-            ? refreshed
-              ? `${message}；已同步报销内容最新状态`
-              : `${message}；最新状态同步失败，请手动重新加载`
-            : message
+      while (true) {
+        try {
+          const result = await request(draftId, expectedRevision, context.controller.signal)
+          if (
+            accepts(context)
+            && intentVersion === currentIntentVersion
+            && currentDraft.value?.id === draftId
+          ) {
+            apply(result, draftId, context)
+          }
+          return result
+        } catch (error) {
+          const cancelled = isCancellation(error)
+          const errorCode = apiErrorCode(error)
+          const conflict = errorCode === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
+          const benign = errorCode !== null && options.benignErrorCodes?.includes(errorCode) === true
+          const shouldReload = !benign && !options.pipeline && (conflict || options.reloadAfterFailure === true)
+          const refreshed = accepts(context) && !cancelled && shouldReload
+            ? await reloadAuthoritativeDraft(
+              context,
+              refreshGuard,
+            )
+            : false
+          const refreshedRevision = currentDraft.value?.id === draftId
+            ? currentDraft.value.revision
+            : null
+          if (
+            conflict
+            && refreshed
+            && canRetryRevisionConflict
+            && refreshedRevision !== null
+            && refreshedRevision !== expectedRevision
+            && accepts(context)
+            && intentVersion === currentIntentVersion
+          ) {
+            canRetryRevisionConflict = false
+            expectedRevision = refreshedRevision
+            continue
+          }
+          if (
+            accepts(context)
+            && intentVersion === currentIntentVersion
+            && currentDraft.value?.id === draftId
+            && !cancelled
+          ) {
+            if (benign) {
+              mutationError.value = ''
+            } else if (conflict) {
+              revisionConflict.value = true
+              mutationError.value = refreshed
+                ? '报销内容在操作期间已更新，已加载最新内容；请检查后重新操作'
+                : '报销内容在操作期间已更新，但最新内容加载失败；请手动重新加载'
+            } else {
+              const message = apiErrorMessage(error, fallbackMessage)
+              mutationError.value = options.reloadAfterFailure
+                ? refreshed
+                  ? `${message}；已同步报销内容最新状态`
+                  : `${message}；最新状态同步失败，请手动重新加载`
+                : message
+            }
+          }
+          throw error
         }
       }
-      throw error
     } finally {
       options.pipeline?.controllers.delete(context.controller)
       releaseRequest(context)
@@ -884,7 +906,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         { signal },
       ),
       applyDraftMutation,
-      '报销报销内容保存失败，请重试',
+      '报销内容保存失败，请重试',
     )
   }
 
@@ -926,10 +948,10 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         if (conflict) {
           revisionConflict.value = true
           mutationError.value = refreshed
-            ? '报销内容已在其他页面更新，已加载最新内容；请检查后重新删除'
-            : '报销内容已在其他页面更新，未删除报销内容；请刷新后重试'
+            ? '报销内容在删除期间已更新，已加载最新内容；请检查后重新删除'
+            : '报销内容在删除期间已更新，未删除报销内容；请刷新后重试'
         } else {
-          const message = apiErrorMessage(error, '报销报销内容删除失败，请重试')
+          const message = apiErrorMessage(error, '报销内容删除失败，请重试')
           mutationError.value = refreshed
             ? `${message}；已同步报销内容最新状态`
             : `${message}；最新状态同步失败，请手动重新加载`
@@ -1115,7 +1137,10 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         ),
         pipeline ? (result, draftId, context) => applyPipelineFileMutation(result, draftId, context, pipeline) : applyFileMutation,
         '票据识别失败，请重试或手工填写',
-        pipeline ? { pipeline } : { reloadAfterFailure: true },
+        pipeline ? { pipeline } : {
+          reloadAfterFailure: true,
+          retryRevisionConflictOnce: true,
+        },
       )
     } catch (error) {
       if (pipeline) pipeline.needsRefresh = true
@@ -1168,8 +1193,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         ) {
           revisionConflict.value = true
           mutationError.value = refreshed
-            ? '报销内容已在其他页面更新，已加载最新内容；请检查后重新操作'
-            : '报销内容已在其他页面更新，最新内容加载失败；请手动重新加载'
+            ? '报销内容在操作期间已更新，已加载最新内容；请检查后重新操作'
+            : '报销内容在操作期间已更新，但最新内容加载失败；请手动重新加载'
         }
       } else if (
         accepts(context)
@@ -1236,8 +1261,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         ) {
           revisionConflict.value = true
           mutationError.value = refreshed
-            ? '报销内容已在其他页面更新，已加载最新内容；请检查后重新操作'
-            : '报销内容已在其他页面更新，最新内容加载失败；请手动重新加载'
+            ? '报销内容在操作期间已更新，已加载最新内容；请检查后重新操作'
+            : '报销内容在操作期间已更新，但最新内容加载失败；请手动重新加载'
         }
       } else if (
         accepts(context)

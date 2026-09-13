@@ -217,6 +217,10 @@ export interface ReimbursementDraftFile {
     kind: 'expense' | 'itinerary' | 'payment_proof' | 'hotel_bill' | 'other' | 'unknown'
     reason: string | null
     pageCount: number | null
+    error?: {
+      code: string
+      message: string
+    } | null
   } | null
 }
 

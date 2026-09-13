@@ -653,7 +653,7 @@ describe('persistent reimbursement draft store', () => {
         data: {
           error: {
             code: 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT',
-            message: '草稿已在其他页面更新，请刷新后重试',
+            message: '报销内容版本已更新，请刷新后重试',
           },
         },
       },
@@ -1135,6 +1135,67 @@ describe('persistent reimbursement draft store', () => {
     expect(store.files[0]?.ocrStatus).toBe('FAILED')
     expect(store.mutationError).toContain('票据识别超时，请手工填写')
     expect(store.mutationError).toContain('已同步报销内容最新状态')
+  })
+
+  it('reloads and retries OCR once when its draft revision changed', async () => {
+    vi.mocked(createReimbursementDraft).mockResolvedValue(draft())
+    vi.mocked(recognizeReimbursementDraftFile)
+      .mockRejectedValueOnce(responseError(
+        'REIMBURSEMENT_DRAFT_REVISION_CONFLICT',
+        '报销内容版本已更新，请刷新后重试',
+        409,
+      ))
+      .mockResolvedValueOnce({
+        draftId: 'draft-1',
+        revision: 3,
+        file: { ...serverFile(), ocrStatus: 'COMPLETE' },
+      })
+    vi.mocked(getReimbursementDraft).mockResolvedValue(draft('draft-1', 2))
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({
+      draftId: 'draft-1', revision: 2, items: [serverFile()],
+    })
+    const store = useReimbursementDraftStore()
+    await store.createDraft(input)
+
+    await expect(store.recognizeFile('file-1', 2026)).resolves.toMatchObject({ revision: 3 })
+
+    expect(recognizeReimbursementDraftFile).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(recognizeReimbursementDraftFile).mock.calls.map((call) => call[2].expectedRevision))
+      .toEqual([1, 2])
+    expect(getReimbursementDraft).toHaveBeenCalledOnce()
+    expect(listReimbursementDraftFiles).toHaveBeenCalledOnce()
+    expect(store.currentDraft?.revision).toBe(3)
+    expect(store.files[0]?.ocrStatus).toBe('COMPLETE')
+    expect(store.revisionConflict).toBe(false)
+    expect(store.mutationError).toBe('')
+  })
+
+  it('stops after one OCR conflict retry and exposes the refreshed state', async () => {
+    vi.mocked(createReimbursementDraft).mockResolvedValue(draft())
+    const conflict = responseError(
+      'REIMBURSEMENT_DRAFT_REVISION_CONFLICT',
+      '报销内容版本已更新，请刷新后重试',
+      409,
+    )
+    vi.mocked(recognizeReimbursementDraftFile).mockRejectedValue(conflict)
+    vi.mocked(getReimbursementDraft)
+      .mockResolvedValueOnce(draft('draft-1', 2))
+      .mockResolvedValueOnce(draft('draft-1', 3))
+    vi.mocked(listReimbursementDraftFiles)
+      .mockResolvedValueOnce({ draftId: 'draft-1', revision: 2, items: [serverFile()] })
+      .mockResolvedValueOnce({ draftId: 'draft-1', revision: 3, items: [serverFile()] })
+    const store = useReimbursementDraftStore()
+    await store.createDraft(input)
+
+    await expect(store.recognizeFile('file-1', 2026)).rejects.toBe(conflict)
+
+    expect(recognizeReimbursementDraftFile).toHaveBeenCalledTimes(2)
+    expect(getReimbursementDraft).toHaveBeenCalledTimes(2)
+    expect(listReimbursementDraftFiles).toHaveBeenCalledTimes(2)
+    expect(store.currentDraft?.revision).toBe(3)
+    expect(store.revisionConflict).toBe(true)
+    expect(store.mutationError).toContain('操作期间已更新')
+    expect(store.mutationError).not.toContain('其他页面')
   })
 
   it('reset aborts in-flight upload and ignores a late successful response', async () => {

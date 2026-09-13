@@ -2581,7 +2581,7 @@ def _require_review_ready_draft(
     if draft.revision != expected_revision:
         raise ApiError(
             "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-            "草稿已在其他页面更新，请刷新后重试",
+            "报销内容版本已更新，请刷新后重试",
             409,
         )
     if draft.status != ReimbursementDraftStatus.REVIEW_READY.value or draft.locked_at is not None:

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.domain.material_classification import (
     MATERIAL_CLASSIFICATION_KEY,
     PENDING_CLASSIFICATION_STATUSES,
+    failed_material_classification,
     material_classification,
 )
 from app.models.reimbursement import (
@@ -110,12 +111,11 @@ def failed_ocr_payload(
     classification = material_classification(marker)
     if classification and classification.get("status") in PENDING_CLASSIFICATION_STATUSES:
         return {
-            MATERIAL_CLASSIFICATION_KEY: {
-                **classification,
-                "status": "needs_confirmation",
-                "kind": "unknown",
-                "reason": "材料识别因服务中断未完成，请重试或确认用途",
-            }
+            MATERIAL_CLASSIFICATION_KEY: failed_material_classification(
+                classification,
+                code=code,
+                message=message,
+            )
         }
     kind = file.attachment_kind
     if classification is not None and classification.get("kind") in {

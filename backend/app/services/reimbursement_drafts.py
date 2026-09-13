@@ -181,7 +181,7 @@ def bump_owned_draft_revision(
     if current.revision != expected_revision:
         raise ApiError(
             "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-            "报销内容已在其他页面更新，请刷新后重试",
+            "报销内容版本已更新，请刷新后重试",
             409,
         )
     raise ApiError(
@@ -1386,7 +1386,7 @@ def _not_found_error() -> ApiError:
 def _revision_conflict_error() -> ApiError:
     return ApiError(
         "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-        "报销内容已在其他页面更新，请刷新后重试",
+        "报销内容版本已更新，请刷新后重试",
         409,
     )
 

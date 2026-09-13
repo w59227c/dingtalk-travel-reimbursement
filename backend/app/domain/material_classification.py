@@ -6,6 +6,23 @@ MATERIAL_CLASSIFICATION_KEY = "_materialClassification"
 PENDING_CLASSIFICATION_STATUSES = frozenset({"pending", "needs_confirmation"})
 
 
+def failed_material_classification(
+    classification: dict[str, object],
+    *,
+    code: str,
+    message: str,
+) -> dict[str, object]:
+    """Keep a failed automatic classification actionable without making it an expense."""
+
+    return {
+        **classification,
+        "status": "needs_confirmation",
+        "kind": "unknown",
+        "reason": message,
+        "error": {"code": code, "message": message},
+    }
+
+
 def material_classification(raw_json: str | None) -> dict[str, object] | None:
     if not raw_json:
         return None

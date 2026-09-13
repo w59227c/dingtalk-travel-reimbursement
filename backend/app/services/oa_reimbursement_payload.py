@@ -468,7 +468,7 @@ def collect_snapshot_source(
     if draft.revision != expected_revision:
         raise ApiError(
             "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-            "报销内容已在其他页面更新，请刷新后重试",
+            "报销内容版本已更新，请刷新后重试",
             409,
         )
 

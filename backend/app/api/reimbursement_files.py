@@ -154,7 +154,7 @@ async def upload_file(
     if draft.revision != expected_revision:
         raise ApiError(
             "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-            "报销内容已在其他页面更新，请刷新后重试",
+            "报销内容版本已更新，请刷新后重试",
             409,
         )
     session_id_hash = current.record.session_id_hash
@@ -436,7 +436,7 @@ def create_excel_preview_ticket(
     if draft.revision != body.expected_revision:
         raise ApiError(
             "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-            "报销内容已在其他页面更新，请刷新后重试",
+            "报销内容版本已更新，请刷新后重试",
             409,
         )
     token = issue_excel_preview_ticket(

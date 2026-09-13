@@ -1192,7 +1192,7 @@ def _draft_not_found_error() -> ApiError:
 def _draft_revision_conflict_error() -> ApiError:
     return ApiError(
         "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-        "草稿已在其他页面更新，请刷新后重试",
+        "报销内容版本已更新，请刷新后重试",
         409,
     )
 

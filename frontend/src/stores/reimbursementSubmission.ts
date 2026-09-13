@@ -411,7 +411,7 @@ export const useReimbursementSubmissionStore = defineStore(
       expectedRevision: number,
     ): Promise<ReimbursementSubmission> {
       if (!draftId || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
-        return Promise.reject(new Error('报销报销内容或版本无效'))
+        return Promise.reject(new Error('报销内容或版本无效'))
       }
       const requestGeneration = activateDraft(draftId)
       if (submitFlight?.draftId === draftId) return submitFlight.promise
@@ -532,7 +532,7 @@ export const useReimbursementSubmissionStore = defineStore(
       draftId: string,
       options: RestoreReimbursementSubmissionOptions | number = {},
     ): Promise<ReimbursementSubmission | null> {
-      if (!draftId) return Promise.reject(new Error('报销报销内容无效'))
+      if (!draftId) return Promise.reject(new Error('报销内容无效'))
       const requestGeneration = activateDraft(draftId)
       const record = recordForDraft(draftId)
       if (record === null || (record.submissionId === null && oaSubmissionEnabled.value === false)) {

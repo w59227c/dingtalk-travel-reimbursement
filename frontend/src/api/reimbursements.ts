@@ -25,6 +25,8 @@ import type {
 } from '@/types/reimbursements'
 
 const DRAFT_EXCEL_PREVIEW_FILENAME = '差旅费报销单预览.xlsx'
+// Keep the client attached through the OCR worker ceiling and its settlement window.
+const OCR_REQUEST_TIMEOUT_MS = 210_000
 
 export interface ReimbursementRequestOptions {
   signal?: AbortSignal
@@ -288,7 +290,7 @@ export async function recognizeReimbursementDraftFile(
   const response = await http.post<ApiEnvelope<ReimbursementDraftFileMutation>>(
     `${fileUrl(draftId, fileId)}/ocr`,
     input,
-    { signal: options.signal, timeout: 135_000 },
+    { signal: options.signal, timeout: OCR_REQUEST_TIMEOUT_MS },
   )
   return response.data.data
 }

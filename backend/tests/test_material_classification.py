@@ -379,6 +379,42 @@ def test_auto_upload_persists_purpose_and_only_invoices_return_expense(
     assert listed["items"][0] == file
 
 
+def test_failed_auto_classification_keeps_the_actionable_ocr_error(
+    client_factory,
+    monkeypatch,
+):
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    uploaded = _auto_upload(client, csrf, draft_id, name="高铁1.png")
+
+    async def timed_out(*_args, **_kwargs):
+        raise ApiError("OCR_TIMEOUT", "材料识别超时，请重试或确认用途", 504)
+
+    monkeypatch.setattr(client.app.state.ocr_service, "recognize_material_file", timed_out)
+    recognized = _recognize(
+        client,
+        csrf,
+        draft_id,
+        uploaded["file"]["id"],
+        uploaded["revision"],
+    )
+
+    file = recognized["file"]
+    assert file["ocrStatus"] == "FAILED"
+    assert file["ocrResult"] is None
+    assert file["materialClassification"] == {
+        "status": "needs_confirmation",
+        "kind": "unknown",
+        "reason": "材料识别超时，请重试或确认用途",
+        "pageCount": 1,
+        "error": {
+            "code": "OCR_TIMEOUT",
+            "message": "材料识别超时，请重试或确认用途",
+        },
+    }
+
+
 def test_manual_confirmation_same_other_value_clears_pending_and_prevents_reclassification(
     client_factory,
 ):

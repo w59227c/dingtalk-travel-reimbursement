@@ -24,6 +24,7 @@ from app.domain.expenses import ExpenseTotals, calculate_expense_totals
 from app.domain.material_classification import (
     MATERIAL_CLASSIFICATION_KEY,
     PENDING_CLASSIFICATION_STATUSES,
+    failed_material_classification,
     material_classification,
 )
 from app.domain.subsidy import SubsidyCalculation
@@ -1392,12 +1393,18 @@ def _finish_ocr(
         )
         if classification and MATERIAL_CLASSIFICATION_KEY not in payload:
             if auto_attempt:
-                classification = {
-                    **classification,
-                    "status": "needs_confirmation",
-                    "kind": "unknown",
-                    "reason": "材料识别未完成，请重试或确认用途",
-                }
+                error = payload.get("error")
+                error_code = error.get("code") if isinstance(error, dict) else None
+                error_message = error.get("message") if isinstance(error, dict) else None
+                classification = failed_material_classification(
+                    classification,
+                    code=error_code if isinstance(error_code, str) else "OCR_FAILED",
+                    message=(
+                        error_message
+                        if isinstance(error_message, str)
+                        else "材料识别未完成，请重试或确认用途"
+                    ),
+                )
                 # A failed auto-classification is not a failed expense line.
                 payload = {}
             payload[MATERIAL_CLASSIFICATION_KEY] = classification
