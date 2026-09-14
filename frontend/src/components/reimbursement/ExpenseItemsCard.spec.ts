@@ -11,7 +11,6 @@ import {
   getReimbursementFileContent,
   listReimbursementDraftFiles,
   recognizeReimbursementDraftFile,
-  requestReimbursementDraftFilePreviewTicket,
   updateReimbursementDraft,
   updateReimbursementDraftFile,
   uploadReimbursementDraftFile,
@@ -22,7 +21,6 @@ import { useAuthStore } from '@/stores/auth'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import type { OcrReceiptCandidate, ItineraryOcrResult } from '@/types/receipts'
 import { receiptOcrResult } from '@/types/reimbursements'
-import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import type {
   ReimbursementDraft,
   ReimbursementDraftFile,
@@ -44,16 +42,11 @@ vi.mock('@/api/reimbursements', async (importOriginal) => {
     getReimbursementFileContent: vi.fn(),
     listReimbursementDraftFiles: vi.fn(),
     recognizeReimbursementDraftFile: vi.fn(),
-    requestReimbursementDraftFilePreviewTicket: vi.fn(),
     updateReimbursementDraft: vi.fn(),
     updateReimbursementDraftFile: vi.fn(),
     uploadReimbursementDraftFile: vi.fn(),
   }
 })
-
-vi.mock('@/utils/dingtalk', () => ({
-  downloadAndOpenDingTalkDocument: vi.fn(),
-}))
 
 function draft(revision = 1, id = 'draft-1'): ReimbursementDraft {
   return {
@@ -448,7 +441,7 @@ describe('ExpenseItemsCard durable files', () => {
     const pending = wrapper.get('[data-testid="material-workbench"]')
     const items = wrapper.get('[data-testid="expense-items-group"]')
     expect(items.text()).toContain('已计入费用明细')
-    expect(items.classes()).toContain('expense-items-group__heading--desktop')
+    expect(items.classes()).not.toContain('expense-items-group__heading--desktop')
     expect(pending.element.compareDocumentPosition(items.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(wrapper.get('.receipt-submit-impact').classes()).toContain('receipt-submit-impact--blocking')
     expect(wrapper.get('.receipt-submit-impact').classes()).not.toContain('receipt-submit-impact--error')
@@ -2391,13 +2384,15 @@ describe('ExpenseItemsCard durable files', () => {
     await wrapper.get('[aria-label="预览票据 发票.pdf"]').trigger('click')
     await flushPromises()
     expect(getReimbursementFileContent).toHaveBeenCalledWith('draft-1', 'file-1', { signal: expect.any(AbortSignal) })
-    expect(createUrl).toHaveBeenCalledWith(blob)
-    expect(wrapper.get('iframe').attributes('src')).toBe('blob:server-preview')
+    expect(createUrl).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="pdf-preview"]')).toBeDefined()
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
     wrapper.unmount()
-    expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview')
+    expect(revokeUrl).not.toHaveBeenCalled()
   })
 
-  it('opens mobile PDFs through the authenticated DingTalk document flow', async () => {
+  it('renders mobile PDFs inside the reimbursement page without downloading them', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
     const drafts = useReimbursementDraftStore()
@@ -2405,15 +2400,19 @@ describe('ExpenseItemsCard durable files', () => {
     const source = recognizedFile('file-1', '发票.pdf', '10.00')
     drafts.files = [source]
     expense.upsertDraftOcrItem(source)
-    vi.mocked(requestReimbursementDraftFilePreviewTicket).mockResolvedValue({
-      downloadUrl: '/api/reimbursements/drafts/draft-1/files/file-1/preview/native',
-      downloadToken: 'signed-file-ticket',
-      fileType: 'pdf',
-    })
-    vi.mocked(downloadAndOpenDingTalkDocument).mockResolvedValue()
+    const blob = new Blob(['pdf'], { type: 'application/pdf' })
+    vi.mocked(getReimbursementFileContent).mockResolvedValue(blob)
     const wrapper = mount(ExpenseItemsCard, {
       props: { mobile: true },
-      global: { plugins: [pinia, ElementPlus] },
+      global: {
+        plugins: [pinia, ElementPlus],
+        stubs: {
+          PdfPreview: {
+            props: ['source'],
+            template: '<div data-testid="pdf-preview">PDF 页面</div>',
+          },
+        },
+      },
     })
     await flushPromises()
 
@@ -2423,18 +2422,67 @@ describe('ExpenseItemsCard durable files', () => {
     await preview.trigger('click')
     await flushPromises()
 
-    expect(requestReimbursementDraftFilePreviewTicket).toHaveBeenCalledWith(
+    expect(getReimbursementFileContent).toHaveBeenCalledWith(
       'draft-1',
       'file-1',
       { signal: expect.any(AbortSignal) },
     )
-    expect(downloadAndOpenDingTalkDocument).toHaveBeenCalledWith({
-      url: `${window.location.origin}/api/reimbursements/drafts/draft-1/files/file-1/preview/native`,
-      headers: { 'X-Reimbursement-Download-Token': 'signed-file-ticket' },
-      fileType: 'pdf',
-    })
-    expect(getReimbursementFileContent).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="pdf-preview"]').text()).toBe('PDF 页面')
     expect(wrapper.find('iframe').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
+    wrapper.unmount()
+  })
+
+  it('groups the mobile expense summary, description, materials and actions into distinct regions', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    const source = taxiInvoice()
+    const itinerary = recognizedItinerary('file-2')
+    drafts.currentDraft = draft(8)
+    drafts.files = [source, itinerary]
+    expense.upsertDraftOcrItem(source)
+    expense.items[0]!.itineraryFileIds = [itinerary.id]
+
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const list = wrapper.get('[data-presentation="mobile"]')
+    const card = list.get('.expense-item-card')
+    expect(card.get('.expense-item-card__description').text()).toContain('打车发票.pdf 的行程')
+    const materials = card.get('.expense-item-card__materials')
+    expect(materials.text()).toContain('来源票据')
+    expect(materials.text()).toContain('行程单')
+    expect(card.get('.expense-item-card__actions').text()).toContain('重新识别')
+    expect(wrapper.get('.expense-table').classes()).toContain('expense-table--hidden')
+    wrapper.unmount()
+  })
+
+  it('keeps the desktop table while separating summary and material details from the group heading', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    const source = taxiInvoice()
+    const itinerary = recognizedItinerary('file-2')
+    drafts.currentDraft = draft(8)
+    drafts.files = [source, itinerary]
+    expense.upsertDraftOcrItem(source)
+    expense.items[0]!.itineraryFileIds = [itinerary.id]
+
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+
+    const heading = wrapper.get('[data-testid="expense-items-group"]')
+    expect(heading.text()).toContain('已计入费用明细')
+    const row = wrapper.get('.el-table__row')
+    expect(row.get('.expense-item-card__description').text()).toContain('打车发票.pdf 的行程')
+    const materials = row.get('.expense-item-card__materials--desktop')
+    expect(materials.text()).toContain('来源票据')
+    expect(materials.text()).toContain('行程单')
+    expect(heading.element.nextElementSibling).toBe(wrapper.get('.expense-table').element)
     wrapper.unmount()
   })
 

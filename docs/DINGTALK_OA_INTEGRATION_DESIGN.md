@@ -165,7 +165,7 @@ H5 负责员工看得见的交互：
 - 展示行程单金额、日期、次数、路线和关联状态，默认选择一个文件，按需补充；交通类型不明确时由员工确认保守推荐；
 - 在缺住宿明细或付款凭证的费用下提供上传及已上传材料复用入口，底部列出材料待办并定位；展示国外票据原币信息并要求确认人民币报销金额；
 - 查询并选择本人已通过的出差审批；
-- 通过鉴权接口预览已上传文件；桌面 PDF 在页面内显示，移动端 PDF 使用绑定登录会话和具体文件的短期凭证，经钉钉原生下载并打开；下载当前内容的 Excel 预览；
+- 通过鉴权接口预览已上传文件；图片直接显示，PDF 由前端在当前页面逐页渲染；下载当前内容的 Excel 预览；
 - 在正式提交前给出不可撤销提示；
 - 展示后台进度、最终 OA 编号和打开入口。
 
@@ -598,7 +598,6 @@ Workflow 适配代码见 [workflow.py](../backend/app/integrations/dingtalk/work
 | `PATCH /api/reimbursements/drafts/{draftId}/files/{fileId}` | 按 revision 修改文件名、角色或 `attachmentKind`；显式传角色/用途（含同值）即人工确认，改为费用来源须通过单页检查 |
 | `DELETE /api/reimbursements/drafts/{draftId}/files/{fileId}?expectedRevision=` | 删除一份未锁定草稿文件 |
 | `POST /api/reimbursements/drafts/{draftId}/files/{fileId}/ocr` | 仅 `pending/needs_confirmation` 重新分类；`classified/confirmed` 的费用来源/行程单沿用既定用途识别，普通材料/付款凭证拒绝 OCR |
-| `POST /api/reimbursements/drafts/{draftId}/files/{fileId}/preview-ticket` | 校验 CSRF、员工/部门、草稿及文件后签发 60 秒移动端原件预览凭证 |
 | `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/preview/native` | 钉钉原生下载使用自定义请求头提交短期凭证；再次校验凭证路径、活动 Session、文件归属、状态和内容完整性 |
 | `POST /api/reimbursements/drafts/{draftId}/excel-preview` | 页面保存最新输入后，从对应 revision 生成预览下载 |
 

@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import { Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
 import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
 import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
+import PdfPreview from './PdfPreview.vue'
 
-import {
-  getReimbursementFileContent,
-  requestReimbursementDraftFilePreviewTicket,
-} from '@/api/reimbursements'
+import { getReimbursementFileContent } from '@/api/reimbursements'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
@@ -22,7 +20,6 @@ import type {
   ReimbursementDraftFile,
   ReimbursementDraftFileRole,
 } from '@/types/reimbursements'
-import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import { formatFileSize } from '@/utils/receiptFiles'
 import {
   evidenceRailType,
@@ -124,6 +121,7 @@ let durableUnmounted = false
 let activeDurableOperation: DurableOperationScope | null = null
 const receiptPreviewVisible = ref(false)
 const receiptPreviewUrl = ref('')
+const receiptPreviewBlob = shallowRef<Blob | null>(null)
 const receiptPreviewName = ref('')
 const receiptPreviewKind = ref<'image' | 'pdf'>('image')
 const previewLoading = ref(false)
@@ -713,6 +711,18 @@ function meaningfulMobileDescription(item: ExpenseItem): string {
   return description && description !== category ? description : ''
 }
 
+function itemHasMaterialSection(item: ExpenseItem): boolean {
+  return Boolean(
+    durableFileByItemId(item.id)
+    || linkedProofFiles(item).length
+    || item.category === 'lodging'
+    || isTaxiExpense(item)
+    || requiresPaymentProof(item)
+    || item.hotelBillFileIds?.length
+    || item.paymentProofFileIds?.length,
+  )
+}
+
 function readableMobileFileName(file: ReimbursementDraftFile | undefined): string {
   if (!file) return ''
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12,64}(?:\.[a-z0-9]+)?$/i.test(file.name)) {
@@ -810,6 +820,7 @@ function releaseReceiptPreview(): void {
   previewController = null
   if (receiptPreviewUrl.value) URL.revokeObjectURL(receiptPreviewUrl.value)
   receiptPreviewUrl.value = ''
+  receiptPreviewBlob.value = null
 }
 
 async function previewDurableFile(file: ReimbursementDraftFile | undefined): Promise<void> {
@@ -820,23 +831,12 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
   previewController = controller
   previewLoading.value = true
   try {
-    if (props.mobile && file.mediaType === 'application/pdf') {
-      const ticket = await requestReimbursementDraftFilePreviewTicket(draft.id, file.id, {
-        signal: controller.signal,
-      })
-      if (controller.signal.aborted || drafts.currentDraft?.id !== draft.id || durableUnmounted) return
-      await downloadAndOpenDingTalkDocument({
-        url: new URL(ticket.downloadUrl, window.location.origin).href,
-        headers: { 'X-Reimbursement-Download-Token': ticket.downloadToken },
-        fileType: ticket.fileType,
-      })
-      return
-    }
     const blob = await getReimbursementFileContent(draft.id, file.id, { signal: controller.signal })
     if (controller.signal.aborted || drafts.currentDraft?.id !== draft.id || durableUnmounted) return
     receiptPreviewName.value = file.name
     receiptPreviewKind.value = file.mediaType === 'application/pdf' ? 'pdf' : 'image'
-    receiptPreviewUrl.value = URL.createObjectURL(blob)
+    if (receiptPreviewKind.value === 'pdf') receiptPreviewBlob.value = blob
+    else receiptPreviewUrl.value = URL.createObjectURL(blob)
     receiptPreviewVisible.value = true
   } catch (error) {
     if (!controller.signal.aborted) ElMessage.error(apiErrorMessage(error, '材料预览失败，请重试'))
@@ -1840,9 +1840,8 @@ async function retryItemRecognition(id: string): Promise<void> {
       :image-size="80"
     />
     <header
-      v-if="expense.items.length > 0 && (props.mobile || unlinkedDurableFiles.length > 0)"
+      v-if="expense.items.length > 0"
       class="expense-items-group__heading"
-      :class="{ 'expense-items-group__heading--desktop': !props.mobile }"
       data-testid="expense-items-group"
     >
       <div>
@@ -1878,41 +1877,11 @@ async function retryItemRecognition(id: string): Promise<void> {
             >
               {{ isRetryingDurableRecognition(durableFileByItemId(scope.row.id)) ? '重新识别中' : '识别中' }}
             </el-tag>
-            <button
-              v-if="durableFileByItemId(scope.row.id)?.name
-                && !isPurgedFile(durableFileByItemId(scope.row.id))"
-              type="button"
-              class="receipt-file-preview-link receipt-meta"
-              :disabled="previewLoading"
-              :aria-label="`预览票据 ${durableFileByItemId(scope.row.id)?.name}`"
-              @click="previewItemReceipt(scope.row.id)"
-            >
-              {{ durableFileByItemId(scope.row.id)?.name }} · 预览
-            </button>
-            <span
-              v-else-if="durableFileByItemId(scope.row.id)?.name"
-              class="receipt-meta"
-            >{{ durableFileByItemId(scope.row.id)?.name }}</span>
-            <el-button
-              v-if="durableFileByItemId(scope.row.id)
-                && !isPurgedFile(durableFileByItemId(scope.row.id))"
-              link
-              :disabled="Boolean(durableActionDisabledReason)"
-              @click="openSourceMaterialEditor(scope.row.id)"
-            >
-              修改用途
-            </el-button>
             <span
               v-if="scope.row.warnings?.length"
               class="ocr-warning"
             >
               {{ scope.row.warnings.map(readableWarning).join('、') }}
-            </span>
-            <span
-              v-if="durableFileError(durableFileByItemId(scope.row.id))"
-              class="field-error"
-            >
-              {{ durableFileError(durableFileByItemId(scope.row.id)) }}
             </span>
           </div>
         </template>
@@ -1928,70 +1897,116 @@ async function retryItemRecognition(id: string): Promise<void> {
       <el-table-column
         prop="description"
         label="说明"
-        min-width="290"
+        min-width="360"
       >
         <template #default="scope">
-          <div>{{ scope.row.description }}</div>
           <div
-            v-for="file in linkedProofFiles(scope.row)"
-            :key="file.id"
-            class="linked-itinerary"
+            v-if="meaningfulMobileDescription(scope.row)"
+            class="expense-item-card__description"
           >
-            <button
-              v-if="file.status !== 'PURGED'"
-              type="button"
-              class="receipt-file-preview-link"
-              :disabled="previewLoading"
-              @click="previewDurableFile(file)"
-            >
-              行程单：{{ file.name }} · 预览
-            </button>
-            <span v-else>行程单：{{ file.name }}</span>
-            <span>{{ durableOcrSummary(file) }}</span>
-            <el-button
-              link
-              :disabled="Boolean(durableActionDisabledReason)"
-              @click="openEditItem(scope.row)"
-            >
-              更改关联
-            </el-button>
-            <el-button
-              link
-              :disabled="Boolean(durableActionDisabledReason)"
-              @click="openMaterialEditor(file)"
-            >
-              修改用途
-            </el-button>
+            {{ meaningfulMobileDescription(scope.row) }}
           </div>
-          <ExpenseItinerarySuggestion
-            v-if="suggestionFor(scope.row)"
-            :suggestion="suggestionFor(scope.row)!"
-            :file-name="durableFiles.find((file) => file.id === suggestionFor(scope.row)?.itineraryFileId)?.name || '行程单'"
-            :disabled="Boolean(durableActionDisabledReason)"
-            :preview-loading="previewLoading"
-            @confirm="confirmItinerarySuggestion(scope.row)"
-            @choose="openEditItem(scope.row)"
-            @preview="previewSuggestedItinerary(scope.row)"
-          />
-          <ExpenseMaterialLinks
-            :item="scope.row"
-            :files="durableFiles"
-            :allow-purged="showLockedFileMetadata"
-            :has-itinerary-suggestion="Boolean(suggestionFor(scope.row))"
-            :disabled="Boolean(durableActionDisabledReason)"
-            :preview-loading="previewLoading"
-            :uploading="paymentUploadingItem === scope.row.id"
-            :error="paymentErrors[scope.row.id]"
-            @preview="previewDurableFile"
-            @purpose="openMaterialEditor"
-            @upload="choosePaymentProof(scope.row, $event)"
-            @reuse="openPaymentPicker(scope.row)"
-            @unlink="unlinkPaymentProof(scope.row, $event)"
-            @hotel-upload="choosePaymentProof(scope.row, $event, 'hotel_bill')"
-            @hotel-reuse="openPaymentPicker(scope.row, 'hotel_bill')"
-            @hotel-unlink="unlinkPaymentProof(scope.row, $event, 'hotel_bill')"
-            @itinerary="openEditItem(scope.row)"
-          />
+          <div class="expense-item-card__materials expense-item-card__materials--desktop">
+            <div
+              v-if="durableFileByItemId(scope.row.id)?.name"
+              class="expense-material-row"
+            >
+              <span class="expense-material-row__label">来源票据</span>
+              <div class="expense-material-row__content">
+                <button
+                  v-if="!isPurgedFile(durableFileByItemId(scope.row.id))"
+                  type="button"
+                  class="receipt-file-preview-link"
+                  :disabled="previewLoading"
+                  :aria-label="`预览票据 ${durableFileByItemId(scope.row.id)?.name}`"
+                  @click="previewItemReceipt(scope.row.id)"
+                >
+                  {{ durableFileByItemId(scope.row.id)?.name }} · 预览
+                </button>
+                <span v-else>{{ durableFileByItemId(scope.row.id)?.name }}</span>
+                <el-button
+                  v-if="!isPurgedFile(durableFileByItemId(scope.row.id))"
+                  link
+                  :disabled="Boolean(durableActionDisabledReason)"
+                  @click="openSourceMaterialEditor(scope.row.id)"
+                >
+                  修改用途
+                </el-button>
+              </div>
+            </div>
+            <div
+              v-for="file in linkedProofFiles(scope.row)"
+              :key="file.id"
+              class="expense-material-row"
+            >
+              <span class="expense-material-row__label">{{ attachmentKindLabels[file.attachmentKind] }}</span>
+              <div class="expense-material-row__content">
+                <button
+                  v-if="file.status !== 'PURGED'"
+                  type="button"
+                  class="receipt-file-preview-link"
+                  :disabled="previewLoading"
+                  @click="previewDurableFile(file)"
+                >
+                  {{ file.name }} · 预览
+                </button>
+                <span v-else>{{ file.name }}</span>
+                <span
+                  v-if="durableOcrSummary(file)"
+                  class="linked-proof-summary"
+                >{{ durableOcrSummary(file) }}</span>
+                <el-button
+                  link
+                  :disabled="Boolean(durableActionDisabledReason)"
+                  @click="openEditItem(scope.row)"
+                >
+                  更改关联
+                </el-button>
+                <el-button
+                  link
+                  :disabled="Boolean(durableActionDisabledReason)"
+                  @click="openMaterialEditor(file)"
+                >
+                  修改用途
+                </el-button>
+              </div>
+            </div>
+            <ExpenseItinerarySuggestion
+              v-if="suggestionFor(scope.row)"
+              :suggestion="suggestionFor(scope.row)!"
+              :file-name="durableFiles.find((file) => file.id === suggestionFor(scope.row)?.itineraryFileId)?.name || '行程单'"
+              :disabled="Boolean(durableActionDisabledReason)"
+              :preview-loading="previewLoading"
+              @confirm="confirmItinerarySuggestion(scope.row)"
+              @choose="openEditItem(scope.row)"
+              @preview="previewSuggestedItinerary(scope.row)"
+            />
+            <ExpenseMaterialLinks
+              :item="scope.row"
+              :files="durableFiles"
+              :allow-purged="showLockedFileMetadata"
+              :has-itinerary-suggestion="Boolean(suggestionFor(scope.row))"
+              :disabled="Boolean(durableActionDisabledReason)"
+              :preview-loading="previewLoading"
+              :uploading="paymentUploadingItem === scope.row.id"
+              :error="paymentErrors[scope.row.id]"
+              @preview="previewDurableFile"
+              @purpose="openMaterialEditor"
+              @upload="choosePaymentProof(scope.row, $event)"
+              @reuse="openPaymentPicker(scope.row)"
+              @unlink="unlinkPaymentProof(scope.row, $event)"
+              @hotel-upload="choosePaymentProof(scope.row, $event, 'hotel_bill')"
+              @hotel-reuse="openPaymentPicker(scope.row, 'hotel_bill')"
+              @hotel-unlink="unlinkPaymentProof(scope.row, $event, 'hotel_bill')"
+              @itinerary="openEditItem(scope.row)"
+            />
+            <span
+              v-if="durableFileError(durableFileByItemId(scope.row.id))"
+              class="field-error"
+            >
+              {{ durableFileError(durableFileByItemId(scope.row.id)) }}
+            </span>
+          </div>
         </template>
       </el-table-column>
       <el-table-column
@@ -2069,17 +2084,25 @@ async function retryItemRecognition(id: string): Promise<void> {
     </el-table>
     <div
       v-if="expense.items.length > 0"
-      class="expense-mobile-list"
+      class="expense-mobile-list expense-item-list"
       :class="{ 'expense-mobile-list--active': props.mobile }"
+      data-presentation="mobile"
     >
       <article
         v-for="item in expense.sortedItems"
         :key="item.id"
-        class="expense-mobile-card"
+        class="expense-mobile-card expense-item-card"
       >
-        <div class="mobile-expense-heading">
+        <header class="mobile-expense-heading expense-item-card__header">
           <div class="mobile-expense-title">
             <strong>{{ categoryNames[item.category] ?? item.category }}</strong>
+            <el-tag
+              v-if="item.source === 'ocr'"
+              size="small"
+              type="info"
+            >
+              OCR
+            </el-tag>
             <el-tag
               v-if="mobileItemNeedsAttention(item)"
               size="small"
@@ -2096,117 +2119,130 @@ async function retryItemRecognition(id: string): Promise<void> {
             </el-tag>
           </div>
           <span class="mobile-expense-amount">{{ item.amount ? `¥${item.amount}` : '金额待补充' }}</span>
-        </div>
-        <p class="mobile-expense-meta">
-          {{ item.displayDate || '日期待补充' }} · {{ item.receiptCount }} 张
+          <p class="mobile-expense-meta">
+            {{ item.displayDate || '日期待补充' }} · {{ item.receiptCount }} 张
+          </p>
+        </header>
+        <p
+          v-if="meaningfulMobileDescription(item)"
+          class="expense-item-card__description"
+        >
+          {{ meaningfulMobileDescription(item) }}
         </p>
         <p
           v-if="moneyToCents(item.amount) === 0"
-          class="ocr-warning"
+          class="expense-item-card__notice"
           data-testid="zero-amount-warning"
         >
           金额为 0，请核实原票据
         </p>
-        <p v-if="meaningfulMobileDescription(item)">
-          {{ meaningfulMobileDescription(item) }}
-        </p>
         <p
-          v-if="item.source === 'ocr'"
-          class="ocr-warning"
+          v-if="item.warnings?.length"
+          class="expense-item-card__notice"
         >
-          OCR<template v-if="item.warnings?.length">
-            · {{ item.warnings.map(readableWarning).join('、') }}
-          </template>
+          {{ item.warnings.map(readableWarning).join('、') }}
         </p>
-        <p
-          v-if="durableFileByItemId(item.id)?.name"
-          class="receipt-meta"
+        <section
+          v-if="itemHasMaterialSection(item)"
+          class="expense-item-card__materials"
         >
-          <button
-            v-if="!isPurgedFile(durableFileByItemId(item.id))"
-            type="button"
-            class="receipt-file-preview-link"
-            :disabled="previewLoading"
-            @click="previewItemReceipt(item.id)"
+          <strong class="expense-item-card__section-title">报销材料</strong>
+          <div
+            v-if="durableFileByItemId(item.id)?.name"
+            class="expense-material-row"
           >
-            {{ readableMobileFileName(durableFileByItemId(item.id)) }} · 预览
-          </button>
-          <span v-else>{{ readableMobileFileName(durableFileByItemId(item.id)) }}</span>
-          <el-button
-            v-if="!isPurgedFile(durableFileByItemId(item.id))"
-            link
+            <span class="expense-material-row__label">来源票据</span>
+            <div class="expense-material-row__content">
+              <button
+                v-if="!isPurgedFile(durableFileByItemId(item.id))"
+                type="button"
+                class="receipt-file-preview-link"
+                :disabled="previewLoading"
+                @click="previewItemReceipt(item.id)"
+              >
+                {{ readableMobileFileName(durableFileByItemId(item.id)) }} · 预览
+              </button>
+              <span v-else>{{ readableMobileFileName(durableFileByItemId(item.id)) }}</span>
+              <el-button
+                v-if="!isPurgedFile(durableFileByItemId(item.id))"
+                link
+                :disabled="Boolean(durableActionDisabledReason)"
+                @click="openSourceMaterialEditor(item.id)"
+              >
+                修改用途
+              </el-button>
+            </div>
+          </div>
+          <div
+            v-for="file in linkedProofFiles(item)"
+            :key="file.id"
+            class="expense-material-row"
+          >
+            <span class="expense-material-row__label">{{ attachmentKindLabels[file.attachmentKind] }}</span>
+            <div class="expense-material-row__content">
+              <button
+                v-if="file.status !== 'PURGED'"
+                type="button"
+                class="receipt-file-preview-link"
+                :disabled="previewLoading"
+                @click="previewDurableFile(file)"
+              >
+                {{ readableMobileFileName(file) }} · 预览
+              </button>
+              <span v-else>{{ readableMobileFileName(file) }}</span>
+              <span
+                v-if="durableOcrSummary(file)"
+                class="linked-proof-summary"
+              >{{ durableOcrSummary(file) }}</span>
+              <el-button
+                link
+                :disabled="Boolean(durableActionDisabledReason)"
+                @click="openEditItem(item)"
+              >
+                更改关联
+              </el-button>
+              <el-button
+                link
+                :disabled="Boolean(durableActionDisabledReason)"
+                @click="openMaterialEditor(file)"
+              >
+                修改用途
+              </el-button>
+            </div>
+          </div>
+          <ExpenseItinerarySuggestion
+            v-if="suggestionFor(item)"
+            :suggestion="suggestionFor(item)!"
+            :file-name="durableFiles.find((file) => file.id === suggestionFor(item)?.itineraryFileId)?.name || '行程单'"
             :disabled="Boolean(durableActionDisabledReason)"
-            @click="openSourceMaterialEditor(item.id)"
-          >
-            修改用途
-          </el-button>
-        </p>
-        <p
-          v-for="file in linkedProofFiles(item)"
-          :key="file.id"
-          class="receipt-meta"
-        >
-          <button
-            v-if="file.status !== 'PURGED'"
-            type="button"
-            class="receipt-file-preview-link"
-            :disabled="previewLoading"
-            @click="previewDurableFile(file)"
-          >
-            {{ attachmentKindLabels[file.attachmentKind] }}：{{ readableMobileFileName(file) }} · 预览
-          </button>
-          <span v-else>{{ attachmentKindLabels[file.attachmentKind] }}：{{ readableMobileFileName(file) }}</span>
-          <span
-            v-if="durableOcrSummary(file)"
-            class="linked-proof-summary"
-          >{{ durableOcrSummary(file) }}</span>
-          <el-button
-            link
+            :preview-loading="previewLoading"
+            @confirm="confirmItinerarySuggestion(item)"
+            @choose="openEditItem(item)"
+            @preview="previewSuggestedItinerary(item)"
+          />
+          <ExpenseMaterialLinks
+            :item="item"
+            :files="durableFiles"
+            :allow-purged="showLockedFileMetadata"
+            :has-itinerary-suggestion="Boolean(suggestionFor(item))"
             :disabled="Boolean(durableActionDisabledReason)"
-            @click="openEditItem(item)"
-          >
-            更改关联
-          </el-button>
-          <el-button
-            link
-            :disabled="Boolean(durableActionDisabledReason)"
-            @click="openMaterialEditor(file)"
-          >
-            修改用途
-          </el-button>
-        </p>
-        <ExpenseItinerarySuggestion
-          v-if="suggestionFor(item)"
-          :suggestion="suggestionFor(item)!"
-          :file-name="durableFiles.find((file) => file.id === suggestionFor(item)?.itineraryFileId)?.name || '行程单'"
-          :disabled="Boolean(durableActionDisabledReason)"
-          :preview-loading="previewLoading"
-          @confirm="confirmItinerarySuggestion(item)"
-          @choose="openEditItem(item)"
-          @preview="previewSuggestedItinerary(item)"
-        />
-        <ExpenseMaterialLinks
-          :item="item"
-          :files="durableFiles"
-          :allow-purged="showLockedFileMetadata"
-          :has-itinerary-suggestion="Boolean(suggestionFor(item))"
-          :disabled="Boolean(durableActionDisabledReason)"
-          :preview-loading="previewLoading"
-          :uploading="paymentUploadingItem === item.id"
-          :error="paymentErrors[item.id]"
-          @preview="previewDurableFile"
-          @purpose="openMaterialEditor"
-          @upload="choosePaymentProof(item, $event)"
-          @reuse="openPaymentPicker(item)"
-          @unlink="unlinkPaymentProof(item, $event)"
-          @hotel-upload="choosePaymentProof(item, $event, 'hotel_bill')"
-          @hotel-reuse="openPaymentPicker(item, 'hotel_bill')"
-          @hotel-unlink="unlinkPaymentProof(item, $event, 'hotel_bill')"
-          @itinerary="openEditItem(item)"
-        />
+            :preview-loading="previewLoading"
+            :uploading="paymentUploadingItem === item.id"
+            :error="paymentErrors[item.id]"
+            @preview="previewDurableFile"
+            @purpose="openMaterialEditor"
+            @upload="choosePaymentProof(item, $event)"
+            @reuse="openPaymentPicker(item)"
+            @unlink="unlinkPaymentProof(item, $event)"
+            @hotel-upload="choosePaymentProof(item, $event, 'hotel_bill')"
+            @hotel-reuse="openPaymentPicker(item, 'hotel_bill')"
+            @hotel-unlink="unlinkPaymentProof(item, $event, 'hotel_bill')"
+            @itinerary="openEditItem(item)"
+          />
+        </section>
         <p
           v-if="isForeignExpense(item)"
-          class="receipt-meta"
+          class="expense-item-card__foreign"
         >
           原币 {{ item.originalAmount || '待补充' }} {{ item.originalCurrency || '币种待确认' }}
           <span
@@ -2216,11 +2252,11 @@ async function retryItemRecognition(id: string): Promise<void> {
         </p>
         <p
           v-if="durableFileError(durableFileByItemId(item.id))"
-          class="field-error"
+          class="expense-item-card__notice expense-item-card__notice--error"
         >
           {{ durableFileError(durableFileByItemId(item.id)) }}
         </p>
-        <div class="mobile-actions">
+        <footer class="mobile-actions expense-item-card__actions">
           <el-button
             size="small"
             :disabled="props.readonly || batchActive"
@@ -2251,7 +2287,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           >
             删除
           </el-button>
-        </div>
+        </footer>
       </article>
     </div>
   </el-card>
@@ -2270,20 +2306,13 @@ async function retryItemRecognition(id: string): Promise<void> {
         :src="receiptPreviewUrl"
         :alt="`${receiptPreviewName} 预览`"
       >
-      <iframe
-        v-else
-        :src="receiptPreviewUrl"
-        :title="`${receiptPreviewName} 预览`"
+      <PdfPreview
+        v-else-if="receiptPreviewBlob"
+        :source="receiptPreviewBlob"
       />
     </div>
     <p class="field-help receipt-preview-help">
-      <span>预览本次报销的原始材料，请核对金额、日期和票面内容。</span>
-      <a
-        v-if="receiptPreviewKind === 'pdf' && !props.mobile"
-        :href="receiptPreviewUrl"
-        target="_blank"
-        rel="noopener noreferrer"
-      >在新标签页打开 PDF</a>
+      预览本次报销的原始材料，请核对金额、日期和票面内容。
     </p>
     <template #footer>
       <el-button @click="receiptPreviewVisible = false">
@@ -2689,8 +2718,7 @@ async function retryItemRecognition(id: string): Promise<void> {
 <style scoped>
 .receipt-upload-button { min-width: 148px; }
 .expense-table.expense-table--hidden { display: none; }
-.expense-table :deep(.el-table__body td.el-table__cell) { vertical-align: top; }
-.expense-table :deep(.el-table__body td.el-table__cell > .cell) { padding-block: 12px; }
+.expense-table { margin-top: 12px; }
 .material-workbench__heading {
   margin-top: 18px;
   padding: 14px 14px 0;
@@ -2733,21 +2761,53 @@ async function retryItemRecognition(id: string): Promise<void> {
 .receipt-submit-impact--error { color: var(--el-color-danger); }
 .expense-items-group__heading {
   margin-top: 20px;
-  padding: 14px 14px 0;
+  padding: 14px;
   border: 1px solid #e4e7ed;
-  border-bottom: 0;
-  border-radius: 14px 14px 0 0;
+  border-radius: 14px;
   background: #f8fafc;
 }
 .material-workbench__heading + .receipt-list + .expense-items-group__heading { margin-top: 24px; }
-.expense-items-group__heading--desktop { padding-bottom: 14px; }
+.expense-item-card__description {
+  color: var(--el-text-color-primary);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.expense-item-card__materials--desktop {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.expense-material-row {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  align-items: start;
+  gap: 6px 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.expense-material-row__label {
+  color: #667085;
+  font-weight: 600;
+}
+.expense-material-row__content {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 8px;
+  overflow-wrap: anywhere;
+}
+.expense-material-row__content :deep(.el-button) { margin-left: 0; }
 .expense-mobile-list.expense-mobile-list--active {
   display: grid;
   gap: 12px;
-  padding: 12px 14px 14px;
+  margin-top: 12px;
+  padding: 14px;
   border: 1px solid #e4e7ed;
-  border-top: 0;
-  border-radius: 0 0 14px 14px;
+  border-radius: 14px;
   background: #f8fafc;
 }
 .expense-mobile-list--active .expense-mobile-card {
@@ -2757,13 +2817,15 @@ async function retryItemRecognition(id: string): Promise<void> {
   background: #fff;
   box-shadow: 0 2px 8px rgb(16 24 40 / 4%);
 }
-.expense-mobile-list--active .expense-mobile-card > div:first-child {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
+.expense-mobile-list--active .mobile-expense-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px 12px;
 }
-.expense-mobile-list--active .expense-mobile-card > div:first-child span {
+.expense-mobile-list--active .mobile-expense-amount {
   color: #0958d9;
+  font-size: 18px;
   font-weight: 700;
   white-space: nowrap;
 }
@@ -2773,17 +2835,63 @@ async function retryItemRecognition(id: string): Promise<void> {
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
-.expense-mobile-list--active .linked-proof-summary { display: block; margin-top: 4px; }
+.expense-mobile-list--active .mobile-expense-meta {
+  grid-column: 1 / -1;
+  margin-top: 2px;
+  color: #98a2b3;
+  font-size: 13px;
+}
+.expense-mobile-list--active .expense-item-card__description {
+  margin-top: 12px;
+  color: var(--el-text-color-regular);
+}
+.expense-mobile-list--active .expense-item-card__notice {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  font-size: 13px;
+}
+.expense-mobile-list--active .expense-item-card__notice--error {
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+}
+.expense-mobile-list--active .expense-item-card__materials {
+  display: grid;
+  gap: 9px;
+  margin-top: 13px;
+  padding: 11px 12px;
+  border-radius: 10px;
+  background: #f7f9fc;
+}
+.expense-mobile-list--active .expense-item-card__section-title {
+  color: #475467;
+  font-size: 13px;
+}
+.expense-mobile-list--active .expense-material-row {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+.expense-mobile-list--active .expense-material-row__content { align-items: baseline; }
+.expense-mobile-list--active .linked-proof-summary {
+  flex-basis: 100%;
+  color: #98a2b3;
+}
+.expense-mobile-list--active .expense-item-card__foreign { font-size: 13px; }
 .expense-mobile-list--active .mobile-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
   gap: 8px;
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid #f0f2f5;
 }
-.expense-mobile-list--active .mobile-actions :deep(.el-button) { margin-left: 0; }
+.expense-mobile-list--active .mobile-actions :deep(.el-button) {
+  width: 100%;
+  min-height: 38px;
+  margin-left: 0;
+  padding-inline: 6px;
+}
 .receipt-list--mobile { gap: 12px; }
 .receipt-list--mobile .receipt-row--mobile {
   display: grid;
@@ -2894,10 +3002,8 @@ async function retryItemRecognition(id: string): Promise<void> {
 .material-operation-status span { display: block; overflow-wrap: anywhere; }
 .material-operation-status strong { color: var(--el-color-primary); }
 .material-operation-status span { margin-top: 4px; color: var(--el-text-color-secondary); line-height: 1.55; }
-.expense-mobile-list--active .mobile-expense-heading { align-items: flex-start; }
 .mobile-expense-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
-.mobile-expense-amount { flex: none; font-size: 18px; }
-.expense-mobile-list--active .mobile-expense-meta { margin-top: 6px; color: #98a2b3; font-size: 13px; }
+.receipt-preview-surface :deep(.pdf-preview) { width: 100%; height: 100%; }
 .batch-progress { margin-top: 16px; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .batch-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; padding-top: 12px; }
 .batch-file > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

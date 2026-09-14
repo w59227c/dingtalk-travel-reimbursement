@@ -27,11 +27,6 @@ from app.services.file_coordination import (
     SessionFilesRetired,
     UploadBusy,
 )
-from app.services.file_preview_tickets import (
-    InvalidFilePreviewTicket,
-    issue_file_preview_ticket,
-    verify_file_preview_ticket,
-)
 from app.services.multipart_uploads import parse_upload_files
 from app.services.ocr_service import OcrService
 from app.services.process_jobs import KillableProcessRunner
@@ -50,7 +45,6 @@ from app.services.reimbursement_files import (
     persist_draft_upload,
     read_draft_file_content,
     recognize_draft_file,
-    require_previewable_draft_file,
     serialize_draft_file,
     update_draft_file,
     validate_expense_source_conversion,
@@ -74,12 +68,6 @@ from app.services.temp_files import close_upload_file, new_upload_budget
 
 router = APIRouter(tags=["reimbursement-files"])
 _EXCEL_PREVIEW_TICKET_LIFETIME = timedelta(seconds=60)
-_FILE_PREVIEW_TICKET_LIFETIME = timedelta(seconds=60)
-_NATIVE_FILE_TYPES = {
-    "application/pdf": "pdf",
-    "image/png": "png",
-    "image/jpeg": "jpg",
-}
 
 
 class StrictRequest(BaseModel):
@@ -253,108 +241,6 @@ def preview_file(
             "Cache-Control": "no-store, private",
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox",
-        },
-    )
-
-
-@router.post("/reimbursements/drafts/{draft_id}/files/{file_id}/preview-ticket")
-def create_file_preview_ticket(
-    draft_id: str,
-    file_id: str,
-    request: Request,
-    database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
-) -> dict[str, object]:
-    file = require_previewable_draft_file(
-        database,
-        actor=draft_actor(current),
-        draft_id=draft_id,
-        file_id=file_id,
-    )
-    token = issue_file_preview_ticket(
-        draft_id=draft_id,
-        file_id=file_id,
-        session_id_hash=current.record.session_id_hash,
-        secret=request.app.state.settings.session_secret,
-        lifetime=_FILE_PREVIEW_TICKET_LIFETIME,
-    )
-    return success(
-        {
-            "downloadUrl": (
-                f"/api/reimbursements/drafts/{quote(draft_id, safe='')}/files/"
-                f"{quote(file_id, safe='')}/preview/native"
-            ),
-            "downloadToken": token,
-            "fileType": _NATIVE_FILE_TYPES[file.media_type],
-        }
-    )
-
-
-@router.get("/reimbursements/drafts/{draft_id}/files/{file_id}/preview/native")
-def download_native_file_preview(
-    draft_id: str,
-    file_id: str,
-    request: Request,
-    database: Annotated[Session, Depends(get_db)],
-    download_token: Annotated[
-        str | None,
-        Header(alias="X-Reimbursement-Download-Token"),
-    ] = None,
-) -> Response:
-    settings: Settings = request.app.state.settings
-    try:
-        ticket = verify_file_preview_ticket(
-            download_token or "",
-            secret=settings.session_secret,
-        )
-    except InvalidFilePreviewTicket as exc:
-        raise ApiError(
-            "FILE_PREVIEW_TICKET_INVALID",
-            "文件预览凭证已失效，请返回钉钉重新打开",
-            401,
-        ) from exc
-    if ticket.draft_id != draft_id or ticket.file_id != file_id:
-        raise ApiError(
-            "FILE_PREVIEW_TICKET_INVALID",
-            "文件预览凭证已失效，请返回钉钉重新打开",
-            401,
-        )
-    record = database.get(UserSession, ticket.session_id_hash)
-    if (
-        record is None
-        or record.expires_at <= utc_now()
-        or record.corp_id != settings.dingtalk_corp_id
-        or not str(record.dingtalk_union_id or "").strip()
-    ):
-        raise ApiError(
-            "FILE_PREVIEW_TICKET_INVALID",
-            "登录状态已失效，请从公司钉钉工作台重新进入",
-            401,
-        )
-    current = CurrentSession(
-        record=record,
-        departments=deserialize_departments(record.departments_json),
-    )
-    try:
-        file, content = read_draft_file_content(
-            database,
-            actor=draft_actor(current),
-            draft_id=draft_id,
-            file_id=file_id,
-            staging=request.app.state.reimbursement_staging,
-        )
-    except ReimbursementStagingError as exc:
-        raise map_reimbursement_storage_error(exc) from exc
-    return Response(
-        content=content,
-        media_type=file.media_type,
-        headers={
-            "Content-Disposition": (
-                f"attachment; filename=receipt.{file.extension.lstrip('.')}; "
-                f"filename*=UTF-8''{quote(file.original_name, safe='')}"
-            ),
-            "Cache-Control": "no-store, private",
-            "X-Content-Type-Options": "nosniff",
         },
     )
 

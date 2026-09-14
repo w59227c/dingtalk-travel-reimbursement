@@ -18,7 +18,6 @@ import {
   markReimbursementDraftReviewReady,
   recognizeReimbursementDraftFile,
   requestReimbursementDraftExcelPreviewTicket,
-  requestReimbursementDraftFilePreviewTicket,
   replaceReimbursementRelatedApprovals,
   submitOaReimbursement,
   updateReimbursementDraft,
@@ -83,22 +82,6 @@ describe('persistent reimbursement API', () => {
     expect(http.get).toHaveBeenCalledWith('/reimbursements/drafts/draft%2F1/files/file%202/content', {
       responseType: 'blob', signal, timeout: 60_000,
     })
-  })
-
-  it('requests a short-lived native original-file preview ticket', async () => {
-    const ticket = {
-      downloadUrl: '/api/reimbursements/drafts/draft%2F1/files/file%202/preview/native',
-      downloadToken: 'signed-file-ticket',
-      fileType: 'pdf' as const,
-    }
-    vi.mocked(http.post).mockResolvedValue({ data: { data: ticket } })
-
-    await expect(requestReimbursementDraftFilePreviewTicket('draft/1', 'file 2')).resolves.toBe(ticket)
-    expect(http.post).toHaveBeenCalledWith(
-      '/reimbursements/drafts/draft%2F1/files/file%202/preview-ticket',
-      undefined,
-      { signal: undefined },
-    )
   })
 
   it('loads strongly typed OA options and travel approvals with cancellation', async () => {
