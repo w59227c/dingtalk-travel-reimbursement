@@ -186,7 +186,14 @@ a {
   background: #f7f9fc;
 }
 .receipt-preview-surface img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.receipt-preview-surface iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+.receipt-preview-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-top: 12px;
+}
+.receipt-preview-pagination span { color: var(--el-text-color-regular); white-space: nowrap; }
 .receipt-preview-help {
   display: flex;
   flex-wrap: wrap;
@@ -369,6 +376,7 @@ a {
   .receipt-actions { justify-content: flex-start; }
   .receipt-header-actions { justify-content: flex-start; }
   .receipt-preview-surface { min-height: 280px; height: 68vh; }
+  .receipt-preview-pagination { justify-content: space-between; gap: 8px; }
   .section-note { display: block; margin: 6px 0 0; }
   .action-help { text-align: left; }
   .subsidy-preview { align-items: flex-start; flex-direction: column; }

@@ -4,7 +4,7 @@ from datetime import timedelta
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, Query, Request, status
+from fastapi import APIRouter, Depends, Header, Path, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session, sessionmaker
@@ -29,7 +29,13 @@ from app.services.file_coordination import (
 )
 from app.services.multipart_uploads import parse_upload_files
 from app.services.ocr_service import OcrService
-from app.services.process_jobs import KillableProcessRunner
+from app.services.pdf_preview import render_pdf_preview_page_worker
+from app.services.process_jobs import (
+    KillableProcessRunner,
+    ProcessJobBusy,
+    ProcessJobResourceLimit,
+    ProcessJobTimeout,
+)
 from app.services.reimbursement_drafts import (
     draft_actor,
     require_owned_draft,
@@ -241,6 +247,78 @@ def preview_file(
             "Cache-Control": "no-store, private",
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox",
+        },
+    )
+
+
+@router.get("/reimbursements/drafts/{draft_id}/files/{file_id}/preview/pages/{page_number}")
+async def preview_pdf_page(
+    draft_id: str,
+    file_id: str,
+    page_number: Annotated[int, Path(ge=1, le=30)],
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(get_current_session)],
+) -> Response:
+    try:
+        file, content = read_draft_file_content(
+            database,
+            actor=draft_actor(current),
+            draft_id=draft_id,
+            file_id=file_id,
+            staging=request.app.state.reimbursement_staging,
+        )
+    except ReimbursementStagingError as exc:
+        raise map_reimbursement_storage_error(exc) from exc
+    if file.media_type != "application/pdf":
+        raise ApiError("UNSUPPORTED_FILE_TYPE", "只有 PDF 文件可以按页预览", 415)
+
+    # Do not retain a SQLite read transaction while native rendering runs.
+    database.rollback()
+    settings: Settings = request.app.state.settings
+    try:
+        result = await request.app.state.file_validation_runner.run(
+            render_pdf_preview_page_worker,
+            content,
+            page_number,
+            settings.file_worker_limits,
+            timeout_seconds=settings.image_validation_timeout_seconds,
+        )
+    except ProcessJobBusy as exc:
+        raise ApiError("PDF_PREVIEW_BUSY", "PDF 预览服务繁忙，请稍后重试", 429) from exc
+    except ProcessJobTimeout as exc:
+        raise ApiError("PDF_PREVIEW_TIMEOUT", "PDF 页面生成超时，请重试", 504) from exc
+    except ProcessJobResourceLimit as exc:
+        raise ApiError("PDF_PREVIEW_RESOURCE_LIMIT", "PDF 页面超过预览资源限制", 422) from exc
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        if isinstance(result, dict):
+            raise ApiError(
+                str(result.get("code", "PDF_PREVIEW_FAILED")),
+                str(result.get("message", "PDF 页面暂时无法生成，请重试")),
+                int(result.get("status", 422)),
+            )
+        raise ApiError("PDF_PREVIEW_FAILED", "PDF 页面暂时无法生成，请重试", 422)
+    rendered = result.get("content")
+    page_count = result.get("pageCount")
+    if (
+        not isinstance(rendered, bytes)
+        or not rendered.startswith(b"\x89PNG\r\n\x1a\n")
+        or isinstance(page_count, bool)
+        or not isinstance(page_count, int)
+        or page_count < page_number
+        or page_count > 30
+    ):
+        raise ApiError("PDF_PREVIEW_FAILED", "PDF 页面暂时无法生成，请重试", 422)
+    return Response(
+        content=rendered,
+        media_type="image/png",
+        headers={
+            "Content-Disposition": f"inline; filename=receipt-page-{page_number}.png",
+            "Cache-Control": "no-store, private",
+            "X-Content-Type-Options": "nosniff",
+            "X-PDF-Page-Count": str(page_count),
+            "X-PDF-Page-Number": str(page_number),
         },
     )
 

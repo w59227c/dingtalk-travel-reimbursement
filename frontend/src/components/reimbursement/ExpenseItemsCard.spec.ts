@@ -9,6 +9,7 @@ import {
   clearReimbursementDraftFiles,
   getReimbursementDraft,
   getReimbursementFileContent,
+  getReimbursementPdfPreviewPage,
   listReimbursementDraftFiles,
   recognizeReimbursementDraftFile,
   updateReimbursementDraft,
@@ -40,6 +41,7 @@ vi.mock('@/api/reimbursements', async (importOriginal) => {
     clearReimbursementDraftFiles: vi.fn(),
     getReimbursementDraft: vi.fn(),
     getReimbursementFileContent: vi.fn(),
+    getReimbursementPdfPreviewPage: vi.fn(),
     listReimbursementDraftFiles: vi.fn(),
     recognizeReimbursementDraftFile: vi.fn(),
     updateReimbursementDraft: vi.fn(),
@@ -2389,9 +2391,14 @@ describe('ExpenseItemsCard durable files', () => {
     expense.upsertDraftOcrItem(source)
     expense.items[0]!.itineraryFileIds = ['file-2']
     expense.items[0]!.requiresItinerary = true
-    const blob = new Blob(['pdf'], { type: 'application/pdf' })
-    vi.mocked(getReimbursementFileContent).mockResolvedValue(blob)
-    const createUrl = vi.fn().mockReturnValue('blob:server-preview')
+    const firstPage = new Blob(['page-1'], { type: 'image/png' })
+    const secondPage = new Blob(['page-2'], { type: 'image/png' })
+    vi.mocked(getReimbursementPdfPreviewPage)
+      .mockResolvedValueOnce({ blob: firstPage, pageNumber: 1, pageCount: 2 })
+      .mockResolvedValueOnce({ blob: secondPage, pageNumber: 2, pageCount: 2 })
+    const createUrl = vi.fn()
+      .mockReturnValueOnce('blob:server-preview-page-1')
+      .mockReturnValueOnce('blob:server-preview-page-2')
     const revokeUrl = vi.fn()
     vi.stubGlobal('URL', class extends URL {
       static createObjectURL = createUrl
@@ -2408,13 +2415,31 @@ describe('ExpenseItemsCard durable files', () => {
     expect(desktopRow.findAll('button').filter((button) => button.text().trim() === '删除')).toHaveLength(1)
     await wrapper.get('[aria-label="预览票据 发票.pdf"]').trigger('click')
     await flushPromises()
-    expect(getReimbursementFileContent).toHaveBeenCalledWith('draft-1', 'file-1', { signal: expect.any(AbortSignal) })
-    expect(createUrl).toHaveBeenCalledWith(blob)
-    expect(wrapper.get('iframe').attributes('src')).toBe('blob:server-preview')
-    expect(wrapper.find('[data-testid="pdf-preview"]').exists()).toBe(false)
+    expect(getReimbursementPdfPreviewPage).toHaveBeenCalledWith(
+      'draft-1',
+      'file-1',
+      1,
+      { signal: expect.any(AbortSignal) },
+    )
+    expect(getReimbursementFileContent).not.toHaveBeenCalled()
+    expect(createUrl).toHaveBeenCalledWith(firstPage)
+    expect(wrapper.get('[data-testid="receipt-preview-page"]').attributes('src')).toBe('blob:server-preview-page-1')
+    expect(wrapper.get('[data-testid="pdf-preview-page-status"]').text()).toContain('第 1 / 2 页')
+    expect(wrapper.find('iframe').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
+    await wrapper.get('[aria-label="下一页"]').trigger('click')
+    await flushPromises()
+    expect(getReimbursementPdfPreviewPage).toHaveBeenLastCalledWith(
+      'draft-1',
+      'file-1',
+      2,
+      { signal: expect.any(AbortSignal) },
+    )
+    expect(wrapper.get('[data-testid="receipt-preview-page"]').attributes('src')).toBe('blob:server-preview-page-2')
+    expect(wrapper.get('[data-testid="pdf-preview-page-status"]').text()).toContain('第 2 / 2 页')
+    expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview-page-1')
     wrapper.unmount()
-    expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview')
+    expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview-page-2')
   })
 
   it('renders mobile PDFs inside the reimbursement page without downloading them', async () => {
@@ -2425,8 +2450,12 @@ describe('ExpenseItemsCard durable files', () => {
     const source = recognizedFile('file-1', '发票.pdf', '10.00')
     drafts.files = [source]
     expense.upsertDraftOcrItem(source)
-    const blob = new Blob(['pdf'], { type: 'application/pdf' })
-    vi.mocked(getReimbursementFileContent).mockResolvedValue(blob)
+    const blob = new Blob(['page-1'], { type: 'image/png' })
+    vi.mocked(getReimbursementPdfPreviewPage).mockResolvedValue({
+      blob,
+      pageNumber: 1,
+      pageCount: 1,
+    })
     const createUrl = vi.fn().mockReturnValue('blob:mobile-preview')
     const revokeUrl = vi.fn()
     vi.stubGlobal('URL', class extends URL {
@@ -2445,14 +2474,17 @@ describe('ExpenseItemsCard durable files', () => {
     await preview.trigger('click')
     await flushPromises()
 
-    expect(getReimbursementFileContent).toHaveBeenCalledWith(
+    expect(getReimbursementPdfPreviewPage).toHaveBeenCalledWith(
       'draft-1',
       'file-1',
+      1,
       { signal: expect.any(AbortSignal) },
     )
+    expect(getReimbursementFileContent).not.toHaveBeenCalled()
     expect(createUrl).toHaveBeenCalledWith(blob)
-    expect(wrapper.get('iframe').attributes('src')).toBe('blob:mobile-preview')
-    expect(wrapper.find('[data-testid="pdf-preview"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="receipt-preview-page"]').attributes('src')).toBe('blob:mobile-preview')
+    expect(wrapper.get('[data-testid="pdf-preview-page-status"]').text()).toContain('第 1 / 1 页')
+    expect(wrapper.find('iframe').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
     wrapper.unmount()
     expect(revokeUrl).toHaveBeenCalledWith('blob:mobile-preview')

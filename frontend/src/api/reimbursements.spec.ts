@@ -10,6 +10,7 @@ import {
   getOaReimbursementSubmissionForDraft,
   getReimbursementDraft,
   getReimbursementFileContent,
+  getReimbursementPdfPreviewPage,
   getReimbursementDraftExcelPreview,
   getOaReimbursementOptions,
   listOaTravelApprovals,
@@ -82,6 +83,23 @@ describe('persistent reimbursement API', () => {
     expect(http.get).toHaveBeenCalledWith('/reimbursements/drafts/draft%2F1/files/file%202/content', {
       responseType: 'blob', signal, timeout: 60_000,
     })
+  })
+
+  it('fetches a rendered PDF page and validates its pagination headers', async () => {
+    const blob = new Blob(['png'], { type: 'image/png' })
+    const signal = new AbortController().signal
+    vi.mocked(http.get).mockResolvedValue({
+      data: blob,
+      headers: { 'x-pdf-page-count': '3', 'x-pdf-page-number': '2' },
+    })
+
+    await expect(getReimbursementPdfPreviewPage(
+      'draft/1', 'file 2', 2, { signal },
+    )).resolves.toEqual({ blob, pageNumber: 2, pageCount: 3 })
+    expect(http.get).toHaveBeenCalledWith(
+      '/reimbursements/drafts/draft%2F1/files/file%202/preview/pages/2',
+      { responseType: 'blob', signal, timeout: 60_000 },
+    )
   })
 
   it('loads strongly typed OA options and travel approvals with cancellation', async () => {

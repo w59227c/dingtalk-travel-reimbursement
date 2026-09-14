@@ -5,7 +5,10 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
 import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
 
-import { getReimbursementFileContent } from '@/api/reimbursements'
+import {
+  getReimbursementFileContent,
+  getReimbursementPdfPreviewPage,
+} from '@/api/reimbursements'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
@@ -122,6 +125,9 @@ const receiptPreviewVisible = ref(false)
 const receiptPreviewUrl = ref('')
 const receiptPreviewName = ref('')
 const receiptPreviewKind = ref<'image' | 'pdf'>('image')
+const receiptPreviewFileId = ref('')
+const receiptPreviewPage = ref(1)
+const receiptPreviewPageCount = ref(1)
 const previewLoading = ref(false)
 let previewController: AbortController | null = null
 let durableOcrPollTimer: number | null = null
@@ -824,6 +830,16 @@ function releaseReceiptPreview(): void {
   previewController = null
   if (receiptPreviewUrl.value) URL.revokeObjectURL(receiptPreviewUrl.value)
   receiptPreviewUrl.value = ''
+  receiptPreviewFileId.value = ''
+  receiptPreviewPage.value = 1
+  receiptPreviewPageCount.value = 1
+  previewLoading.value = false
+}
+
+function replaceReceiptPreviewUrl(blob: Blob): void {
+  const previousUrl = receiptPreviewUrl.value
+  receiptPreviewUrl.value = URL.createObjectURL(blob)
+  if (previousUrl) URL.revokeObjectURL(previousUrl)
 }
 
 async function previewDurableFile(file: ReimbursementDraftFile | undefined): Promise<void> {
@@ -834,16 +850,72 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
   previewController = controller
   previewLoading.value = true
   try {
-    const blob = await getReimbursementFileContent(draft.id, file.id, { signal: controller.signal })
+    const isPdf = file.mediaType === 'application/pdf'
+    const preview = isPdf
+      ? await getReimbursementPdfPreviewPage(draft.id, file.id, 1, { signal: controller.signal })
+      : {
+          blob: await getReimbursementFileContent(draft.id, file.id, { signal: controller.signal }),
+          pageNumber: 1,
+          pageCount: 1,
+        }
     if (controller.signal.aborted || drafts.currentDraft?.id !== draft.id || durableUnmounted) return
     receiptPreviewName.value = file.name
-    receiptPreviewKind.value = file.mediaType === 'application/pdf' ? 'pdf' : 'image'
-    receiptPreviewUrl.value = URL.createObjectURL(blob)
+    receiptPreviewKind.value = isPdf ? 'pdf' : 'image'
+    receiptPreviewFileId.value = file.id
+    receiptPreviewPage.value = preview.pageNumber
+    receiptPreviewPageCount.value = preview.pageCount
+    replaceReceiptPreviewUrl(preview.blob)
     receiptPreviewVisible.value = true
   } catch (error) {
     if (!controller.signal.aborted) ElMessage.error(apiErrorMessage(error, '材料预览失败，请重试'))
   } finally {
-    if (previewController === controller) previewLoading.value = false
+    if (previewController === controller) {
+      previewController = null
+      previewLoading.value = false
+    }
+  }
+}
+
+async function changeReceiptPreviewPage(pageNumber: number): Promise<void> {
+  const draft = drafts.currentDraft
+  const fileId = receiptPreviewFileId.value
+  if (
+    !draft
+    || receiptPreviewKind.value !== 'pdf'
+    || !fileId
+    || previewLoading.value
+    || pageNumber < 1
+    || pageNumber > receiptPreviewPageCount.value
+    || pageNumber === receiptPreviewPage.value
+  ) return
+
+  const controller = new AbortController()
+  previewController = controller
+  previewLoading.value = true
+  try {
+    const preview = await getReimbursementPdfPreviewPage(
+      draft.id,
+      fileId,
+      pageNumber,
+      { signal: controller.signal },
+    )
+    if (
+      controller.signal.aborted
+      || drafts.currentDraft?.id !== draft.id
+      || receiptPreviewFileId.value !== fileId
+      || !receiptPreviewVisible.value
+      || durableUnmounted
+    ) return
+    receiptPreviewPage.value = preview.pageNumber
+    receiptPreviewPageCount.value = preview.pageCount
+    replaceReceiptPreviewUrl(preview.blob)
+  } catch (error) {
+    if (!controller.signal.aborted) ElMessage.error(apiErrorMessage(error, 'PDF 页面加载失败，请重试'))
+  } finally {
+    if (previewController === controller) {
+      previewController = null
+      previewLoading.value = false
+    }
   }
 }
 
@@ -2327,18 +2399,40 @@ async function retryItemRecognition(id: string): Promise<void> {
     destroy-on-close
     @closed="releaseReceiptPreview"
   >
-    <div class="receipt-preview-surface">
+    <div
+      v-loading="previewLoading"
+      class="receipt-preview-surface"
+    >
       <img
-        v-if="receiptPreviewKind === 'image'"
+        v-if="receiptPreviewUrl"
+        data-testid="receipt-preview-page"
         :src="receiptPreviewUrl"
         :alt="`${receiptPreviewName} 预览`"
       >
-      <iframe
-        v-else
-        :src="receiptPreviewUrl"
-        :title="`${receiptPreviewName} 预览`"
-      />
     </div>
+    <nav
+      v-if="receiptPreviewKind === 'pdf'"
+      class="receipt-preview-pagination"
+      aria-label="PDF 预览翻页"
+    >
+      <el-button
+        aria-label="上一页"
+        :disabled="previewLoading || receiptPreviewPage <= 1"
+        @click="changeReceiptPreviewPage(receiptPreviewPage - 1)"
+      >
+        上一页
+      </el-button>
+      <span data-testid="pdf-preview-page-status">
+        第 {{ receiptPreviewPage }} / {{ receiptPreviewPageCount }} 页
+      </span>
+      <el-button
+        aria-label="下一页"
+        :disabled="previewLoading || receiptPreviewPage >= receiptPreviewPageCount"
+        @click="changeReceiptPreviewPage(receiptPreviewPage + 1)"
+      >
+        下一页
+      </el-button>
+    </nav>
     <p class="field-help receipt-preview-help">
       预览本次报销的原始材料，请核对金额、日期和票面内容。
     </p>

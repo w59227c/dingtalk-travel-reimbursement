@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 from conftest import mock_login
 from openpyxl import load_workbook
+from PIL import Image
 from pypdf import PdfWriter
 from test_reimbursement_drafts import _add_active_file, _create, _input, _install_catalog
 from test_reimbursement_files import _insert_draft, _named_image_bytes, _upload
@@ -363,6 +364,51 @@ def test_supporting_pdf_can_span_pages_but_invoice_stays_single_page(client_fact
         role="ATTACHMENT_ONLY",
     )
     assert support.status_code == 201, support.text
+
+
+def test_pdf_preview_renders_requested_pages_as_bounded_pngs(client_factory):
+    output = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    writer.add_blank_page(width=842, height=595)
+    writer.write(output)
+    client = client_factory(auth_mock_enabled=True)
+    csrf = mock_login(client)["csrfToken"]
+    draft_id = _insert_draft(client)
+    uploaded_response = _upload(
+        client,
+        csrf,
+        draft_id,
+        revision=1,
+        name="行程单.pdf",
+        content=output.getvalue(),
+        role="ATTACHMENT_ONLY",
+    )
+    assert uploaded_response.status_code == 201, uploaded_response.text
+    uploaded = uploaded_response.json()["data"]["file"]
+    base_url = f"/api/reimbursements/drafts/{draft_id}/files/{uploaded['id']}/preview/pages"
+
+    first = client.get(f"{base_url}/1")
+    assert first.status_code == 200, first.text
+    assert first.headers["content-type"].startswith("image/png")
+    assert first.headers["cache-control"] == "no-store, private"
+    assert first.headers["x-pdf-page-count"] == "2"
+    assert first.headers["x-pdf-page-number"] == "1"
+    with Image.open(io.BytesIO(first.content)) as image:
+        assert image.format == "PNG"
+        assert image.mode == "RGB"
+        assert image.width * image.height <= 2_500_000
+        assert image.height > image.width
+
+    second = client.get(f"{base_url}/2")
+    assert second.status_code == 200, second.text
+    assert second.headers["x-pdf-page-count"] == "2"
+    with Image.open(io.BytesIO(second.content)) as image:
+        assert image.width > image.height
+
+    out_of_range = client.get(f"{base_url}/3")
+    assert out_of_range.status_code == 416
+    assert out_of_range.json()["error"]["code"] == "PDF_PREVIEW_PAGE_OUT_OF_RANGE"
 
 
 def test_preview_rejects_changed_file_bytes_and_wrong_department(client_factory):

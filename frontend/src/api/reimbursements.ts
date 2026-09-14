@@ -45,6 +45,12 @@ export interface UploadReimbursementDraftFileOptions extends ReimbursementReques
   onProgress?: (percent: number) => void
 }
 
+export interface ReimbursementPdfPreviewPage {
+  blob: Blob
+  pageNumber: number
+  pageCount: number
+}
+
 export interface ListOaTravelApprovalsOptions extends ReimbursementRequestOptions {
   from?: string
   to?: string
@@ -343,6 +349,37 @@ export async function getReimbursementFileContent(
     timeout: 60_000,
   }).catch(normalizeBlobApiError)
   return response.data
+}
+
+export async function getReimbursementPdfPreviewPage(
+  draftId: string,
+  fileId: string,
+  pageNumber: number,
+  options: ReimbursementRequestOptions = {},
+): Promise<ReimbursementPdfPreviewPage> {
+  if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > 30) {
+    throw new Error('PDF 预览页码无效')
+  }
+  const response = await http.get<Blob>(
+    `${fileUrl(draftId, fileId)}/preview/pages/${pageNumber}`,
+    {
+      responseType: 'blob',
+      signal: options.signal,
+      timeout: 60_000,
+    },
+  ).catch(normalizeBlobApiError)
+  const pageCount = Number(response.headers['x-pdf-page-count'])
+  const returnedPage = Number(response.headers['x-pdf-page-number'])
+  if (
+    response.data.type !== 'image/png'
+    || !Number.isInteger(pageCount)
+    || pageCount < pageNumber
+    || pageCount > 30
+    || returnedPage !== pageNumber
+  ) {
+    throw new Error('PDF 预览响应无效，请重试')
+  }
+  return { blob: response.data, pageNumber, pageCount }
 }
 
 export async function downloadReimbursementDraftExcelPreview(
