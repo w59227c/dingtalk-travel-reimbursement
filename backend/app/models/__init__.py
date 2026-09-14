@@ -5,6 +5,7 @@ from app.models.reimbursement import (
     ReimbursementDraftFile,
     ReimbursementDraftRelatedApproval,
     ReimbursementSubmission,
+    ReimbursementSubmissionRecoveryAudit,
     ReimbursementUpload,
 )
 from app.models.session import UserSession
@@ -17,6 +18,7 @@ __all__ = [
     "ReimbursementDraftFile",
     "ReimbursementDraftRelatedApproval",
     "ReimbursementSubmission",
+    "ReimbursementSubmissionRecoveryAudit",
     "ReimbursementUpload",
     "Setting",
     "UserSession",

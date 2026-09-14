@@ -1976,6 +1976,10 @@ async function retryItemRecognition(id: string): Promise<void> {
             {{ attachmentKindLabels[file.attachmentKind] }}：{{ readableMobileFileName(file) }} · 预览
           </button>
           <span v-else>{{ attachmentKindLabels[file.attachmentKind] }}：{{ readableMobileFileName(file) }}</span>
+          <span
+            v-if="durableOcrSummary(file)"
+            class="linked-proof-summary"
+          >{{ durableOcrSummary(file) }}</span>
           <el-button
             link
             :disabled="Boolean(durableActionDisabledReason)"
@@ -2523,6 +2527,7 @@ async function retryItemRecognition(id: string): Promise<void> {
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
+.expense-mobile-list--active .linked-proof-summary { display: block; margin-top: 4px; }
 .expense-mobile-list--active .mobile-actions {
   display: flex;
   flex-wrap: wrap;

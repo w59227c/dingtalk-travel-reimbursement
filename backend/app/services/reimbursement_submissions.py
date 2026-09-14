@@ -17,6 +17,7 @@ from app.models.reimbursement import (
     ReimbursementDraftFileStatus,
     ReimbursementDraftStatus,
     ReimbursementSubmission,
+    ReimbursementSubmissionRecoveryAudit,
     ReimbursementSubmissionStatus,
     ReimbursementUpload,
     ReimbursementUploadLocalStatus,
@@ -134,6 +135,8 @@ def admin_resume_manual_review_with_instance(
     corp_id: str,
     submission_id: str,
     process_instance_id: str,
+    admin_user_id: str,
+    verification_note: str,
 ) -> ReimbursementSubmission:
     """Attach an OA id verified by an administrator and resume readback only."""
 
@@ -142,6 +145,8 @@ def admin_resume_manual_review_with_instance(
     normalized_corp = _required_text(corp_id, maximum=128)
     normalized_submission = _required_text(submission_id, maximum=36)
     normalized_instance = _required_text(process_instance_id, maximum=128)
+    normalized_admin = _required_text(admin_user_id, maximum=128)
+    normalized_note = _required_text(verification_note, maximum=500)
     current = database.scalar(
         select(ReimbursementSubmission).where(
             ReimbursementSubmission.id == normalized_submission,
@@ -195,6 +200,16 @@ def admin_resume_manual_review_with_instance(
         )
         if changed.rowcount != 1:
             raise ReimbursementSubmissionConflict("manual-review submission changed")
+        _record_admin_recovery_audit(
+            database,
+            submission=current,
+            action="ATTACH_INSTANCE",
+            admin_user_id=normalized_admin,
+            verification_note=normalized_note,
+            process_instance_id=normalized_instance,
+            status_after=ReimbursementSubmissionStatus.VERIFYING.value,
+            created_at=changed_at,
+        )
         database.commit()
         database.expire_all()
     except IntegrityError:
@@ -212,6 +227,7 @@ def admin_confirm_manual_review_not_created(
     corp_id: str,
     submission_id: str,
     admin_user_id: str,
+    verification_note: str,
     confirm_uncertain_uploads_absent: bool = False,
 ) -> ReimbursementSubmission:
     """Resume cleanup after an administrator confirms no OA was created.
@@ -224,6 +240,7 @@ def admin_confirm_manual_review_not_created(
     normalized_corp = _required_text(corp_id, maximum=128)
     normalized_submission = _required_text(submission_id, maximum=36)
     normalized_admin = _required_text(admin_user_id, maximum=128)
+    normalized_note = _required_text(verification_note, maximum=500)
     current = database.scalar(
         select(ReimbursementSubmission).where(
             ReimbursementSubmission.id == normalized_submission,
@@ -313,12 +330,51 @@ def admin_confirm_manual_review_not_created(
                 )
                 .execution_options(synchronize_session=False)
             )
+        _record_admin_recovery_audit(
+            database,
+            submission=current,
+            action="CONFIRM_NOT_CREATED",
+            admin_user_id=normalized_admin,
+            verification_note=normalized_note,
+            process_instance_id=None,
+            status_after=ReimbursementSubmissionStatus.ORPHAN_CLEANUP.value,
+            created_at=changed_at,
+        )
         database.commit()
         database.expire_all()
     except ReimbursementSubmissionConflict:
         database.rollback()
         raise ApiError("OA_ADMIN_RECOVERY_CONFLICT", "提交状态已变化，请刷新后重试", 409) from None
     return database.get(ReimbursementSubmission, normalized_submission)
+
+
+def _record_admin_recovery_audit(
+    database: Session,
+    *,
+    submission: ReimbursementSubmission,
+    action: str,
+    admin_user_id: str,
+    verification_note: str,
+    process_instance_id: str | None,
+    status_after: str,
+    created_at: datetime,
+) -> None:
+    """Stage one immutable audit row in the same transaction as the recovery CAS."""
+
+    database.add(
+        ReimbursementSubmissionRecoveryAudit(
+            submission_id=submission.id,
+            corp_id=submission.corp_id,
+            admin_user_id=admin_user_id,
+            action=action,
+            verification_note=verification_note,
+            process_instance_id=process_instance_id,
+            status_before=ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
+            status_after=status_after,
+            status_version_before=submission.status_version,
+            created_at=created_at,
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)

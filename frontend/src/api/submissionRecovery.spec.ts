@@ -17,6 +17,7 @@ describe('submission recovery API', () => {
     await expect(recoverReimbursementSubmission('submission/一', {
       action: 'CONFIRM_NOT_CREATED',
       confirmUncertainUploadsAbsent: true,
+      verificationNote: '已核对钉钉审批和文件记录',
     })).resolves.toBe(result)
 
     expect(http.post).toHaveBeenCalledWith(
@@ -24,6 +25,7 @@ describe('submission recovery API', () => {
       {
         action: 'CONFIRM_NOT_CREATED',
         confirmUncertainUploadsAbsent: true,
+        verificationNote: '已核对钉钉审批和文件记录',
       },
     )
   })

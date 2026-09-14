@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
@@ -62,6 +62,19 @@ class AdminSubmissionRecoveryRequest(BaseModel):
         default=False,
         alias="confirmUncertainUploadsAbsent",
     )
+    verification_note: str = Field(
+        alias="verificationNote",
+        min_length=1,
+        max_length=500,
+    )
+
+    @field_validator("verification_note")
+    @classmethod
+    def validate_verification_note(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized or any(character in normalized for character in "\r\n\x00"):
+            raise ValueError("verificationNote must be one line of text")
+        return normalized
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> AdminSubmissionRecoveryRequest:
@@ -185,6 +198,8 @@ def recover_reimbursement_submission_as_admin(
             corp_id=current.record.corp_id,
             submission_id=submission_id,
             process_instance_id=body.process_instance_id or "",
+            admin_user_id=current.record.dingtalk_user_id,
+            verification_note=body.verification_note,
         )
     else:
         submission = admin_confirm_manual_review_not_created(
@@ -192,6 +207,7 @@ def recover_reimbursement_submission_as_admin(
             corp_id=current.record.corp_id,
             submission_id=submission_id,
             admin_user_id=current.record.dingtalk_user_id,
+            verification_note=body.verification_note,
             confirm_uncertain_uploads_absent=body.confirm_uncertain_uploads_absent,
         )
     return success(_submission_data(submission))

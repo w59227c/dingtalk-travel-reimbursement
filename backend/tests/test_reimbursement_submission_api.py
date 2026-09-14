@@ -15,6 +15,7 @@ from app.models.reimbursement import (
     ReimbursementDraftFileStatus,
     ReimbursementDraftStatus,
     ReimbursementSubmission,
+    ReimbursementSubmissionRecoveryAudit,
     ReimbursementUpload,
     utc_now,
 )
@@ -62,21 +63,50 @@ def test_admin_can_attach_known_instance_to_manual_review_submission(client_fact
     _manual_review_checkpoint(client, submission_id)
     client.app.state.settings.dingtalk_oa_worker_enabled = True
     url = f"/api/admin/oa/reimbursements/submissions/{submission_id}/recover"
+    payload = {
+        "action": "ATTACH_INSTANCE",
+        "processInstanceId": "oa-1",
+        "verificationNote": "已在钉钉按发起人和时间核对表单字段",
+    }
 
-    without_csrf = client.post(
-        url,
-        json={"action": "ATTACH_INSTANCE", "processInstanceId": "oa-1"},
-    )
+    without_csrf = client.post(url, json=payload)
     assert without_csrf.status_code == 403
+    without_note = client.post(
+        url,
+        json={
+            "action": "ATTACH_INSTANCE",
+            "processInstanceId": "oa-1",
+        },
+        headers={"X-CSRF-Token": login["csrfToken"]},
+    )
+    assert without_note.status_code == 422
     response = client.post(
         url,
-        json={"action": "ATTACH_INSTANCE", "processInstanceId": "oa-1"},
+        json=payload,
         headers={"X-CSRF-Token": login["csrfToken"]},
     )
 
     assert response.status_code == 200, response.text
     assert response.json()["data"]["status"] == "VERIFYING"
     assert response.json()["data"]["processInstanceId"] == "oa-1"
+    with client.app.state.database_session_factory() as database:
+        audit = database.query(ReimbursementSubmissionRecoveryAudit).one()
+        assert audit.submission_id == submission_id
+        assert audit.admin_user_id == "admin-1"
+        assert audit.action == "ATTACH_INSTANCE"
+        assert audit.verification_note == "已在钉钉按发起人和时间核对表单字段"
+        assert audit.process_instance_id == "oa-1"
+        assert audit.status_before == "MANUAL_REVIEW"
+        assert audit.status_after == "VERIFYING"
+
+    repeated = client.post(
+        url,
+        json=payload,
+        headers={"X-CSRF-Token": login["csrfToken"]},
+    )
+    assert repeated.status_code == 200
+    with client.app.state.database_session_factory() as database:
+        assert database.query(ReimbursementSubmissionRecoveryAudit).count() == 1
 
 
 def test_admin_confirmation_moves_no_instance_manual_review_to_cleanup(client_factory) -> None:
@@ -94,7 +124,10 @@ def test_admin_confirmation_moves_no_instance_manual_review_to_cleanup(client_fa
 
     response = client.post(
         f"/api/admin/oa/reimbursements/submissions/{submission_id}/recover",
-        json={"action": "CONFIRM_NOT_CREATED"},
+        json={
+            "action": "CONFIRM_NOT_CREATED",
+            "verificationNote": "已按提交时间检查钉钉审批列表，确认没有对应审批",
+        },
         headers={"X-CSRF-Token": login["csrfToken"]},
     )
 
@@ -103,6 +136,12 @@ def test_admin_confirmation_moves_no_instance_manual_review_to_cleanup(client_fa
     with client.app.state.database_session_factory() as database:
         record = database.get(ReimbursementSubmission, submission_id)
         assert record.orphan_confirmed_by_user_id == "admin-1"
+        audit = database.query(ReimbursementSubmissionRecoveryAudit).one()
+        assert audit.admin_user_id == "admin-1"
+        assert audit.action == "CONFIRM_NOT_CREATED"
+        assert audit.verification_note == "已按提交时间检查钉钉审批列表，确认没有对应审批"
+        assert audit.process_instance_id is None
+        assert audit.status_after == "ORPHAN_CLEANUP"
 
 
 def test_admin_must_separately_confirm_unknown_remote_file_is_absent(client_factory) -> None:
@@ -143,7 +182,14 @@ def test_admin_must_separately_confirm_unknown_remote_file_is_absent(client_fact
     url = f"/api/admin/oa/reimbursements/submissions/{submission_id}/recover"
     headers = {"X-CSRF-Token": login["csrfToken"]}
 
-    blocked = client.post(url, json={"action": "CONFIRM_NOT_CREATED"}, headers=headers)
+    blocked = client.post(
+        url,
+        json={
+            "action": "CONFIRM_NOT_CREATED",
+            "verificationNote": "已检查审批列表，未发现对应审批",
+        },
+        headers=headers,
+    )
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "OA_REMOTE_FILE_CONFIRMATION_REQUIRED"
 
@@ -152,6 +198,7 @@ def test_admin_must_separately_confirm_unknown_remote_file_is_absent(client_fact
         json={
             "action": "CONFIRM_NOT_CREATED",
             "confirmUncertainUploadsAbsent": True,
+            "verificationNote": "已检查审批和钉钉文件，均不存在对应记录",
         },
         headers=headers,
     )
@@ -160,6 +207,8 @@ def test_admin_must_separately_confirm_unknown_remote_file_is_absent(client_fact
         upload = database.get(ReimbursementUpload, upload_id)
         assert upload.upload_status == "PENDING"
         assert upload.commit_started_at is None
+        audit = database.query(ReimbursementSubmissionRecoveryAudit).one()
+        assert audit.verification_note == "已检查审批和钉钉文件，均不存在对应记录"
 
 
 @pytest.mark.parametrize("instance_id", [None, "existing-oa"])

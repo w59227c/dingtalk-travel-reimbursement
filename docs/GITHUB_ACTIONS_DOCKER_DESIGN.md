@@ -1,6 +1,6 @@
 # GitHub Actions 镜像构建方案
 
-状态：已实现于 `codex/github-actions-docker` 分支。日期：2026-09-10。
+状态：已实现于 `.github/workflows/docker-publish.yml`。日期：2026-09-10。
 
 ## 目标与边界
 

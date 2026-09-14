@@ -8,6 +8,7 @@ import type { ReimbursementSubmission } from '@/types/reimbursements'
 
 const submissionId = ref('')
 const processInstanceId = ref('')
+const verificationNote = ref('')
 const recovering = ref(false)
 const result = ref<ReimbursementSubmission | null>(null)
 const resultStatusLabel = computed(() => result.value?.status === 'VERIFYING'
@@ -19,8 +20,9 @@ const resultStatusLabel = computed(() => result.value?.status === 'VERIFYING'
 async function attachInstance(): Promise<void> {
   const submission = submissionId.value.trim()
   const instance = processInstanceId.value.trim()
-  if (!submission || !instance) {
-    ElMessage.error('请填写提交记录 ID 和钉钉审批实例 ID')
+  const note = verificationNote.value.trim()
+  if (!submission || !instance || !note) {
+    ElMessage.error('请填写提交记录 ID、钉钉审批实例 ID 和核对依据')
     return
   }
   recovering.value = true
@@ -28,6 +30,7 @@ async function attachInstance(): Promise<void> {
     result.value = await recoverReimbursementSubmission(submission, {
       action: 'ATTACH_INSTANCE',
       processInstanceId: instance,
+      verificationNote: note,
     })
     ElMessage.success('已恢复审批回读，系统将继续核对')
   } catch (error) {
@@ -39,8 +42,9 @@ async function attachInstance(): Promise<void> {
 
 async function confirmNotCreated(): Promise<void> {
   const submission = submissionId.value.trim()
-  if (!submission) {
-    ElMessage.error('请填写提交记录 ID')
+  const note = verificationNote.value.trim()
+  if (!submission || !note) {
+    ElMessage.error('请填写提交记录 ID 和核对依据')
     return
   }
   try {
@@ -58,17 +62,19 @@ async function confirmNotCreated(): Promise<void> {
   } catch {
     return
   }
-  await recoverNotCreated(submission, false)
+  await recoverNotCreated(submission, note, false)
 }
 
 async function recoverNotCreated(
   submission: string,
+  note: string,
   confirmUncertainUploadsAbsent: boolean,
 ): Promise<void> {
   recovering.value = true
   try {
     result.value = await recoverReimbursementSubmission(submission, {
       action: 'CONFIRM_NOT_CREATED',
+      verificationNote: note,
       confirmUncertainUploadsAbsent,
     })
     ElMessage.success('已进入自动清理流程')
@@ -93,7 +99,7 @@ async function recoverNotCreated(
       } catch {
         return
       }
-      await recoverNotCreated(submission, true)
+      await recoverNotCreated(submission, note, true)
       return
     }
     ElMessage.error(apiErrorMessage(error, '异常提交恢复失败'))
@@ -135,6 +141,15 @@ async function recoverNotCreated(
           v-model="processInstanceId"
           maxlength="128"
           placeholder="确认 OA 已创建时填写"
+        />
+      </el-form-item>
+      <el-form-item label="核对依据">
+        <el-input
+          v-model="verificationNote"
+          data-testid="verification-note"
+          maxlength="500"
+          show-word-limit
+          placeholder="简要记录核对位置、时间范围和判断依据"
         />
       </el-form-item>
       <div class="submission-recovery-actions">

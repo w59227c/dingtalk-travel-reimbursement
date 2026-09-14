@@ -2243,6 +2243,37 @@ describe('ExpenseItemsCard durable files', () => {
     expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview')
   })
 
+  it.each([
+    { mobile: false, selector: '.el-table__row' },
+    { mobile: true, selector: '.expense-mobile-card' },
+  ])('shows an incomplete linked-itinerary warning in the $mobile presentation', async ({ mobile, selector }) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const source = taxiInvoice()
+    const itinerary = recognizedItinerary('file-2')
+    const itineraryResult = itinerary.ocrResult as ItineraryOcrResult
+    itineraryResult.complete = false
+    itineraryResult.warnings = ['ITINERARY_ROWS_INCOMPLETE']
+    drafts.files = [source, itinerary]
+    expense.upsertDraftOcrItem(source)
+    expense.items[0]!.itineraryFileIds = [itinerary.id]
+
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const item = wrapper.get(selector)
+    expect(item.text()).toContain('2026-09-01 · 1 次行程 · 60.00 CNY')
+    expect(item.text()).toContain('识别不完整或存在疑问，请手动核对关联')
+    expect(item.text()).toContain('更改关联')
+    expect(item.text()).toContain('修改用途')
+    wrapper.unmount()
+  })
+
   it('allows explicit reuse of a multi-trip itinerary for another expense', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]

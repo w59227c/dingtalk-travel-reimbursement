@@ -4,9 +4,10 @@ import type { ApiEnvelope } from '@/types/auth'
 import type { ReimbursementSubmission } from '@/types/reimbursements'
 
 export type AdminSubmissionRecoveryInput =
-  | { action: 'ATTACH_INSTANCE'; processInstanceId: string }
+  | { action: 'ATTACH_INSTANCE'; processInstanceId: string; verificationNote: string }
   | {
     action: 'CONFIRM_NOT_CREATED'
+    verificationNote: string
     confirmUncertainUploadsAbsent?: boolean
   }
 

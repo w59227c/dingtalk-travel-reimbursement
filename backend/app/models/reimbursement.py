@@ -536,6 +536,53 @@ class ReimbursementSubmission(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now, onupdate=utc_now)
 
 
+class ReimbursementSubmissionRecoveryAudit(Base):
+    __tablename__ = "reimbursement_submission_recovery_audits"
+    __table_args__ = (
+        UniqueConstraint(
+            "submission_id",
+            name="uq_reimbursement_submission_recovery_audits_submission",
+        ),
+        CheckConstraint(
+            "action IN ('ATTACH_INSTANCE', 'CONFIRM_NOT_CREATED')",
+            name="ck_reimbursement_submission_recovery_audits_action",
+        ),
+        CheckConstraint(
+            "status_before = 'MANUAL_REVIEW' AND "
+            "status_after IN ('VERIFYING', 'ORPHAN_CLEANUP')",
+            name="ck_reimbursement_submission_recovery_audits_statuses",
+        ),
+        CheckConstraint(
+            "(action = 'ATTACH_INSTANCE' AND process_instance_id IS NOT NULL) OR "
+            "(action = 'CONFIRM_NOT_CREATED' AND process_instance_id IS NULL)",
+            name="ck_reimbursement_submission_recovery_audits_instance",
+        ),
+        CheckConstraint(
+            "length(verification_note) BETWEEN 1 AND 500",
+            name="ck_reimbursement_submission_recovery_audits_note_length",
+        ),
+        Index(
+            "ix_reimbursement_submission_recovery_audits_corp_created",
+            "corp_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("reimbursement_submissions.id", ondelete="RESTRICT"),
+    )
+    corp_id: Mapped[str] = mapped_column(String(128))
+    admin_user_id: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(32))
+    verification_note: Mapped[str] = mapped_column(String(500))
+    process_instance_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status_before: Mapped[str] = mapped_column(String(32))
+    status_after: Mapped[str] = mapped_column(String(32))
+    status_version_before: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)
+
+
 class ReimbursementUpload(Base):
     __tablename__ = "reimbursement_uploads"
     __table_args__ = (
