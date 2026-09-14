@@ -317,6 +317,47 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it('uses the same stacked card hierarchy for unlinked materials on mobile', async () => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    drafts.files = [
+      serverFile('unknown-1', '名称非常长的待确认报销材料文件.pdf', 'ATTACHMENT_ONLY', {
+        ocrStatus: 'FAILED',
+        materialClassification: {
+          status: 'needs_confirmation', kind: 'unknown', reason: '材料识别未完成，请重试或确认用途', pageCount: 1,
+        },
+      }),
+      serverFile('hotel-1', '账单明细1110-1114.pdf', 'ATTACHMENT_ONLY', {
+        attachmentKind: 'hotel_bill', ocrStatus: 'COMPLETE',
+      }),
+    ]
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.receipt-list').classes()).toContain('receipt-list--mobile')
+    const cards = wrapper.findAll('.receipt-row--mobile')
+    expect(cards).toHaveLength(2)
+    const pending = cards[0]!
+    const preview = pending.get('.receipt-file-preview-link')
+    expect(preview.text()).toBe('名称非常长的待确认报销材料文件.pdf')
+    expect(preview.attributes('title')).toBe('名称非常长的待确认报销材料文件.pdf')
+    expect(pending.findAllComponents({ name: 'ElTag' })).toHaveLength(1)
+    expect(pending.get('.receipt-tags').text()).toBe('待确认用途')
+    expect(pending.get('.receipt-guidance').text()).toBe('材料识别未完成，请重试或确认用途')
+    expect(pending.get('.receipt-actions').text()).toContain('确认用途')
+    expect(pending.get('.receipt-actions').text()).toContain('重新识别')
+    expect(pending.get('.receipt-actions').text()).toContain('删除文件')
+    expect(pending.findAll('button').every((button) => !button.classes().includes('is-link'))).toBe(true)
+
+    const hotel = cards[1]!
+    expect(hotel.get('.receipt-tags').text()).toContain('住宿明细')
+    expect(hotel.get('.receipt-tags').text()).toContain('识别完成')
+    wrapper.unmount()
+  })
+
   it('offers one mixed-material upload entry and keeps unknown material out of expense totals', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
@@ -1377,6 +1418,45 @@ describe('ExpenseItemsCard durable files', () => {
     expect(wrapper.findAll('[data-testid="batch-file"]')
       .some((row) => row.text().includes('上传失败.pdf'))).toBe(false)
     expect(drafts.processingFiles).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps a persisted automatic-classification failure visible instead of reporting completion', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const uploaded = serverFile('file-1', '排队票据.pdf', 'ATTACHMENT_ONLY', {
+      materialClassification: {
+        status: 'pending', kind: 'unknown', reason: null, pageCount: 1,
+      },
+    })
+    const failed = serverFile('file-1', '排队票据.pdf', 'ATTACHMENT_ONLY', {
+      ocrStatus: 'FAILED',
+      materialClassification: {
+        status: 'needs_confirmation', kind: 'unknown', reason: '本地识别繁忙，请稍后重试', pageCount: 1,
+        error: { code: 'OCR_BUSY', message: '本地识别繁忙，请稍后重试' },
+      },
+    })
+    vi.mocked(uploadReimbursementDraftFile).mockResolvedValue({
+      draftId: 'draft-1', revision: 2, file: uploaded,
+    })
+    vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({
+      draftId: 'draft-1', revision: 2, file: failed,
+    })
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+
+    await selectFiles(wrapper, 'durable-expense-input', [
+      new File(['pdf'], '排队票据.pdf', { type: 'application/pdf' }),
+    ])
+    await flushPromises()
+
+    const batch = wrapper.get('[data-testid="batch-progress"]')
+    expect(batch.text()).toContain('本批 1 个文件处理结束，1 个需要处理')
+    expect(batch.text()).toContain('已识别 0/1')
+    expect(batch.text()).toContain('本地识别繁忙，请稍后重试')
+    expect(batch.text()).not.toContain('已处理完成')
+    expect(expense.items).toHaveLength(0)
     wrapper.unmount()
   })
 

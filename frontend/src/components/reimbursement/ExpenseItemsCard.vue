@@ -78,6 +78,7 @@ let batchOriginalFileIds = new Set<string>()
 const batchActive = computed(() => batchPhase.value !== null && batchPhase.value !== 'done')
 const batchUploadedCount = computed(() => batchFiles.value.filter((file) => file.uploaded).length)
 const batchRecognizedCount = computed(() => batchFiles.value.filter((file) => file.recognized).length)
+const batchFailedCount = computed(() => batchFiles.value.filter((file) => file.status === 'failed').length)
 const batchSkippedCount = computed(() => batchFiles.value.filter((file) => file.status === 'skipped').length)
 const visibleBatchFiles = computed(() => batchActive.value
   ? batchFiles.value
@@ -783,6 +784,14 @@ function skipDuplicateBatchFile(entry: BatchFile, error: unknown): boolean {
   return true
 }
 
+function recognitionFailure(file: ReimbursementDraftFile): string | null {
+  if (file.ocrStatus !== 'FAILED' && file.ocrResult?.status !== 'failed') return null
+  return file.ocrResult?.error?.message
+    ?? file.materialClassification?.error?.message
+    ?? file.materialClassification?.reason
+    ?? '识别未完成，请重新识别或手动处理'
+}
+
 async function recognizeDurableFile(
   file: ReimbursementDraftFile,
   scope: DurableOperationScope,
@@ -860,9 +869,10 @@ async function onDurableSelection(
       const result = await recognizeDurableFile(entry.uploaded, scope, false, pipelineId)
       if (!result || !active()) return
       recognized.push(result)
-      entry.recognized = true
-      entry.status = result.ocrResult?.status === 'failed' ? 'failed' : 'done'
-      if (entry.status === 'failed') entry.error = result.ocrResult?.error?.message ?? '识别未完成，请重新识别或手动关联'
+      const failure = recognitionFailure(result)
+      entry.recognized = failure === null
+      entry.status = failure === null ? 'done' : 'failed'
+      if (failure) entry.error = failure
     } catch (error) {
       if (!active()) return
       entry.status = 'failed'
@@ -997,11 +1007,10 @@ async function retryFailedBatchUpload(entry: BatchFile): Promise<void> {
       entry.status = 'recognizing'
       recognized = await recognizeDurableFile(uploaded.file, scope, false, pipelineId)
       if (!recognized || !acceptsDurableOperation(scope)) return
-      entry.recognized = true
-      entry.status = recognized.ocrResult?.status === 'failed' ? 'failed' : 'done'
-      if (entry.status === 'failed') {
-        entry.error = recognized.ocrResult?.error?.message ?? '识别未完成，请在材料列表中重新识别'
-      }
+      const failure = recognitionFailure(recognized)
+      entry.recognized = failure === null
+      entry.status = failure === null ? 'done' : 'failed'
+      if (failure) entry.error = failure
     }
     const synchronized = pipelineId === undefined || await drafts.finishFilePipeline(pipelineId)
     if (!acceptsDurableOperation(scope) || !synchronized) return
@@ -1459,11 +1468,20 @@ async function retryItemRecognition(id: string): Promise<void> {
       aria-live="polite"
       data-testid="batch-progress"
     >
-      <p>{{ batchPhase === 'done' ? `本批 ${batchFiles.length} 个文件已处理完成` : `正在处理本批 ${batchFiles.length} 个文件` }}</p>
+      <p>
+        {{ batchPhase !== 'done'
+          ? `正在处理本批 ${batchFiles.length} 个文件`
+          : batchFailedCount
+            ? `本批 ${batchFiles.length} 个文件处理结束，${batchFailedCount} 个需要处理`
+            : `本批 ${batchFiles.length} 个文件已处理完成` }}
+      </p>
       <p data-testid="batch-lane-counts">
         已上传 {{ batchUploadedCount }}/{{ batchFiles.length }}
         <template v-if="batchNeedsOcr">
           · 已识别 {{ batchRecognizedCount }}/{{ batchFiles.length }}
+        </template>
+        <template v-if="batchFailedCount">
+          · 需要处理 {{ batchFailedCount }}
         </template>
         <template v-if="batchSkippedCount">
           · 已跳过 {{ batchSkippedCount }}
@@ -1509,6 +1527,7 @@ async function retryItemRecognition(id: string): Promise<void> {
     <div
       v-if="unlinkedDurableFiles.length"
       class="receipt-list"
+      :class="{ 'receipt-list--mobile': props.mobile }"
       aria-live="polite"
       aria-label="待处理票据和未关联材料"
     >
@@ -1516,6 +1535,7 @@ async function retryItemRecognition(id: string): Promise<void> {
         v-for="file in unlinkedDurableFiles"
         :key="file.id"
         class="receipt-row"
+        :class="{ 'receipt-row--mobile': props.mobile }"
         :data-material-confirmation="needsMaterialConfirmation(file) ? file.id : undefined"
         tabindex="-1"
         :aria-label="`${file.name}：${durableStatusLabel(file)}`"
@@ -1526,20 +1546,26 @@ async function retryItemRecognition(id: string): Promise<void> {
               type="button"
               class="receipt-file-preview-link"
               :disabled="file.status !== 'ACTIVE' || previewLoading"
+              :title="file.name"
               :aria-label="`预览材料 ${file.name}`"
               @click="previewDurableFile(file)"
             >
-              {{ file.name }} · 预览
+              {{ props.mobile ? file.name : `${file.name} · 预览` }}
             </button>
-            <el-tag size="small">
-              {{ needsMaterialConfirmation(file) ? '用途待确认' : file.role === 'ATTACHMENT_ONLY' ? attachmentKindLabels[file.attachmentKind ?? 'other'] : durableRoleLabels[file.role] }}
-            </el-tag>
-            <el-tag
-              size="small"
-              :type="durableStatusType(file)"
-            >
-              {{ durableStatusLabel(file) }}
-            </el-tag>
+            <span class="receipt-tags">
+              <el-tag
+                v-if="!needsMaterialConfirmation(file)"
+                size="small"
+              >
+                {{ file.role === 'ATTACHMENT_ONLY' ? attachmentKindLabels[file.attachmentKind ?? 'other'] : durableRoleLabels[file.role] }}
+              </el-tag>
+              <el-tag
+                size="small"
+                :type="durableStatusType(file)"
+              >
+                {{ durableStatusLabel(file) }}
+              </el-tag>
+            </span>
           </div>
           <span class="receipt-meta">
             {{ formatFileSize(file.sizeBytes) }}
@@ -1547,7 +1573,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           </span>
           <p
             v-if="needsMaterialConfirmation(file)"
-            class="field-help"
+            class="field-help receipt-guidance"
           >
             {{ file.materialClassification?.reason || '请确认材料用途；确认前不会计入费用或提交 OA。' }}
           </p>
@@ -1568,7 +1594,8 @@ async function retryItemRecognition(id: string): Promise<void> {
         <div class="receipt-actions">
           <el-button
             v-if="canRecordPaymentExpense(file)"
-            link
+            class="receipt-action receipt-action--wide"
+            :link="!props.mobile"
             type="primary"
             data-testid="record-payment-expense"
             :disabled="Boolean(durableActionDisabledReason || newItemDisabledReason)"
@@ -1578,7 +1605,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             根据此付款凭证录入费用
           </el-button>
           <el-button
-            link
+            class="receipt-action"
+            :link="!props.mobile"
+            :type="props.mobile && needsMaterialConfirmation(file) ? 'primary' : undefined"
             :disabled="Boolean(durableActionDisabledReason)"
             @click="openMaterialEditor(file)"
           >
@@ -1586,7 +1615,9 @@ async function retryItemRecognition(id: string): Promise<void> {
           </el-button>
           <el-button
             v-if="canAdoptDurableRecognition(file)"
-            link
+            class="receipt-action"
+            :link="!props.mobile"
+            :plain="props.mobile"
             type="primary"
             :disabled="Boolean(durableActionDisabledReason)"
             :title="durableActionDisabledReason"
@@ -1596,7 +1627,9 @@ async function retryItemRecognition(id: string): Promise<void> {
           </el-button>
           <el-button
             v-if="isUnresolvedDurableOcrFile(file)"
-            link
+            class="receipt-action"
+            :link="!props.mobile"
+            :plain="props.mobile"
             type="warning"
             :disabled="Boolean(durableActionDisabledReason)"
             :title="durableActionDisabledReason"
@@ -1606,7 +1639,9 @@ async function retryItemRecognition(id: string): Promise<void> {
           </el-button>
           <el-button
             v-if="canRetryDurableRecognition(file)"
-            link
+            class="receipt-action"
+            :link="!props.mobile"
+            :plain="props.mobile"
             type="primary"
             :disabled="Boolean(durableActionDisabledReason)"
             :title="durableActionDisabledReason"
@@ -1615,7 +1650,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             重新识别
           </el-button>
           <el-button
-            link
+            class="receipt-action"
+            :link="!props.mobile"
+            :plain="props.mobile"
             type="danger"
             :disabled="Boolean(durableActionDisabledReason)
               || !['ACTIVE', 'DELETING'].includes(file.status)"
@@ -2496,6 +2533,63 @@ async function retryItemRecognition(id: string): Promise<void> {
   border-top: 1px solid #f0f2f5;
 }
 .expense-mobile-list--active .mobile-actions :deep(.el-button) { margin-left: 0; }
+.receipt-list--mobile { gap: 12px; }
+.receipt-list--mobile .receipt-row--mobile {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgb(16 24 40 / 4%);
+}
+.receipt-list--mobile .receipt-name-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+.receipt-list--mobile .receipt-file-preview-link {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.45;
+}
+.receipt-list--mobile .receipt-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 132px;
+}
+.receipt-list--mobile .receipt-meta { display: block; margin-top: 7px; font-size: 13px; }
+.receipt-list--mobile .receipt-main > p { margin: 8px 0 0; line-height: 1.55; }
+.receipt-list--mobile .receipt-guidance {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+}
+.receipt-list--mobile .receipt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: stretch;
+  gap: 8px;
+  width: 100%;
+  margin-top: 0;
+  padding-top: 12px;
+  border-top: 1px solid #f0f2f5;
+}
+.receipt-list--mobile .receipt-actions :deep(.el-button) {
+  flex: 1 1 80px;
+  min-height: 40px;
+  margin: 0;
+  padding-inline: 8px;
+}
+.receipt-list--mobile .receipt-actions :deep(.receipt-action--wide) { flex-basis: 100%; }
 .expense-editor-form--mobile .trip-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
 .expense-editor-form--mobile :deep(.el-input-number),
 .expense-editor-form--mobile :deep(.el-date-editor) { width: 100%; }

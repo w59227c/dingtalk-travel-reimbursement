@@ -93,7 +93,8 @@ def create_app(
     warm_ocr_process = WarmOcrProcess()
     process_runner = KillableProcessRunner(
         warm_ocr_process,
-        admission_timeout_seconds=runtime_settings.process_job_admission_wait_seconds,
+        admission_timeout_seconds=runtime_settings.ocr_queue_wait_seconds,
+        max_waiters=runtime_settings.ocr_queue_max_waiters,
     )
     # One bounded image/PDF validation process may overlap the single OCR
     # process. Validation retains its 512 MiB profile and never loads models.

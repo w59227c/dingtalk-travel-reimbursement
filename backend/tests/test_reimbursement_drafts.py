@@ -1464,7 +1464,7 @@ def test_review_recovers_stale_running_ocr_and_keeps_linked_material(
         assert file is not None and draft is not None
         file.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
         file.updated_at = utc_now() - timedelta(
-            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+            seconds=client.app.state.settings.ocr_operation_timeout_seconds + 31
         )
         input_data = json.loads(draft.input_json)
         input_data["items"][0]["sourceFileId"] = file_id

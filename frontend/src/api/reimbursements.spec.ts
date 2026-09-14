@@ -288,7 +288,7 @@ describe('persistent reimbursement API', () => {
     expect(http.post).toHaveBeenCalledWith(
       `${encodedFileUrl}/ocr`,
       { expectedRevision: 5, tripYear: 2026 },
-      { signal, timeout: 210_000 },
+      { signal, timeout: 360_000 },
     )
   })
 

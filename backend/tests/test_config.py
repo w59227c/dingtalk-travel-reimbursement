@@ -54,6 +54,25 @@ def test_v1_requires_single_ocr_worker_and_safe_temp_ttl() -> None:
     assert Settings(upload_ttl_minutes=4, ocr_timeout_seconds=120).upload_ttl_minutes == 4
 
 
+def test_ocr_queue_is_bounded_and_wired_for_deployment() -> None:
+    settings = Settings(ocr_queue_max_waiters=8, ocr_queue_wait_seconds=150)
+    assert settings.ocr_operation_timeout_seconds == 270
+    for invalid in (0, 101):
+        with pytest.raises(ValidationError, match="OCR_QUEUE_MAX_WAITERS"):
+            Settings(ocr_queue_max_waiters=invalid)
+    for invalid in (0, 601):
+        with pytest.raises(ValidationError, match="OCR_QUEUE_WAIT_SECONDS"):
+            Settings(ocr_queue_wait_seconds=invalid)
+
+    for env_name in (".env.example", ".env.production.example"):
+        contents = (REPOSITORY_ROOT / env_name).read_text()
+        assert "OCR_QUEUE_MAX_WAITERS=8" in contents
+        assert "OCR_QUEUE_WAIT_SECONDS=150" in contents
+    compose = (REPOSITORY_ROOT / "docker-compose.yml").read_text()
+    assert "OCR_QUEUE_MAX_WAITERS: ${OCR_QUEUE_MAX_WAITERS:-8}" in compose
+    assert "OCR_QUEUE_WAIT_SECONDS: ${OCR_QUEUE_WAIT_SECONDS:-150}" in compose
+
+
 def test_global_temp_quota_must_reserve_tmpfs_headroom() -> None:
     with pytest.raises(ValidationError, match="TEMP_STORAGE_MAX_BYTES"):
         Settings(temp_storage_max_bytes=1024 * 1024 * 1024)

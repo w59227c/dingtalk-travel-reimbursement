@@ -30,7 +30,9 @@ for required in \
     "proxy_set_header X-Forwarded-Proto" \
     "proxy_set_header X-Request-ID" \
     "proxy_hide_header Cache-Control" \
-    "proxy_max_temp_file_size 0"
+    "proxy_max_temp_file_size 0" \
+    "proxy_read_timeout 360s" \
+    "proxy_send_timeout 360s"
 do
     grep -F "$required" "$proxy" >/dev/null
 done

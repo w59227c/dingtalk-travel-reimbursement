@@ -455,7 +455,7 @@ async def validate_expense_source_conversion(
     recover_stale_running_ocr(
         database,
         draft_id=draft.id,
-        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
     )
     file = _require_active_file(database, draft_id=draft.id, file_id=file_id)
     if file.ocr_status == ReimbursementOcrStatus.RUNNING.value:
@@ -491,7 +491,7 @@ def update_draft_file(
     recover_stale_running_ocr(
         database,
         draft_id=draft.id,
-        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
     )
     file = _require_active_file(database, draft_id=draft.id, file_id=file_id)
     if file.ocr_status == ReimbursementOcrStatus.RUNNING.value:
@@ -573,7 +573,7 @@ def begin_draft_files_clear(
     recover_stale_running_ocr(
         database,
         draft_id=draft.id,
-        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
     )
     files = list(
         database.scalars(
@@ -585,7 +585,10 @@ def begin_draft_files_clear(
     )
     if any(
         file.file_status in {"RESERVED", "WRITING"}
-        or ocr_is_actively_running(file, ocr_timeout_seconds=settings.ocr_timeout_seconds)
+        or ocr_is_actively_running(
+            file,
+            ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
+        )
         for file in files
     ):
         raise ApiError("REIMBURSEMENT_FILE_BUSY", "文件仍在上传或识别，请完成后清空", 409)
@@ -711,7 +714,10 @@ def begin_draft_file_delete(
             actor=actor,
             mutable=True,
         )
-        if ocr_is_actively_running(file, ocr_timeout_seconds=settings.ocr_timeout_seconds):
+        if ocr_is_actively_running(
+            file,
+            ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
+        ):
             raise ApiError(
                 "REIMBURSEMENT_FILE_BUSY",
                 "票据正在识别，请稍后再删除",
@@ -721,7 +727,7 @@ def begin_draft_file_delete(
             recover_stale_running_ocr(
                 database,
                 draft_id=draft.id,
-                ocr_timeout_seconds=settings.ocr_timeout_seconds,
+                ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
             )
             database.refresh(file)
         referenced = database.scalar(
@@ -885,14 +891,17 @@ async def recognize_draft_file(
                 "仅票据来源或行程单材料可进行识别",
                 409,
             )
-        if ocr_is_actively_running(file, ocr_timeout_seconds=settings.ocr_timeout_seconds):
+        if ocr_is_actively_running(
+            file,
+            ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
+        ):
             raise ApiError(
                 "REIMBURSEMENT_FILE_OCR_RUNNING",
                 "票据正在识别，请稍后查看",
                 409,
             )
-        # A RUNNING marker older than the worker timeout belongs to a dead
-        # process and can be atomically replaced by this attempt.
+        # A RUNNING marker older than the bounded queue plus worker window
+        # belongs to a dead request and can be atomically replaced.
         source = _snapshot(file)
         if pipeline_input_json is None:
             operation_revision = bump_owned_draft_revision(
@@ -1096,7 +1105,7 @@ def _workbook_preview_snapshot(
     recover_stale_running_ocr(
         database,
         draft_id=draft.id,
-        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
     )
     if draft.status == ReimbursementDraftStatus.LOCKED.value:
         submission = database.scalar(

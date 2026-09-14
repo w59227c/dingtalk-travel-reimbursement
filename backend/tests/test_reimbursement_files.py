@@ -743,7 +743,7 @@ def test_batch_clear_allows_stale_running_ocr_after_restart(client_factory) -> N
         file = database.get(ReimbursementDraftFile, stale_file_id)
         file.ocr_status = "RUNNING"
         file.updated_at = utc_now() - timedelta(
-            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+            seconds=client.app.state.settings.ocr_operation_timeout_seconds + 31
         )
         database.commit()
 
@@ -777,7 +777,7 @@ def test_delete_allows_stale_running_ocr_after_restart(client_factory) -> None:
         file = database.get(ReimbursementDraftFile, file_id)
         file.ocr_status = "RUNNING"
         file.updated_at = utc_now() - timedelta(
-            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+            seconds=client.app.state.settings.ocr_operation_timeout_seconds + 31
         )
         database.commit()
 
@@ -808,7 +808,7 @@ def test_listing_exposes_stale_running_ocr_without_mutating_from_get(client_fact
         file.ocr_status = "RUNNING"
         file.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
         file.updated_at = utc_now() - timedelta(
-            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+            seconds=client.app.state.settings.ocr_operation_timeout_seconds + 31
         )
         database.commit()
 
@@ -841,7 +841,7 @@ def test_listing_exposes_stale_hotel_ocr_as_retryable(client_factory) -> None:
         file.ocr_status = "RUNNING"
         file.ocr_result_json = json.dumps({"operationId": "interrupted-hotel"})
         file.updated_at = utc_now() - timedelta(
-            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+            seconds=client.app.state.settings.ocr_operation_timeout_seconds + 31
         )
         database.commit()
 
@@ -1174,7 +1174,7 @@ def test_excel_preview_recovers_stale_running_ocr_without_blocking(
         file.ocr_status = "RUNNING"
         file.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
         file.updated_at = utc_now() - timedelta(
-            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+            seconds=client.app.state.settings.ocr_operation_timeout_seconds + 31
         )
         database.commit()
 

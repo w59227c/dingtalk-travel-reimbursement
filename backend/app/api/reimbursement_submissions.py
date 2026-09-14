@@ -129,7 +129,7 @@ async def submit_reimbursement(
         microapp_agent_id=agent_id,
         excel_template_path=settings.excel_template_path,
         max_items=settings.expense_max_items,
-        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
     )
     snapshot = build_snapshot(source)
     snapshot_json = serialize_snapshot(snapshot)

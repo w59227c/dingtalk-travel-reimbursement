@@ -62,7 +62,7 @@ V1 建议做成一个部署在公司钉钉工作台中的单体 H5 应用：Vue 
 - 历史报销单、草稿恢复、长期附件存储。
 - 用户注册、密码登录、JWT LocalStorage 登录。
 - 飞机票专用 Parser、酒店专用 Parser；没有真实样本前由通用发票和人工修正覆盖。
-- Redis、任务队列、微服务、Kubernetes、大模型。
+- Redis、持久任务队列、跨进程调度服务、微服务、Kubernetes、大模型；单进程内的 OCR 有界等待不属于持久任务队列。
 
 ## 3. 真实样本结论
 
@@ -346,7 +346,7 @@ interface TripInput {
   -> 用户确认
 ```
 
-OCR 是 CPU 密集同步工作，不直接放在 `async def` 事件循环中。V1 用标准库 `multiprocessing` 为每个图片验证、PDF 处理或 OCR 任务创建一个全新的 `spawn` 子进程，全局准入容量固定为 1 且不建立应用队列。每任务独立进程避免已加载 Paddle 的 5 GiB OCR 地址空间被后续 512 MiB 文件验证复用；V1 接受模型不跨请求缓存的启动成本。超时或取消会终止并回收该进程，完成后才释放准入令牌。
+OCR 是 CPU 密集同步工作，不直接放在 `async def` 事件循环中。V1 用标准库 `multiprocessing` 隔离图片验证、PDF 处理和 OCR。文件验证使用独立单槽及短准入等待；OCR 全局执行容量固定为 1，前置一个进程内有界 FIFO 队列（默认 8 个等待请求、150 秒），因此多用户请求按到达顺序准入但不会增加并行模型数量。队列满或等待超时返回 `OCR_BUSY`；执行超时或取消会终止并回收 OCR 进程，完成清理后才释放准入令牌。持久 `RUNNING` 的陈旧窗口覆盖最大排队与执行时间，排队中的任务不会被清理逻辑误判为中断。
 
 ### 7.4 前端票据交互
 
@@ -605,7 +605,7 @@ dingtalk-travel-reimbursement/
 
 禁止：
 
-- 添加 Redis、队列或多服务业务拆分。
+- 添加 Redis、持久/跨进程任务队列或多服务业务拆分；允许单进程内只用于 OCR 准入的有界等待队列。
 - 认为 `depends_on` 等于 ready；必须配 healthcheck。
 - 将真实 Secret 写进 `.env.example` 或镜像。
 
@@ -706,7 +706,7 @@ dingtalk-travel-reimbursement/
 - 前端逐文件状态和重试入口，不向员工暴露服务器文件删除操作。
 - Nginx 上传限制和超时与后端一致。
 - 图片/PDF 解码只在可终止进程中运行；页面内容流数量与 XObject 数量使用独立限额，并限制每页 PDF 解压后内容总字节；为文件处理与 OCR 分别设置 512 MiB / 5 GiB 默认地址空间上限，并由容器单独限制实际内存。
-- 上传、Session 文件操作和本地处理准入均为 asyncio 有界等待，超时返回 `UPLOAD_BUSY`、`FILE_OPERATION_BUSY` 或 `OCR_BUSY`，不建立队列。
+- 上传和 Session 文件操作使用短暂有界准入，超时返回 `UPLOAD_BUSY` 或 `FILE_OPERATION_BUSY`；OCR 使用单执行槽和有界 FIFO 等待队列，队列满或超时返回 `OCR_BUSY`。
 - 请求取消后必须等工作进程确认终止再释放准入，同步关闭 spool 并删除 `.part`/最终文件；退出等待上限覆盖 OCR 超时和清理宽限。
 - 生产启用 OCR 必须使用 Linux 进程限额，不提供绕过开关。Compose 必须同时设置容器内存和 PID 上限。macOS arm64 仅允许通过默认的 `dev-backend` 命令、本地 CPU 和预置模型做开发 smoke，不能作为生产部署路径。
 

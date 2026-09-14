@@ -847,7 +847,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
                 microapp_agent_id=4_951_124_324,
                 excel_template_path=client.app.state.settings.excel_template_path,
                 max_items=100,
-                ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
+                ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,
             )
         draft.input_json = calculation.canonical_json
         database.commit()
@@ -862,7 +862,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
             microapp_agent_id=4_951_124_324,
             excel_template_path=client.app.state.settings.excel_template_path,
             max_items=100,
-            ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
+            ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,
         )
 
         assert source.draft_revision == 5
@@ -880,7 +880,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
         file_record.ocr_status = ReimbursementOcrStatus.RUNNING.value
         file_record.ocr_result_json = json.dumps({"operationId": "interrupted-operation"})
         file_record.updated_at = utc_now() - timedelta(
-            seconds=client.app.state.settings.ocr_timeout_seconds + 31
+            seconds=client.app.state.settings.ocr_operation_timeout_seconds + 31
         )
         database.commit()
         recovered_source = collect_snapshot_source(
@@ -894,7 +894,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
             microapp_agent_id=4_951_124_324,
             excel_template_path=client.app.state.settings.excel_template_path,
             max_items=100,
-            ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
+            ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,
         )
         assert recovered_source.original_files[0].ocr_status == "FAILED"
         database.refresh(file_record)
@@ -914,7 +914,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
                 microapp_agent_id=4_951_124_324,
                 excel_template_path=client.app.state.settings.excel_template_path,
                 max_items=100,
-                ocr_timeout_seconds=client.app.state.settings.ocr_timeout_seconds,
+                ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,
             )
         assert changed.value.code == "REIMBURSEMENT_DRAFT_FILE_CHANGED"
         database.refresh(draft)

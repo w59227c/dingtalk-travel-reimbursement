@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     ocr_fake_enabled: bool = False
     ocr_concurrency: int = 1
+    ocr_queue_max_waiters: int = 8
+    ocr_queue_wait_seconds: int = 150
     ocr_timeout_seconds: int = 120
     ocr_cpu_threads: int = 4
     ocr_engine: Literal["paddle_static"] = "paddle_static"
@@ -315,6 +317,20 @@ class Settings(BaseSettings):
             raise ValueError("LOGOUT_FILE_WAIT_SECONDS must be between 1 and 600 seconds")
         return value
 
+    @field_validator("ocr_queue_max_waiters")
+    @classmethod
+    def require_bounded_ocr_queue(cls, value: int) -> int:
+        if not 1 <= value <= 100:
+            raise ValueError("OCR_QUEUE_MAX_WAITERS must be between 1 and 100")
+        return value
+
+    @field_validator("ocr_queue_wait_seconds")
+    @classmethod
+    def require_bounded_ocr_queue_wait(cls, value: int) -> int:
+        if not 1 <= value <= 600:
+            raise ValueError("OCR_QUEUE_WAIT_SECONDS must be between 1 and 600 seconds")
+        return value
+
     @model_validator(mode="after")
     def validate_security_configuration(self) -> Settings:
         if self.app_env == "production":
@@ -449,6 +465,12 @@ class Settings(BaseSettings):
     @property
     def ocr_worker_limits(self) -> dict[str, int]:
         return self._worker_limits(self.ocr_worker_memory_limit_bytes)
+
+    @property
+    def ocr_operation_timeout_seconds(self) -> int:
+        """Maximum queue plus worker time before a RUNNING marker can be stale."""
+
+        return self.ocr_queue_wait_seconds + self.ocr_timeout_seconds
 
     @property
     def admin_ids(self) -> frozenset[str]:

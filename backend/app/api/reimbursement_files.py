@@ -119,7 +119,9 @@ def get_files(
             "items": [
                 serialize_draft_file(
                     item,
-                    ocr_timeout_seconds=request.app.state.settings.ocr_timeout_seconds,
+                    ocr_timeout_seconds=(
+                        request.app.state.settings.ocr_operation_timeout_seconds
+                    ),
                 )
                 for item in files
             ],
@@ -261,7 +263,7 @@ async def patch_file(
             expected_revision=body.expected_revision,
             settings=request.app.state.settings,
             staging=request.app.state.reimbursement_staging,
-            process_runner=request.app.state.process_runner,
+            process_runner=request.app.state.file_validation_runner,
         )
     result = update_draft_file(
         database,

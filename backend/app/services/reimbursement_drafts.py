@@ -392,7 +392,7 @@ def mark_reimbursement_draft_review_ready(
     recover_stale_running_ocr(
         database,
         draft_id=draft.id,
-        ocr_timeout_seconds=settings.ocr_timeout_seconds,
+        ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
         now=changed_at,
     )
     catalog = require_submission_ready_catalog(database)

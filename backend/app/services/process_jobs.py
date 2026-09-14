@@ -194,10 +194,9 @@ async def run_in_fresh_process(
 class KillableProcessRunner:
     """Admit one local job per runner in a fresh, killable process.
 
-    There is no business queue in V1. Callers get a short bounded admission
-    wait. Every admitted job receives a new process, preventing the 5 GiB OCR
-    profile (and its retained model state) from crossing into the 512 MiB
-    image/PDF validation profile.
+    Callers may use a bounded FIFO admission queue. Every admitted job receives
+    a new process, preventing the 5 GiB OCR profile (and its retained model
+    state) from crossing into the 512 MiB image/PDF validation profile.
 
     The application may give upload validation its own one-slot runner, so
     lightweight bounded checks can overlap OCR without adding an OCR slot.
@@ -208,7 +207,14 @@ class KillableProcessRunner:
         run_sync: ProcessRunSync | None = None,
         *,
         admission_timeout_seconds: float = 1.0,
+        max_waiters: int | None = None,
     ) -> None:
+        if admission_timeout_seconds <= 0:
+            raise ValueError("admission_timeout_seconds must be positive")
+        if max_waiters is not None and (
+            isinstance(max_waiters, bool) or not isinstance(max_waiters, int) or max_waiters < 0
+        ):
+            raise ValueError("max_waiters must be a non-negative integer or None")
         self._run_sync = run_sync or run_in_fresh_process
         self._admission = anyio.CapacityLimiter(1)
         self._process_capacity = anyio.CapacityLimiter(1)
@@ -216,6 +222,30 @@ class KillableProcessRunner:
         self._run_tasks: set[asyncio.Task[Any]] = set()
         self._closing = False
         self._admission_timeout_seconds = admission_timeout_seconds
+        self._max_waiters = max_waiters
+        self._waiting_jobs = 0
+
+    @property
+    def waiting_jobs(self) -> int:
+        return self._waiting_jobs
+
+    async def _acquire_admission(self) -> None:
+        try:
+            self._admission.acquire_nowait()
+            return
+        except anyio.WouldBlock:
+            pass
+
+        if self._max_waiters is not None and self._waiting_jobs >= self._max_waiters:
+            raise ProcessJobBusy("local process queue is full")
+        self._waiting_jobs += 1
+        try:
+            with anyio.move_on_after(self._admission_timeout_seconds):
+                await self._admission.acquire()
+                return
+            raise ProcessJobBusy("local process queue wait timed out")
+        finally:
+            self._waiting_jobs -= 1
 
     async def run(
         self,
@@ -231,11 +261,8 @@ class KillableProcessRunner:
         try:
             if self._closing:
                 raise ProcessJobBusy("process runner is closing")
-            with anyio.move_on_after(self._admission_timeout_seconds) as admission_scope:
-                await self._admission.acquire()
-                admitted = True
-            if admission_scope.cancel_called or not admitted:
-                raise ProcessJobBusy("local process slot is busy")
+            await self._acquire_admission()
+            admitted = True
             if self._closing:
                 raise ProcessJobBusy("process runner is closing")
 

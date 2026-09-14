@@ -136,6 +136,7 @@ async def test_process_timeout_keeps_admission_until_cancelled_worker_unwinds() 
     await cancelled.wait()
     with pytest.raises(ProcessJobBusy):
         await runner.run(str, "second", timeout_seconds=1)
+    assert runner.waiting_jobs == 0
     allow_discard.set()
     with pytest.raises(ProcessJobTimeout):
         await first
@@ -204,9 +205,77 @@ async def test_close_cancels_active_and_waiting_jobs_without_starting_waiter() -
         with pytest.raises(asyncio.CancelledError):
             await task
     assert runner._admission.borrowed_tokens == 0
+    assert runner.waiting_jobs == 0
     assert runner._run_tasks == set()
     with pytest.raises(ProcessJobBusy):
         await runner.run(str, "after-close", timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_process_admission_queue_runs_waiters_in_fifo_order() -> None:
+    starts: list[str] = []
+    started = {name: anyio.Event() for name in ("first", "second", "third")}
+    releases = {name: anyio.Event() for name in ("first", "second", "third")}
+
+    async def fake_run_sync(_function, name, **_options):
+        starts.append(name)
+        started[name].set()
+        await releases[name].wait()
+        return name
+
+    runner = KillableProcessRunner(
+        fake_run_sync,
+        admission_timeout_seconds=2,
+        max_waiters=2,
+    )
+    first = asyncio.create_task(runner.run(str, "first", timeout_seconds=5))
+    await started["first"].wait()
+    second = asyncio.create_task(runner.run(str, "second", timeout_seconds=5))
+    while runner.waiting_jobs != 1:
+        await asyncio.sleep(0)
+    third = asyncio.create_task(runner.run(str, "third", timeout_seconds=5))
+    while runner.waiting_jobs != 2:
+        await asyncio.sleep(0)
+
+    releases["first"].set()
+    await started["second"].wait()
+    assert starts == ["first", "second"]
+    releases["second"].set()
+    await started["third"].wait()
+    assert starts == ["first", "second", "third"]
+    releases["third"].set()
+    assert await asyncio.gather(first, second, third) == ["first", "second", "third"]
+    assert runner.waiting_jobs == 0
+
+
+@pytest.mark.asyncio
+async def test_process_admission_queue_rejects_only_after_waiter_bound() -> None:
+    active_started = anyio.Event()
+    release_active = anyio.Event()
+
+    async def fake_run_sync(_function, name, **_options):
+        if name == "active":
+            active_started.set()
+            await release_active.wait()
+        return name
+
+    runner = KillableProcessRunner(
+        fake_run_sync,
+        admission_timeout_seconds=2,
+        max_waiters=1,
+    )
+    active = asyncio.create_task(runner.run(str, "active", timeout_seconds=5))
+    await active_started.wait()
+    waiting = asyncio.create_task(runner.run(str, "waiting", timeout_seconds=5))
+    while runner.waiting_jobs != 1:
+        await asyncio.sleep(0)
+
+    with pytest.raises(ProcessJobBusy, match="queue is full"):
+        await runner.run(str, "overflow", timeout_seconds=5)
+
+    release_active.set()
+    assert await asyncio.gather(active, waiting) == ["active", "waiting"]
+    assert runner.waiting_jobs == 0
 
 
 @pytest.mark.asyncio

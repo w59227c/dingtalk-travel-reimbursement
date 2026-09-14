@@ -26,7 +26,8 @@ import type {
 
 const DRAFT_EXCEL_PREVIEW_FILENAME = '差旅费报销单预览.xlsx'
 // Keep the client attached through the OCR worker ceiling and its settlement window.
-const OCR_REQUEST_TIMEOUT_MS = 210_000
+// Covers the bounded server queue, one OCR run, and process cleanup headroom.
+const OCR_REQUEST_TIMEOUT_MS = 360_000
 
 export interface ReimbursementRequestOptions {
   signal?: AbortSignal
