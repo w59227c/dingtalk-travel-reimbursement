@@ -2378,7 +2378,7 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
-  it('previews server-held invoices and shows linked itinerary only with the expense row', async () => {
+  it('previews server-held invoices in the desktop page and shows linked itinerary only with the expense row', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
     const drafts = useReimbursementDraftStore()
@@ -2409,12 +2409,12 @@ describe('ExpenseItemsCard durable files', () => {
     await wrapper.get('[aria-label="预览票据 发票.pdf"]').trigger('click')
     await flushPromises()
     expect(getReimbursementFileContent).toHaveBeenCalledWith('draft-1', 'file-1', { signal: expect.any(AbortSignal) })
-    expect(createUrl).not.toHaveBeenCalled()
-    expect(wrapper.get('[data-testid="pdf-preview"]')).toBeDefined()
-    expect(wrapper.find('iframe').exists()).toBe(false)
+    expect(createUrl).toHaveBeenCalledWith(blob)
+    expect(wrapper.get('iframe').attributes('src')).toBe('blob:server-preview')
+    expect(wrapper.find('[data-testid="pdf-preview"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
     wrapper.unmount()
-    expect(revokeUrl).not.toHaveBeenCalled()
+    expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview')
   })
 
   it('renders mobile PDFs inside the reimbursement page without downloading them', async () => {
@@ -2427,17 +2427,15 @@ describe('ExpenseItemsCard durable files', () => {
     expense.upsertDraftOcrItem(source)
     const blob = new Blob(['pdf'], { type: 'application/pdf' })
     vi.mocked(getReimbursementFileContent).mockResolvedValue(blob)
+    const createUrl = vi.fn().mockReturnValue('blob:mobile-preview')
+    const revokeUrl = vi.fn()
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createUrl
+      static revokeObjectURL = revokeUrl
+    })
     const wrapper = mount(ExpenseItemsCard, {
       props: { mobile: true },
-      global: {
-        plugins: [pinia, ElementPlus],
-        stubs: {
-          PdfPreview: {
-            props: ['source'],
-            template: '<div data-testid="pdf-preview">PDF 页面</div>',
-          },
-        },
-      },
+      global: { plugins: [pinia, ElementPlus] },
     })
     await flushPromises()
 
@@ -2452,9 +2450,48 @@ describe('ExpenseItemsCard durable files', () => {
       'file-1',
       { signal: expect.any(AbortSignal) },
     )
-    expect(wrapper.get('[data-testid="pdf-preview"]').text()).toBe('PDF 页面')
-    expect(wrapper.find('iframe').exists()).toBe(false)
+    expect(createUrl).toHaveBeenCalledWith(blob)
+    expect(wrapper.get('iframe').attributes('src')).toBe('blob:mobile-preview')
+    expect(wrapper.find('[data-testid="pdf-preview"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
+    wrapper.unmount()
+    expect(revokeUrl).toHaveBeenCalledWith('blob:mobile-preview')
+  })
+
+  it.each([
+    { presentation: 'desktop', mobile: false, selector: '.el-table__row' },
+    { presentation: 'mobile', mobile: true, selector: '.expense-mobile-card' },
+  ])('shows an explicit empty description and button-like material actions on $presentation', async ({ mobile, selector }) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const source = recognizedFile('file-1', '发票.pdf', '10.00')
+    const paymentProof = serverFile('payment-1', '付款凭证.pdf', 'ATTACHMENT_ONLY', {
+      attachmentKind: 'payment_proof',
+    })
+    drafts.files = [source, paymentProof]
+    expense.upsertDraftOcrItem(source)
+    expense.items[0]!.description = ''
+    expense.items[0]!.paymentProofFileIds = [paymentProof.id]
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const item = wrapper.get(selector)
+    expect(item.get('.expense-item-card__description--empty').text()).toBe('暂无说明')
+    const materialActions = item.findAll('button').filter((button) =>
+      ['修改用途', '更换', '移除关联'].includes(button.text().trim()),
+    )
+    expect(materialActions.length).toBeGreaterThanOrEqual(4)
+    for (const action of materialActions) {
+      expect(action.classes()).not.toContain('is-link')
+      expect(action.classes()).toContain('is-plain')
+    }
+    const rowAction = item.findAll('button').find((button) => button.text().trim() === '编辑')!
+    expect(rowAction.classes()).not.toContain('is-link')
     wrapper.unmount()
   })
 

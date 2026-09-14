@@ -51,8 +51,9 @@ const fillLabels = computed(() => [
         确认关联
       </el-button>
       <el-button
-        link
         type="primary"
+        plain
+        size="small"
         :disabled="disabled"
         @click="emit('choose')"
       >

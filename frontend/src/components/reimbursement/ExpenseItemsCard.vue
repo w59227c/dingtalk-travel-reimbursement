@@ -1,10 +1,9 @@
 <script setup lang="ts">
 import { Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
 import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
-import PdfPreview from './PdfPreview.vue'
 
 import { getReimbursementFileContent } from '@/api/reimbursements'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
@@ -121,7 +120,6 @@ let durableUnmounted = false
 let activeDurableOperation: DurableOperationScope | null = null
 const receiptPreviewVisible = ref(false)
 const receiptPreviewUrl = ref('')
-const receiptPreviewBlob = shallowRef<Blob | null>(null)
 const receiptPreviewName = ref('')
 const receiptPreviewKind = ref<'image' | 'pdf'>('image')
 const previewLoading = ref(false)
@@ -826,7 +824,6 @@ function releaseReceiptPreview(): void {
   previewController = null
   if (receiptPreviewUrl.value) URL.revokeObjectURL(receiptPreviewUrl.value)
   receiptPreviewUrl.value = ''
-  receiptPreviewBlob.value = null
 }
 
 async function previewDurableFile(file: ReimbursementDraftFile | undefined): Promise<void> {
@@ -841,8 +838,7 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
     if (controller.signal.aborted || drafts.currentDraft?.id !== draft.id || durableUnmounted) return
     receiptPreviewName.value = file.name
     receiptPreviewKind.value = file.mediaType === 'application/pdf' ? 'pdf' : 'image'
-    if (receiptPreviewKind.value === 'pdf') receiptPreviewBlob.value = blob
-    else receiptPreviewUrl.value = URL.createObjectURL(blob)
+    receiptPreviewUrl.value = URL.createObjectURL(blob)
     receiptPreviewVisible.value = true
   } catch (error) {
     if (!controller.signal.aborted) ElMessage.error(apiErrorMessage(error, '材料预览失败，请重试'))
@@ -1912,6 +1908,12 @@ async function retryItemRecognition(id: string): Promise<void> {
           >
             {{ meaningfulMobileDescription(scope.row) }}
           </div>
+          <div
+            v-else
+            class="expense-item-card__description expense-item-card__description--empty"
+          >
+            暂无说明
+          </div>
           <div class="expense-item-card__materials expense-item-card__materials--desktop">
             <div
               v-if="durableFileByItemId(scope.row.id)?.name"
@@ -1932,7 +1934,9 @@ async function retryItemRecognition(id: string): Promise<void> {
                 <span v-else>{{ durableFileByItemId(scope.row.id)?.name }}</span>
                 <el-button
                   v-if="!isPurgedFile(durableFileByItemId(scope.row.id))"
-                  link
+                  type="primary"
+                  plain
+                  size="small"
                   :disabled="Boolean(durableActionDisabledReason)"
                   @click="openSourceMaterialEditor(scope.row.id)"
                 >
@@ -1962,14 +1966,18 @@ async function retryItemRecognition(id: string): Promise<void> {
                   class="linked-proof-summary"
                 >{{ durableOcrSummary(file) }}</span>
                 <el-button
-                  link
+                  type="primary"
+                  plain
+                  size="small"
                   :disabled="Boolean(durableActionDisabledReason)"
                   @click="openEditItem(scope.row)"
                 >
                   更改关联
                 </el-button>
                 <el-button
-                  link
+                  type="primary"
+                  plain
+                  size="small"
                   :disabled="Boolean(durableActionDisabledReason)"
                   @click="openMaterialEditor(file)"
                 >
@@ -2051,8 +2059,9 @@ async function retryItemRecognition(id: string): Promise<void> {
         <template #default="scope">
           <div class="expense-desktop-actions">
             <el-button
-              link
               type="primary"
+              plain
+              size="small"
               :disabled="props.readonly || batchActive"
               @click="openEditItem(scope.row)"
             >
@@ -2061,8 +2070,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             <el-button
               v-if="Boolean(durableFileByItemId(scope.row.id)
                 && canRetryDurableRecognition(durableFileByItemId(scope.row.id)))"
-              link
               type="primary"
+              plain
+              size="small"
               :loading="isRetryingDurableRecognition(durableFileByItemId(scope.row.id))"
               :disabled="props.readonly || Boolean(durableActionDisabledReason)"
               :title="durableActionDisabledReason"
@@ -2071,8 +2081,9 @@ async function retryItemRecognition(id: string): Promise<void> {
               重新识别
             </el-button>
             <el-button
-              link
               type="danger"
+              plain
+              size="small"
               :disabled="props.readonly || batchActive || (Boolean(durableFileByItemId(scope.row.id))
                 && Boolean(durableActionDisabledReason))"
               :title="durableFileByItemId(scope.row.id)
@@ -2134,6 +2145,12 @@ async function retryItemRecognition(id: string): Promise<void> {
           {{ meaningfulMobileDescription(item) }}
         </p>
         <p
+          v-else
+          class="expense-item-card__description expense-item-card__description--empty"
+        >
+          暂无说明
+        </p>
+        <p
           v-if="moneyToCents(item.amount) === 0"
           class="expense-item-card__notice"
           data-testid="zero-amount-warning"
@@ -2169,7 +2186,9 @@ async function retryItemRecognition(id: string): Promise<void> {
               <span v-else>{{ readableMobileFileName(durableFileByItemId(item.id)) }}</span>
               <el-button
                 v-if="!isPurgedFile(durableFileByItemId(item.id))"
-                link
+                type="primary"
+                plain
+                size="small"
                 :disabled="Boolean(durableActionDisabledReason)"
                 @click="openSourceMaterialEditor(item.id)"
               >
@@ -2199,14 +2218,18 @@ async function retryItemRecognition(id: string): Promise<void> {
                 class="linked-proof-summary"
               >{{ durableOcrSummary(file) }}</span>
               <el-button
-                link
+                type="primary"
+                plain
+                size="small"
                 :disabled="Boolean(durableActionDisabledReason)"
                 @click="openEditItem(item)"
               >
                 更改关联
               </el-button>
               <el-button
-                link
+                type="primary"
+                plain
+                size="small"
                 :disabled="Boolean(durableActionDisabledReason)"
                 @click="openMaterialEditor(file)"
               >
@@ -2310,9 +2333,10 @@ async function retryItemRecognition(id: string): Promise<void> {
         :src="receiptPreviewUrl"
         :alt="`${receiptPreviewName} 预览`"
       >
-      <PdfPreview
-        v-else-if="receiptPreviewBlob"
-        :source="receiptPreviewBlob"
+      <iframe
+        v-else
+        :src="receiptPreviewUrl"
+        :title="`${receiptPreviewName} 预览`"
       />
     </div>
     <p class="field-help receipt-preview-help">
@@ -2802,6 +2826,9 @@ async function retryItemRecognition(id: string): Promise<void> {
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
+.expense-item-card__description--empty {
+  color: #98a2b3;
+}
 .expense-item-card__materials--desktop {
   display: grid;
   gap: 7px;
@@ -2902,7 +2929,12 @@ async function retryItemRecognition(id: string): Promise<void> {
   grid-template-columns: minmax(0, 1fr);
   gap: 2px;
 }
-.expense-mobile-list--active .expense-material-row__content { align-items: baseline; }
+.expense-mobile-list--active .expense-material-row__content { align-items: center; }
+.expense-mobile-list--active .expense-item-card__materials :deep(.el-button) {
+  min-height: 34px;
+  margin-left: 0;
+  padding-inline: 10px;
+}
 .expense-mobile-list--active .linked-proof-summary {
   flex-basis: 100%;
   color: #98a2b3;
@@ -3033,7 +3065,6 @@ async function retryItemRecognition(id: string): Promise<void> {
 .material-operation-status strong { color: var(--el-color-primary); }
 .material-operation-status span { margin-top: 4px; color: var(--el-text-color-secondary); line-height: 1.55; }
 .mobile-expense-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
-.receipt-preview-surface :deep(.pdf-preview) { width: 100%; height: 100%; }
 .batch-progress { margin-top: 16px; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .batch-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; padding-top: 12px; }
 .batch-file > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

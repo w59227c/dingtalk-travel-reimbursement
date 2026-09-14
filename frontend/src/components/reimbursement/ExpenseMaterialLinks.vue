@@ -70,8 +70,9 @@ function hotelSummary(file: ReimbursementDraftFile): string {
         </el-button>
         <el-button
           v-if="hasReusableHotel"
-          link
           type="primary"
+          plain
+          size="small"
           :disabled="disabled"
           @click="emit('hotelReuse')"
         >
@@ -101,21 +102,27 @@ function hotelSummary(file: ReimbursementDraftFile): string {
         >{{ file.name }}</span>
         <div class="material-actions">
           <el-button
-            link
+            type="primary"
+            plain
+            size="small"
             :disabled="disabled"
             @click="emit('hotelUpload', file.id)"
           >
             更换
           </el-button>
           <el-button
-            link
+            type="danger"
+            plain
+            size="small"
             :disabled="disabled"
             @click="emit('hotelUnlink', file.id)"
           >
             移除关联
           </el-button>
           <el-button
-            link
+            type="primary"
+            plain
+            size="small"
             :disabled="disabled"
             @click="emit('purpose', file)"
           >
@@ -133,8 +140,9 @@ function hotelSummary(file: ReimbursementDraftFile): string {
     >
       <span>待补行程单 · 网约车费用</span>
       <el-button
-        link
         type="primary"
+        plain
+        size="small"
         :disabled="disabled"
         @click="emit('itinerary')"
       >
@@ -160,8 +168,9 @@ function hotelSummary(file: ReimbursementDraftFile): string {
         </el-button>
         <el-button
           v-if="hasReusableProof"
-          link
           type="primary"
+          plain
+          size="small"
           :disabled="disabled"
           @click="emit('reuse')"
         >
@@ -191,21 +200,27 @@ function hotelSummary(file: ReimbursementDraftFile): string {
       >{{ file.name }}</span>
       <div class="material-actions">
         <el-button
-          link
+          type="primary"
+          plain
+          size="small"
           :disabled="disabled"
           @click="emit('upload', file.id)"
         >
           更换
         </el-button>
         <el-button
-          link
+          type="danger"
+          plain
+          size="small"
           :disabled="disabled"
           @click="emit('unlink', file.id)"
         >
           移除关联
         </el-button>
         <el-button
-          link
+          type="primary"
+          plain
+          size="small"
           :disabled="disabled"
           @click="emit('purpose', file)"
         >
