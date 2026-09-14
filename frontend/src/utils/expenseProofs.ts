@@ -26,6 +26,36 @@ export function needsMaterialConfirmation(file: ReimbursementDraftFile): boolean
   return file.status !== 'PURGED' && ['pending', 'needs_confirmation'].includes(file.materialClassification?.status ?? '')
 }
 
+export function isUnresolvedExpenseSourceFile(
+  file: ReimbursementDraftFile,
+  items: ReadonlyArray<Pick<ExpenseItem, 'sourceFileId'>>,
+  dismissedOcrFileIds: readonly string[],
+): boolean {
+  return file.status === 'ACTIVE'
+    && file.role === 'EXPENSE_SOURCE'
+    && ['COMPLETE', 'FAILED'].includes(file.ocrStatus)
+    && !items.some((item) => item.sourceFileId === file.id)
+    && !dismissedOcrFileIds.includes(file.id)
+}
+
+export function materialSubmissionBlockReason(
+  file: ReimbursementDraftFile,
+  items: ReadonlyArray<Pick<ExpenseItem, 'sourceFileId'>>,
+  dismissedOcrFileIds: readonly string[],
+): string {
+  if (file.status === 'RESERVED') return '文件等待上传'
+  if (file.status === 'WRITING') return '文件仍在上传'
+  if (file.status === 'DELETING') return '文件正在删除'
+  if (file.status !== 'ACTIVE') return ''
+  if (file.ocrStatus === 'RUNNING') return '材料仍在识别'
+  if (needsMaterialConfirmation(file)) {
+    return file.materialClassification?.status === 'pending' ? '材料用途仍在识别' : '材料用途待确认'
+  }
+  if (file.role === 'EXPENSE_SOURCE' && file.ocrStatus === 'NOT_REQUESTED') return '票据尚未识别'
+  if (isUnresolvedExpenseSourceFile(file, items, dismissedOcrFileIds)) return '票据尚未加入费用明细'
+  return ''
+}
+
 export function missingExpenseMaterials(
   item: ExpenseItem,
   files: ReimbursementDraftFile[],

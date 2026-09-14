@@ -20,7 +20,15 @@ import type {
   ReimbursementDraftFileRole,
 } from '@/types/reimbursements'
 import { formatFileSize } from '@/utils/receiptFiles'
-import { evidenceRailType, hasKnownNonRailEvidence, isActiveProof, needsMaterialConfirmation, requiresPaymentProof } from '@/utils/expenseProofs'
+import {
+  evidenceRailType,
+  hasKnownNonRailEvidence,
+  isActiveProof,
+  isUnresolvedExpenseSourceFile,
+  materialSubmissionBlockReason,
+  needsMaterialConfirmation,
+  requiresPaymentProof,
+} from '@/utils/expenseProofs'
 import { itineraryConfirmationWarnings, suggestItineraries } from '@/utils/itineraryMatching'
 import { itineraryOptionPresentation } from '@/utils/itineraryPresentation'
 import { centsToMoney, moneyToCents } from '@/utils/money'
@@ -198,6 +206,16 @@ const unlinkedDurableFiles = computed(() => durableFiles.value.filter((file) =>
   && !expense.items.some((item) => item.sourceFileId === file.id || item.itineraryFileIds?.includes(file.id)
     || item.paymentProofFileIds?.includes(file.id) || item.hotelBillFileIds?.includes(file.id)),
 ))
+const blockingUnlinkedDurableFiles = computed(() => unlinkedDurableFiles.value.filter((file) =>
+  Boolean(durableSubmissionBlockReason(file)),
+))
+const optionalUnlinkedDurableFiles = computed(() => unlinkedDurableFiles.value.filter((file) =>
+  !durableSubmissionBlockReason(file),
+))
+const orderedUnlinkedDurableFiles = computed(() => [
+  ...blockingUnlinkedDurableFiles.value,
+  ...optionalUnlinkedDurableFiles.value,
+])
 const itineraryOptions = computed(() => durableFiles.value.filter((file) =>
   isActiveProof(file, 'itinerary'),
 ))
@@ -660,11 +678,18 @@ function canAdoptDurableRecognition(file: ReimbursementDraftFile): boolean {
 }
 
 function isUnresolvedDurableOcrFile(file: ReimbursementDraftFile): boolean {
-  return file.status === 'ACTIVE'
-    && file.role === 'EXPENSE_SOURCE'
-    && ['COMPLETE', 'FAILED'].includes(file.ocrStatus)
-    && !expense.items.some((item) => item.sourceFileId === file.id)
-    && !expense.dismissedOcrFileIds.includes(file.id)
+  return isUnresolvedExpenseSourceFile(file, expense.items, expense.dismissedOcrFileIds)
+}
+
+function durableSubmissionBlockReason(file: ReimbursementDraftFile): string {
+  return materialSubmissionBlockReason(file, expense.items, expense.dismissedOcrFileIds)
+}
+
+function hasDurableFileFailure(file: ReimbursementDraftFile): boolean {
+  return file.status === 'FAILED'
+    || file.ocrStatus === 'FAILED'
+    || file.ocrStale === true
+    || Boolean(durableFileError(file))
 }
 
 function readableWarning(warning: string): string {
@@ -763,10 +788,14 @@ function previewSuggestedItinerary(item: ExpenseItem): void {
   if (file) void previewDurableFile(file)
 }
 
-function focusMaterial(itemId?: string): void {
-  const selector = itemId ? '[data-expense-material-id]' : '[data-material-confirmation]'
+function focusMaterial(itemId?: string, fileId?: string): void {
+  const selector = itemId
+    ? '[data-expense-material-id]'
+    : fileId ? '[data-material-file-id]' : '[data-material-confirmation]'
   const element = [...document.querySelectorAll<HTMLElement>(selector)].find((entry) =>
-    (!itemId || entry.dataset.expenseMaterialId === itemId) && entry.getClientRects().length > 0)
+    (!itemId || entry.dataset.expenseMaterialId === itemId)
+    && (!fileId || entry.dataset.materialFileId === fileId)
+    && entry.getClientRects().length > 0)
   element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   element?.focus({ preventScroll: true })
 }
@@ -1602,18 +1631,35 @@ async function retryItemRecognition(id: string): Promise<void> {
         </p>
       </div>
     </div>
+    <header
+      v-if="unlinkedDurableFiles.length"
+      class="material-workbench__heading"
+      aria-live="polite"
+      aria-label="待处理票据和未关联材料"
+      data-testid="material-workbench"
+    >
+      <div>
+        <strong>待处理材料</strong>
+        <span>{{ unlinkedDurableFiles.length }} 份</span>
+      </div>
+      <p v-if="blockingUnlinkedDurableFiles.length">
+        其中 {{ blockingUnlinkedDurableFiles.length }} 份处理后才能提交 OA；其余材料可按需关联。
+      </p>
+      <p v-else>
+        这些材料尚未关联费用，当前不影响提交 OA。
+      </p>
+    </header>
     <div
       v-if="unlinkedDurableFiles.length"
       class="receipt-list"
       :class="{ 'receipt-list--mobile': props.mobile }"
-      aria-live="polite"
-      aria-label="待处理票据和未关联材料"
     >
       <article
-        v-for="file in unlinkedDurableFiles"
+        v-for="file in orderedUnlinkedDurableFiles"
         :key="file.id"
         class="receipt-row"
         :class="{ 'receipt-row--mobile': props.mobile }"
+        :data-material-file-id="file.id"
         :data-material-confirmation="needsMaterialConfirmation(file) ? file.id : undefined"
         tabindex="-1"
         :aria-label="`${file.name}：${durableStatusLabel(file)}`"
@@ -1667,6 +1713,17 @@ async function retryItemRecognition(id: string): Promise<void> {
             role="alert"
           >
             {{ durableFileError(file) }}
+          </p>
+          <p
+            class="receipt-submit-impact"
+            :class="{
+              'receipt-submit-impact--blocking': durableSubmissionBlockReason(file),
+              'receipt-submit-impact--error': durableSubmissionBlockReason(file) && hasDurableFileFailure(file),
+            }"
+          >
+            {{ durableSubmissionBlockReason(file)
+              ? `提交前必须处理：${durableSubmissionBlockReason(file)}`
+              : '尚未关联（可选处理） · 当前不影响提交 OA' }}
           </p>
         </div>
         <div class="receipt-actions">
@@ -1766,8 +1823,20 @@ async function retryItemRecognition(id: string): Promise<void> {
       description="还没有费用明细"
       :image-size="80"
     />
+    <header
+      v-if="expense.items.length > 0 && (props.mobile || unlinkedDurableFiles.length > 0)"
+      class="expense-items-group__heading"
+      :class="{ 'expense-items-group__heading--desktop': !props.mobile }"
+      data-testid="expense-items-group"
+    >
+      <div>
+        <strong>已计入费用明细</strong>
+        <span>{{ expense.items.length }} 笔</span>
+      </div>
+      <p>以下项目会计入本次报销金额，可继续编辑并补充关联材料。</p>
+    </header>
     <el-table
-      v-else
+      v-if="expense.items.length > 0"
       :data="expense.sortedItems"
       class="expense-table"
       :class="{ 'expense-table--hidden': props.mobile }"
@@ -1983,6 +2052,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       </el-table-column>
     </el-table>
     <div
+      v-if="expense.items.length > 0"
       class="expense-mobile-list"
       :class="{ 'expense-mobile-list--active': props.mobile }"
     >
@@ -2295,6 +2365,11 @@ async function retryItemRecognition(id: string): Promise<void> {
     v-model="editorVisible"
     :title="paymentExpenseContext ? '根据付款凭证录入费用' : editor.id ? '编辑费用明细' : '新增费用明细'"
     width="min(520px, calc(100% - 24px))"
+    :fullscreen="props.mobile"
+    :class="{ 'expense-editor-dialog--mobile': props.mobile }"
+    :header-class="props.mobile ? 'expense-editor-dialog__header--mobile' : ''"
+    :body-class="props.mobile ? 'expense-editor-dialog__body--mobile' : ''"
+    :footer-class="props.mobile ? 'expense-editor-dialog__footer--mobile' : ''"
   >
     <el-form
       class="expense-editor-form"
@@ -2598,7 +2673,65 @@ async function retryItemRecognition(id: string): Promise<void> {
 <style scoped>
 .receipt-upload-button { min-width: 148px; }
 .expense-table.expense-table--hidden { display: none; }
-.expense-mobile-list.expense-mobile-list--active { display: grid; gap: 12px; }
+.material-workbench__heading {
+  margin-top: 18px;
+  padding: 14px 14px 0;
+  border: 1px solid var(--el-color-warning-light-7);
+  border-bottom: 0;
+  border-radius: 14px 14px 0 0;
+  background: var(--el-color-warning-light-9);
+}
+.material-workbench__heading div,
+.expense-items-group__heading div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.material-workbench__heading strong,
+.expense-items-group__heading strong { font-size: 16px; }
+.material-workbench__heading span,
+.expense-items-group__heading span { color: var(--el-text-color-secondary); font-size: 13px; }
+.material-workbench__heading p,
+.expense-items-group__heading p {
+  margin: 6px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.material-workbench__heading + .receipt-list {
+  margin-top: 0;
+  padding: 12px 14px 14px;
+  border-top: 1px solid var(--el-color-warning-light-7);
+  border-right: 1px solid var(--el-color-warning-light-7);
+  border-bottom: 1px solid var(--el-color-warning-light-7);
+  border-left: 1px solid var(--el-color-warning-light-7);
+  border-radius: 0 0 14px 14px;
+  background: var(--el-color-warning-light-9);
+}
+.material-workbench__heading + .receipt-list .receipt-row { background: #fff; }
+.receipt-submit-impact { color: var(--el-text-color-secondary); font-size: 13px; }
+.receipt-submit-impact--blocking { color: var(--el-color-warning-dark-2); }
+.receipt-submit-impact--error { color: var(--el-color-danger); }
+.expense-items-group__heading {
+  margin-top: 20px;
+  padding: 14px 14px 0;
+  border: 1px solid #e4e7ed;
+  border-bottom: 0;
+  border-radius: 14px 14px 0 0;
+  background: #f8fafc;
+}
+.material-workbench__heading + .receipt-list + .expense-items-group__heading { margin-top: 24px; }
+.expense-items-group__heading--desktop { padding-bottom: 14px; }
+.expense-mobile-list.expense-mobile-list--active {
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px 14px;
+  border: 1px solid #e4e7ed;
+  border-top: 0;
+  border-radius: 0 0 14px 14px;
+  background: #f8fafc;
+}
 .expense-mobile-list--active .expense-mobile-card {
   padding: 14px;
   border: 1px solid #e4e7ed;

@@ -19,7 +19,12 @@ import type {
   ReimbursementRelatedApprovalSelection,
   ReimbursementSubmissionStatus,
 } from '@/types/reimbursements'
-import { isActiveProof, missingExpenseMaterials, needsMaterialConfirmation, requiresPaymentProof } from '@/utils/expenseProofs'
+import {
+  isActiveProof,
+  materialSubmissionBlockReason,
+  missingExpenseMaterials,
+  requiresPaymentProof,
+} from '@/utils/expenseProofs'
 import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 import {
   mappedTravelTypeOption,
@@ -116,14 +121,8 @@ const selectedSubsidyTripType = computed<TripType | null>(() => {
   return subsidyTripTypeForProfile(profile, linked?.sourceTravelTypeValue)
     ?? subsidyTripTypeForTravelLabel(selectedTravelTypeLabel.value)
 })
-const selectedTravelPeriod = computed(() => {
-  const periods = groupOverlappingSubsidyTrips(expense.subsidyTrips)
-  if (!periods.length) return ''
-  const labels = periods.map((item) => item.startDate === item.endDate
-    ? item.startDate
-    : `${item.startDate} 至 ${item.endDate}`)
-  return labels.length === 1 ? labels[0]! : `共 ${labels.length} 个时间段：${labels.join('；')}`
-})
+const selectedTravelPeriods = computed(() => groupOverlappingSubsidyTrips(expense.subsidyTrips)
+  .map((item) => ({ startDate: item.startDate, endDate: item.endDate })))
 const trackedSubmission = computed(() => Boolean(drafts.currentDraft
   && submission.activeDraftId === drafts.currentDraft.id
   && (submission.submission || submission.submitting || submission.idempotencyKey)))
@@ -188,24 +187,30 @@ const submissionServiceReason = computed(() => submission.oaSubmissionEnabled ==
   ? (trackedSubmission.value || drafts.currentDraft?.status === 'LOCKED'
       ? 'OA提交服务未开启，请保留本次提交并稍后核对' : 'OA提交服务未开启，可继续填写')
   : submission.oaSubmissionEnabled === null ? '正在确认 OA 提交服务状态' : '')
+const materialSubmissionIssues = computed(() => drafts.files
+  .map((file) => ({
+    file,
+    reason: materialSubmissionBlockReason(file, expense.items, expense.dismissedOcrFileIds),
+    itemId: expense.items.find((item) => item.sourceFileId === file.id
+      || item.itineraryFileIds?.includes(file.id)
+      || item.paymentProofFileIds?.includes(file.id)
+      || item.hotelBillFileIds?.includes(file.id))?.id,
+  }))
+  .filter((issue) => Boolean(issue.reason)))
 const submissionButtonReason = computed(() => formReadOnlyReason.value || submissionServiceReason.value
   || (drafts.busy ? '请等待材料处理完成' : '')
-  || (pendingMaterialFiles.value.length ? `还有 ${pendingMaterialFiles.value.length} 份材料待确认用途` : '')
+  || (materialSubmissionIssues.value.length
+    ? `还有 ${materialSubmissionIssues.value.length} 份材料需处理后才能提交 OA` : '')
   || (missingMaterialItems.value.length ? `还有 ${missingMaterialItems.value.length} 笔费用需补材料` : ''))
 const mobileNextLabel = computed(() => mobileStep.value === mobileSteps.length - 1
   ? '提交 OA'
   : `下一步：${mobileSteps[mobileStep.value + 1]}`)
 const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({ item, missing: missingExpenseMaterials(item, drafts.files) }))
   .filter((entry) => entry.missing.length))
-const pendingMaterialFiles = computed(() => drafts.files.filter(needsMaterialConfirmation))
 const previewDisabledReason = computed(() => expense.itemReadinessError
   || (!budgetCodeValue.value ? '请先选择预算代码' : '')
   || (props.mobile && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
   || (submitFlowPending.value ? '正在提交，请稍候' : ''))
-const unresolvedOcrFiles = computed(() => drafts.files.filter((file) =>
-  file.status === 'ACTIVE' && file.role === 'EXPENSE_SOURCE'
-  && !expense.items.some((item) => item.sourceFileId === file.id)
-  && !expense.dismissedOcrFileIds.includes(file.id)))
 const submissionProgress: ReimbursementSubmissionStatus[] = [
   'QUEUED', 'VALIDATING', 'GENERATING_EXCEL', 'UPLOADING', 'OA_CREATING', 'VERIFYING', 'SUBMITTED',
 ]
@@ -406,8 +411,10 @@ function validateSubmission(): string {
   if (expense.categoryLoadError || !expense.categories.length) return '请先加载费用类别'
   if (!expense.items.length) return '请至少添加一条费用明细'
   if (expense.itemReadinessError) return expense.itemReadinessError
-  if (unresolvedOcrFiles.value.length) return '请处理尚未加入费用明细的票据，或将其仅作为材料保留'
-  if (pendingMaterialFiles.value.length) return '请先确认待处理材料的用途'
+  if (materialSubmissionIssues.value.length) {
+    const issue = materialSubmissionIssues.value[0]!
+    return `请先处理“${issue.file.name}”：${issue.reason}`
+  }
   if (!selectedRelatedApprovals.value.length) return '请至少关联一张已通过的出差审批'
   if (!drafts.files.some((file) => file.status === 'ACTIVE')) return '请上传报销材料'
   for (const item of expense.items) {
@@ -533,12 +540,12 @@ async function advanceMobileStep(): Promise<void> {
   }
   await confirmAndSubmit()
 }
-async function focusMobileMaterial(itemId?: string): Promise<void> {
+async function focusMobileMaterial(itemId?: string, fileId?: string): Promise<void> {
   if (props.mobile) {
     mobileStep.value = 2
     await nextTick()
   }
-  expenseItemsCard.value?.focusMaterial(itemId)
+  expenseItemsCard.value?.focusMaterial(itemId, fileId)
 }
 async function retrySameSubmission(): Promise<void> {
   const draft = drafts.currentDraft
@@ -865,7 +872,30 @@ onBeforeUnmount(() => {
                     {{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}
                   </el-descriptions-item>
                   <el-descriptions-item label="出差日期">
-                    {{ selectedTravelPeriod || '选择出差审批后自动填入' }}
+                    <div
+                      v-if="selectedTravelPeriods.length"
+                      class="travel-periods"
+                      data-testid="travel-periods"
+                    >
+                      <span
+                        v-if="selectedTravelPeriods.length > 1"
+                        class="travel-periods__count"
+                      >共 {{ selectedTravelPeriods.length }} 个时间段</span>
+                      <span
+                        v-for="period in selectedTravelPeriods"
+                        :key="`${period.startDate}-${period.endDate}`"
+                        class="travel-periods__item"
+                      >
+                        <time :datetime="period.startDate">{{ period.startDate }}</time>
+                        <template v-if="period.startDate !== period.endDate">
+                          <span aria-hidden="true">—</span>
+                          <time :datetime="period.endDate">{{ period.endDate }}</time>
+                        </template>
+                      </span>
+                    </div>
+                    <template v-else>
+                      选择出差审批后自动填入
+                    </template>
                   </el-descriptions-item>
                 </el-descriptions>
                 <p class="field-help">
@@ -953,6 +983,46 @@ onBeforeUnmount(() => {
               shadow="never"
               class="content-card submission-card"
             >
+              <div
+                v-if="!formReadOnly && (missingMaterialItems.length || materialSubmissionIssues.length)"
+                class="material-checklist"
+                data-testid="material-checklist"
+                role="status"
+              >
+                <strong v-if="missingMaterialItems.length">还有 {{ missingMaterialItems.length }} 笔费用需补材料</strong>
+                <div
+                  v-for="entry in missingMaterialItems"
+                  :key="entry.item.id"
+                  class="material-checklist-row"
+                >
+                  <span>{{ entry.item.description || '费用明细' }} · ¥{{ entry.item.amount }} · 缺{{ entry.missing.join('、') }}</span>
+                  <el-button
+                    link
+                    type="primary"
+                    @click="focusMobileMaterial(entry.item.id)"
+                  >
+                    去补齐
+                  </el-button>
+                </div>
+                <strong v-if="materialSubmissionIssues.length">
+                  还有 {{ materialSubmissionIssues.length }} 份材料需处理后才能提交 OA
+                </strong>
+                <div
+                  v-for="issue in materialSubmissionIssues"
+                  :key="issue.file.id"
+                  class="material-checklist-row"
+                >
+                  <span>{{ issue.file.name }} · {{ issue.reason }}</span>
+                  <el-button
+                    link
+                    type="primary"
+                    @click="focusMobileMaterial(issue.itemId, issue.itemId ? undefined : issue.file.id)"
+                  >
+                    去处理
+                  </el-button>
+                </div>
+                <p>补齐后可提交 OA；你仍可继续编辑和预览报销单。</p>
+              </div>
               <div class="submission-actions">
                 <div
                   role="status"
@@ -981,42 +1051,6 @@ onBeforeUnmount(() => {
                     提交 OA
                   </el-button>
                 </div>
-              </div>
-              <div
-                v-if="!formReadOnly && (missingMaterialItems.length || pendingMaterialFiles.length)"
-                class="material-checklist"
-                data-testid="material-checklist"
-                role="status"
-              >
-                <strong v-if="missingMaterialItems.length">还有 {{ missingMaterialItems.length }} 笔费用需补材料</strong>
-                <div
-                  v-for="entry in missingMaterialItems"
-                  :key="entry.item.id"
-                  class="material-checklist-row"
-                >
-                  <span>{{ entry.item.description || '费用明细' }} · ¥{{ entry.item.amount }} · 缺{{ entry.missing.join('、') }}</span>
-                  <el-button
-                    link
-                    type="primary"
-                    @click="focusMobileMaterial(entry.item.id)"
-                  >
-                    去补齐
-                  </el-button>
-                </div>
-                <div
-                  v-if="pendingMaterialFiles.length"
-                  class="material-checklist-row"
-                >
-                  <span>{{ pendingMaterialFiles.length }} 份材料待确认用途</span>
-                  <el-button
-                    link
-                    type="primary"
-                    @click="focusMobileMaterial()"
-                  >
-                    去确认
-                  </el-button>
-                </div>
-                <p>补齐后可提交 OA；你仍可继续编辑和预览报销单。</p>
               </div>
               <el-alert
                 v-if="submissionServiceReason"
@@ -1181,12 +1215,32 @@ onBeforeUnmount(() => {
 .derived-accounting-grid { margin-bottom: 12px; }
 .derived-accounting-grid :deep(.el-descriptions__table) { table-layout: fixed; }
 .derived-accounting-grid :deep(.el-descriptions__content) { overflow-wrap: anywhere; }
+.travel-periods { display: grid; justify-items: start; gap: 5px; }
+.travel-periods__count { color: var(--el-text-color-secondary); font-size: 12px; }
+.travel-periods__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  color: var(--el-text-color-primary);
+  white-space: nowrap;
+}
+.travel-periods__item::before {
+  width: 5px;
+  height: 5px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--el-color-primary-light-3);
+  content: '';
+}
 .submission-actions, .submission-status-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .primary-submit-area { text-align: right; }
 .primary-submit-area p { color: var(--el-text-color-secondary); font-size: 13px; }
 .submission-status { margin-top: 20px; }
 .submission-status .el-progress { margin: 16px 0; }
-.material-checklist { margin-top: 16px; padding: 14px 16px; border-radius: 10px; background: #fff8ed; color: #8b5a16; font-size: 13px; }
+.material-checklist { margin-bottom: 16px; padding: 14px 16px; border-radius: 10px; background: #fff8ed; color: #8b5a16; font-size: 13px; }
+.material-checklist > strong { display: block; }
+.material-checklist > strong:not(:first-child) { margin-top: 12px; }
 .material-checklist-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 8px; }
 .material-checklist-row > span { min-width: 0; overflow-wrap: anywhere; }
 .material-checklist-row .el-button { flex-shrink: 0; }

@@ -282,6 +282,28 @@ describe('ExpenseItemsCard durable files', () => {
     expect(wrapper.get('.upload-guidance--mobile').text()).toContain('可一次上传全部报销材料')
     await wrapper.get('.expense-mobile-card .mobile-actions button').trigger('click')
     expect(wrapper.get('.expense-editor-form').classes()).toContain('expense-editor-form--mobile')
+    const editorDialog = wrapper.findAllComponents({ name: 'ElDialog' })
+      .find((dialog) => dialog.props('modelValue'))
+    expect(editorDialog?.props('fullscreen')).toBe(true)
+    expect(wrapper.get('.el-dialog').classes()).toContain('expense-editor-dialog--mobile')
+    wrapper.unmount()
+  })
+
+  it('keeps the desktop table layout when mobile mode is not explicit', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    expense.items = [{ id: 'desktop-item', source: 'manual', category: 'local_transport',
+      date: '2026-09-01', displayDate: '2026-09-01', description: '机场到酒店',
+      amount: '88.00', receiptCount: 1 }]
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+
+    expect(wrapper.get('.expense-table').classes()).not.toContain('expense-table--hidden')
+    expect(wrapper.get('.expense-mobile-list').classes()).not.toContain('expense-mobile-list--active')
+    await wrapper.get('.el-table__row button').trigger('click')
+    const editorDialog = wrapper.findAllComponents({ name: 'ElDialog' })
+      .find((dialog) => dialog.props('modelValue'))
+    expect(editorDialog?.props('fullscreen')).toBe(false)
     wrapper.unmount()
   })
 
@@ -337,6 +359,11 @@ describe('ExpenseItemsCard durable files', () => {
     })
     await flushPromises()
 
+    const workbench = wrapper.get('[data-testid="material-workbench"]')
+    expect(workbench.text()).toContain('待处理材料')
+    expect(workbench.text()).toContain('1 份处理后才能提交 OA')
+    expect(wrapper.text()).toContain('提交前必须处理')
+    expect(wrapper.text()).toContain('尚未关联（可选处理）')
     expect(wrapper.get('.receipt-list').classes()).toContain('receipt-list--mobile')
     const cards = wrapper.findAll('.receipt-row--mobile')
     expect(cards).toHaveLength(2)
@@ -355,6 +382,69 @@ describe('ExpenseItemsCard durable files', () => {
     const hotel = cards[1]!
     expect(hotel.get('.receipt-tags').text()).toContain('住宿明细')
     expect(hotel.get('.receipt-tags').text()).toContain('识别完成')
+    expect(hotel.text()).toContain('当前不影响提交 OA')
+    wrapper.unmount()
+  })
+
+  it('visually separates pending materials from reimbursable expense items on mobile', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'hotel', name: '住宿费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const source = recognizedFile('source-1', '住宿发票.pdf', '480.00')
+    source.ocrResult = { ...source.ocrResult!, categoryId: 'hotel', categoryName: '住宿费' }
+    drafts.files = [
+      serverFile('unlinked-1', '待确认材料.pdf', 'ATTACHMENT_ONLY', {
+        ocrStatus: 'FAILED',
+        materialClassification: {
+          status: 'needs_confirmation', kind: 'unknown', reason: '请确认用途', pageCount: 1,
+        },
+      }),
+      source,
+    ]
+    expense.upsertDraftOcrItem(source)
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const pending = wrapper.get('[data-testid="material-workbench"]')
+    const items = wrapper.get('[data-testid="expense-items-group"]')
+    expect(pending.text()).toContain('待处理材料')
+    expect(items.text()).toContain('已计入费用明细')
+    expect(items.text()).toContain('1 笔')
+    expect(pending.element.compareDocumentPosition(items.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    wrapper.unmount()
+  })
+
+  it('labels the reimbursable table as a separate group on desktop when materials are pending', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'hotel', name: '住宿费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const source = recognizedFile('source-1', '住宿发票.pdf', '480.00')
+    source.ocrResult = { ...source.ocrResult!, categoryId: 'hotel', categoryName: '住宿费' }
+    drafts.files = [
+      serverFile('unlinked-1', '待确认材料.pdf', 'ATTACHMENT_ONLY', {
+        ocrStatus: 'COMPLETE',
+        materialClassification: {
+          status: 'needs_confirmation', kind: 'unknown', reason: '请确认用途', pageCount: 1,
+        },
+      }),
+      source,
+    ]
+    expense.upsertDraftOcrItem(source)
+    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+
+    const pending = wrapper.get('[data-testid="material-workbench"]')
+    const items = wrapper.get('[data-testid="expense-items-group"]')
+    expect(items.text()).toContain('已计入费用明细')
+    expect(items.classes()).toContain('expense-items-group__heading--desktop')
+    expect(pending.element.compareDocumentPosition(items.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(wrapper.get('.receipt-submit-impact').classes()).toContain('receipt-submit-impact--blocking')
+    expect(wrapper.get('.receipt-submit-impact').classes()).not.toContain('receipt-submit-impact--error')
     wrapper.unmount()
   })
 

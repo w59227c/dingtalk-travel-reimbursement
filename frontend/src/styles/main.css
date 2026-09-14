@@ -203,6 +203,40 @@ a {
 }
 .category-load-error .el-alert { flex: 1; }
 .expense-mobile-list { display: none; }
+.expense-editor-dialog--mobile.el-dialog {
+  display: flex;
+  flex-direction: column;
+  max-height: 100vh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+.expense-editor-dialog__header--mobile {
+  flex: none;
+  padding: 16px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.expense-editor-dialog__body--mobile {
+  min-height: 0;
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+}
+.expense-editor-dialog__footer--mobile {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr);
+  gap: 10px;
+  flex: none;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
+  box-shadow: 0 -8px 24px rgb(23 32 51 / 8%);
+}
+.expense-editor-dialog__footer--mobile .el-button {
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+}
 .summary-card { margin-top: 18px; }
 .totals-grid {
   display: grid;
@@ -330,20 +364,6 @@ a {
 
   .trip-grid,
   .totals-grid { grid-template-columns: 1fr; }
-  .expense-table { display: none; }
-  .expense-mobile-list { display: grid; gap: 12px; }
-  .expense-mobile-card {
-    padding: 14px;
-    border: 1px solid #e4e7ed;
-    border-radius: 10px;
-  }
-  .expense-mobile-card > div:first-child {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-  }
-  .expense-mobile-card p { margin: 8px 0 0; color: #667085; line-height: 1.45; }
-  .mobile-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
   .category-load-error { align-items: stretch; flex-direction: column; }
   .receipt-row { align-items: stretch; flex-direction: column; }
   .receipt-actions { justify-content: flex-start; }

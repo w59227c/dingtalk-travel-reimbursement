@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { missingExpenseMaterials, requiresPaymentProof } from './expenseProofs'
+import {
+  materialSubmissionBlockReason,
+  missingExpenseMaterials,
+  requiresPaymentProof,
+} from './expenseProofs'
 import type { ExpenseItem } from '@/types/expenses'
 import type { ReimbursementDraftFile } from '@/types/reimbursements'
 
@@ -33,5 +37,40 @@ describe('hotel stay details', () => {
     const manual = { ...bill, ocrStatus: 'FAILED', materialClassification: { status: 'confirmed' } } as ReimbursementDraftFile
     expect(missingExpenseMaterials(expense('20.00'), [manual])).toEqual([])
     expect(missingExpenseMaterials(expense('40.00'), [manual])).toEqual([])
+  })
+})
+
+describe('material submission readiness', () => {
+  const file = (overrides: Partial<ReimbursementDraftFile> = {}) => ({
+    id: 'file-1',
+    name: '材料.pdf',
+    role: 'ATTACHMENT_ONLY',
+    attachmentKind: 'other',
+    sortOrder: 0,
+    status: 'ACTIVE',
+    mediaType: 'application/pdf',
+    sizeBytes: 128,
+    ocrStatus: 'COMPLETE',
+    ocrResult: null,
+    ...overrides,
+  }) as ReimbursementDraftFile
+
+  it.each([
+    [{ status: 'WRITING' }, '文件仍在上传'],
+    [{ ocrStatus: 'RUNNING' }, '材料仍在识别'],
+    [{ materialClassification: {
+      status: 'needs_confirmation', kind: 'unknown', reason: null, pageCount: 1,
+    } }, '材料用途待确认'],
+    [{ role: 'EXPENSE_SOURCE', ocrStatus: 'NOT_REQUESTED' }, '票据尚未识别'],
+    [{ role: 'EXPENSE_SOURCE', ocrStatus: 'FAILED' }, '票据尚未加入费用明细'],
+  ] as const)('identifies a blocking file: %o', (overrides, reason) => {
+    expect(materialSubmissionBlockReason(file(overrides), [], [])).toBe(reason)
+  })
+
+  it('does not block confirmed optional materials or disposed expense sources', () => {
+    expect(materialSubmissionBlockReason(file(), [], [])).toBe('')
+    const source = file({ role: 'EXPENSE_SOURCE', ocrStatus: 'COMPLETE' })
+    expect(materialSubmissionBlockReason(source, [{ sourceFileId: source.id }], [])).toBe('')
+    expect(materialSubmissionBlockReason(source, [], [source.id])).toBe('')
   })
 })

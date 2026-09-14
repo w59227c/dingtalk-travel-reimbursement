@@ -621,7 +621,8 @@ describe('ReimburseView single-form OA flow', () => {
     drafts.files.push({ ...activeFile, id: 'unknown-1', role: 'ATTACHMENT_ONLY', attachmentKind: 'other',
       materialClassification: { status: 'needs_confirmation', kind: 'unknown', reason: '请确认用途', pageCount: 1 } })
     await nextTick()
-    expect(wrapper.get('[data-testid="material-checklist"]').text()).toContain('1 份材料待确认用途')
+    expect(wrapper.get('[data-testid="material-checklist"]').text()).toContain('1 份材料需处理后才能提交 OA')
+    expect(wrapper.get('[data-testid="material-checklist"]').text()).toContain('材料用途待确认')
     expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeDefined()
     expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
     expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toBe('')
@@ -629,6 +630,24 @@ describe('ReimburseView single-form OA flow', () => {
     drafts.files[1]!.materialClassification!.status = 'confirmed'
     await nextTick()
     expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('disables submission and lists a terminal OCR source that has no disposition', async () => {
+    const { wrapper, drafts } = await mountView()
+    drafts.files.push({
+      ...activeFile,
+      id: 'unresolved-1',
+      name: '待处理票据.pdf',
+      ocrStatus: 'FAILED',
+    })
+    await nextTick()
+
+    const checklist = wrapper.get('[data-testid="material-checklist"]')
+    expect(checklist.text()).toContain('1 份材料需处理后才能提交 OA')
+    expect(checklist.text()).toContain('待处理票据.pdf')
+    expect(checklist.text()).toContain('票据尚未加入费用明细')
+    expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 
@@ -982,6 +1001,28 @@ describe('ReimburseView single-form OA flow', () => {
     await visibleButton(wrapper, '提交 OA').trigger('click')
     await flushPromises()
     expect(confirm).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+
+  it('renders multiple travel periods as separate non-breaking rows', async () => {
+    const { wrapper, expense } = await mountView()
+    expense.subsidyTrips = [
+      {
+        relatedApprovalId: 'travel-instance-1', tripType: 'business',
+        startDate: '2026-06-30', startTime: '09:00', endDate: '2026-07-03', endTime: '18:00',
+      },
+      {
+        relatedApprovalId: 'travel-instance-2', tripType: 'business',
+        startDate: '2026-07-04', startTime: '09:00', endDate: '2026-07-07', endTime: '18:00',
+      },
+    ]
+    await nextTick()
+
+    const periods = wrapper.get('[data-testid="travel-periods"]')
+    expect(periods.text()).toContain('共 2 个时间段')
+    expect(periods.findAll('.travel-periods__item')).toHaveLength(2)
+    expect(periods.findAll('.travel-periods__item')[0]?.text()).toBe('2026-06-30—2026-07-03')
+    expect(periods.findAll('.travel-periods__item')[1]?.text()).toBe('2026-07-04—2026-07-07')
     wrapper.unmount()
   })
 
