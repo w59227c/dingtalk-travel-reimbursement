@@ -1,12 +1,171 @@
 from __future__ import annotations
 
+import io
+import json
+import logging
+
 import httpx
 import pytest
 
+from app.core.logging import JsonFormatter
+from app.core.request_id import bind_request_id, reset_request_id
 from app.integrations.dingtalk.client import (
     DingTalkOpenAPIClient,
     DingTalkOpenAPIError,
 )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "expected_operation"),
+    [
+        (
+            "POST",
+            "/v1.0/workflow/processes/instanceIds/query",
+            "workflow_instance_list",
+        ),
+        ("GET", "/v1.0/workflow/processInstances", "workflow_instance_read"),
+    ],
+)
+async def test_openapi_permission_failure_logs_only_sanitized_diagnostics(
+    settings_factory,
+    method: str,
+    path: str,
+    expected_operation: str,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"access_token": "private-token"})
+        return httpx.Response(
+            403,
+            json={
+                "code": "Forbidden.AccessDenied.PermissionDenied",
+                "message": "private upstream diagnostic for employee-1",
+                "requestId": "private-upstream-request-id",
+            },
+        )
+
+    log_output = io.StringIO()
+    log_handler = logging.StreamHandler(log_output)
+    log_handler.setFormatter(JsonFormatter())
+    client_logger = logging.getLogger("app.integrations.dingtalk.client")
+    client_logger.addHandler(log_handler)
+    request_id_token = bind_request_id("local-request-123")
+    client = DingTalkOpenAPIClient(
+        settings_factory(),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(DingTalkOpenAPIError):
+            await client.request_openapi_json(method, path)
+    finally:
+        await client.close()
+        reset_request_id(request_id_token)
+        client_logger.removeHandler(log_handler)
+        log_handler.close()
+
+    log_body = json.loads(log_output.getvalue())
+    assert log_body == {
+        "timestamp": log_body["timestamp"],
+        "level": "WARNING",
+        "logger": "app.integrations.dingtalk.client",
+        "message": "DingTalk OpenAPI request failed",
+        "requestId": "local-request-123",
+        "errorCode": "DINGTALK_PERMISSION_MISSING",
+        "upstream": "dingtalk",
+        "upstreamApi": "openapi",
+        "upstreamOperation": expected_operation,
+        "upstreamHttpStatus": 403,
+        "upstreamErrorCode": "Forbidden.AccessDenied.PermissionDenied",
+    }
+    assert "private-token" not in log_output.getvalue()
+    assert "private upstream diagnostic" not in log_output.getvalue()
+    assert "employee-1" not in log_output.getvalue()
+    assert "private-upstream-request-id" not in log_output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_openapi_permission_code_in_success_response_is_logged(
+    settings_factory,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"access_token": "private-token"})
+        return httpx.Response(
+            200,
+            json={
+                "code": "Forbidden.AccessDenied.AccessTokenPermissionDenied",
+                "message": "private upstream diagnostic",
+            },
+        )
+
+    log_output = io.StringIO()
+    log_handler = logging.StreamHandler(log_output)
+    log_handler.setFormatter(JsonFormatter())
+    client_logger = logging.getLogger("app.integrations.dingtalk.client")
+    client_logger.addHandler(log_handler)
+    client = DingTalkOpenAPIClient(
+        settings_factory(),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(DingTalkOpenAPIError):
+            await client.request_openapi_json(
+                "POST",
+                "/v1.0/workflow/processes/instanceIds/query",
+            )
+    finally:
+        await client.close()
+        client_logger.removeHandler(log_handler)
+        log_handler.close()
+
+    log_body = json.loads(log_output.getvalue())
+    assert log_body["upstreamHttpStatus"] == 200
+    assert log_body["upstreamErrorCode"] == "Forbidden.AccessDenied.AccessTokenPermissionDenied"
+    assert log_body["upstreamOperation"] == "workflow_instance_list"
+    assert "private upstream diagnostic" not in log_output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_recovered_invalid_token_does_not_log_an_upstream_failure(
+    settings_factory,
+) -> None:
+    calls = {"token": 0, "query": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            calls["token"] += 1
+            return httpx.Response(
+                200,
+                json={"access_token": f"private-token-{calls['token']}"},
+            )
+        calls["query"] += 1
+        if calls["query"] == 1:
+            return httpx.Response(401, json={"code": "InvalidAuthentication"})
+        return httpx.Response(200, json={"success": True})
+
+    log_output = io.StringIO()
+    log_handler = logging.StreamHandler(log_output)
+    log_handler.setFormatter(JsonFormatter())
+    client_logger = logging.getLogger("app.integrations.dingtalk.client")
+    client_logger.addHandler(log_handler)
+    client = DingTalkOpenAPIClient(
+        settings_factory(),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await client.request_openapi_json(
+            "POST",
+            "/v1.0/workflow/processes/instanceIds/query",
+        )
+    finally:
+        await client.close()
+        client_logger.removeHandler(log_handler)
+        log_handler.close()
+
+    assert result == {"success": True}
+    assert calls == {"token": 2, "query": 2}
+    assert log_output.getvalue() == ""
 
 
 @pytest.mark.asyncio

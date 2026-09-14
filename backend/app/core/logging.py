@@ -25,6 +25,16 @@ class JsonFormatter(logging.Formatter):
                 payload[key] = getattr(record, key)
         if hasattr(record, "exception_type"):
             payload["exceptionType"] = record.exception_type
+        for attribute, field_name in (
+            ("error_code", "errorCode"),
+            ("upstream", "upstream"),
+            ("upstream_api", "upstreamApi"),
+            ("upstream_operation", "upstreamOperation"),
+            ("upstream_http_status", "upstreamHttpStatus"),
+            ("upstream_error_code", "upstreamErrorCode"),
+        ):
+            if hasattr(record, attribute):
+                payload[field_name] = getattr(record, attribute)
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from time import monotonic
 from typing import Any
@@ -20,6 +21,25 @@ _OPENAPI_PERMISSION_CODES = frozenset(
         "noPermission",
     }
 )
+_OPENAPI_OPERATIONS = {
+    ("GET", "/v1.0/workflow/forms/schemas/processCodes"): "workflow_form_schema_read",
+    (
+        "POST",
+        "/v1.0/workflow/processes/instanceIds/query",
+    ): "workflow_instance_list",
+    ("GET", "/v1.0/workflow/processInstances"): "workflow_instance_read",
+    ("POST", "/v1.0/workflow/processInstances"): "workflow_instance_create",
+    (
+        "POST",
+        "/v1.0/workflow/processInstances/spaces/infos/query",
+    ): "workflow_approval_space_read",
+}
+_STORAGE_UPLOAD_INFO_PATH = re.compile(r"/v1\.0/storage/spaces/[^/]+/files/uploadInfos/query")
+_STORAGE_COMMIT_PATH = re.compile(r"/v1\.0/storage/spaces/[^/]+/files/commit")
+_STORAGE_DENTRY_QUERY_PATH = re.compile(r"/v1\.0/storage/spaces/[^/]+/dentries/[^/]+/query")
+_STORAGE_DENTRY_PATH = re.compile(r"/v1\.0/storage/spaces/[^/]+/dentries/[^/]+")
+
+logger = logging.getLogger(__name__)
 
 
 class DingTalkOpenAPIError(ApiError):
@@ -117,20 +137,25 @@ class DingTalkOpenAPIClient:
                     if retry_invalid_token and token_attempt == 0:
                         continue
                 if error.http_status == 403:
-                    raise DingTalkOpenAPIError._permission_denied(
+                    error = DingTalkOpenAPIError._permission_denied(
                         http_status=error.http_status,
                         upstream_code=error.upstream_code,
                     )
+                _log_openapi_failure(method, path, error)
                 raise error
 
             upstream_code = _sanitized_upstream_code(_payload_code(payload))
             if _is_permission_code(upstream_code):
-                raise DingTalkOpenAPIError._permission_denied(
+                error = DingTalkOpenAPIError._permission_denied(
                     http_status=200,
                     upstream_code=upstream_code,
                 )
+                _log_openapi_failure(method, path, error)
+                raise error
             return payload
-        raise DingTalkOpenAPIError(http_status=401)
+        error = DingTalkOpenAPIError(http_status=401)
+        _log_openapi_failure(method, path, error)
+        raise error
 
     async def request_oapi_json(
         self,
@@ -311,6 +336,40 @@ def _validate_path(path: str) -> None:
 
 def _is_permission_code(code: str | None) -> bool:
     return bool(code and (code in _OPENAPI_PERMISSION_CODES or "PermissionDenied" in code))
+
+
+def _log_openapi_failure(
+    method: str,
+    path: str,
+    error: DingTalkOpenAPIError,
+) -> None:
+    logger.warning(
+        "DingTalk OpenAPI request failed",
+        extra={
+            "error_code": error.code,
+            "upstream": "dingtalk",
+            "upstream_api": "openapi",
+            "upstream_operation": _openapi_operation(method, path),
+            "upstream_http_status": error.http_status,
+            "upstream_error_code": error.upstream_code,
+        },
+    )
+
+
+def _openapi_operation(method: str, path: str) -> str:
+    normalized_method = method.upper()
+    exact = _OPENAPI_OPERATIONS.get((normalized_method, path))
+    if exact is not None:
+        return exact
+    if normalized_method == "POST" and _STORAGE_UPLOAD_INFO_PATH.fullmatch(path):
+        return "storage_upload_info_read"
+    if normalized_method == "POST" and _STORAGE_COMMIT_PATH.fullmatch(path):
+        return "storage_file_commit"
+    if normalized_method == "POST" and _STORAGE_DENTRY_QUERY_PATH.fullmatch(path):
+        return "storage_file_probe"
+    if normalized_method == "DELETE" and _STORAGE_DENTRY_PATH.fullmatch(path):
+        return "storage_file_recycle"
+    return "openapi_request"
 
 
 def _sanitized_upstream_code(value: object) -> str | None:
