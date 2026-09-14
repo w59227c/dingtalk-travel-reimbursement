@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
+import ClientPdfPreview from './ClientPdfPreview.vue'
 import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
 import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
 
@@ -123,6 +124,7 @@ let durableUnmounted = false
 let activeDurableOperation: DurableOperationScope | null = null
 const receiptPreviewVisible = ref(false)
 const receiptPreviewUrl = ref('')
+const receiptPreviewBlob = shallowRef<Blob | null>(null)
 const receiptPreviewName = ref('')
 const receiptPreviewKind = ref<'image' | 'pdf'>('image')
 const receiptPreviewMode = ref<'direct' | 'compatible'>('direct')
@@ -833,6 +835,7 @@ function releaseReceiptPreview(): void {
   if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl)
   receiptPreviewObjectUrl = ''
   receiptPreviewUrl.value = ''
+  receiptPreviewBlob.value = null
   receiptPreviewMode.value = 'direct'
   receiptPreviewFileId.value = ''
   receiptPreviewPage.value = 1
@@ -879,7 +882,8 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
     ) return
     receiptPreviewPage.value = preview.pageNumber
     receiptPreviewPageCount.value = preview.pageCount
-    replaceReceiptPreviewUrl(preview.blob)
+    if (isPdf && props.mobile) receiptPreviewBlob.value = preview.blob
+    else replaceReceiptPreviewUrl(preview.blob)
     receiptPreviewVisible.value = true
   } catch (error) {
     if (!controller.signal.aborted) ElMessage.error(apiErrorMessage(error, '材料预览失败，请重试'))
@@ -950,6 +954,7 @@ async function useCompatiblePdfPreview(): Promise<void> {
   previewLoading.value = false
   if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl)
   receiptPreviewObjectUrl = ''
+  receiptPreviewBlob.value = null
   receiptPreviewMode.value = 'compatible'
   receiptPreviewUrl.value = ''
   await loadCompatiblePdfPage(1)
@@ -1973,12 +1978,13 @@ async function retryItemRecognition(id: string): Promise<void> {
     <el-table
       v-if="expense.items.length > 0"
       :data="expense.sortedItems"
+      table-layout="fixed"
       class="expense-table"
       :class="{ 'expense-table--hidden': props.mobile }"
     >
       <el-table-column
         label="类型"
-        min-width="160"
+        :width="120"
       >
         <template #default="scope">
           <div class="expense-category-cell">
@@ -2008,7 +2014,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       </el-table-column>
       <el-table-column
         label="日期"
-        min-width="120"
+        :width="105"
       >
         <template #default="scope">
           {{ scope.row.displayDate || '待补充' }}
@@ -2017,7 +2023,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       <el-table-column
         prop="description"
         label="说明"
-        min-width="360"
+        :min-width="200"
       >
         <template #default="scope">
           <div
@@ -2143,7 +2149,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       </el-table-column>
       <el-table-column
         label="金额 / 张数"
-        width="160"
+        :width="120"
         align="right"
       >
         <template #default="scope">
@@ -2172,7 +2178,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       </el-table-column>
       <el-table-column
         label="操作"
-        width="170"
+        :width="145"
       >
         <template #default="scope">
           <div class="expense-desktop-actions">
@@ -2459,10 +2465,19 @@ async function retryItemRecognition(id: string): Promise<void> {
       <iframe
         v-else-if="receiptPreviewKind === 'pdf'
           && receiptPreviewMode === 'direct'
+          && !props.mobile
           && receiptPreviewUrl"
         :src="receiptPreviewUrl"
         :title="`${receiptPreviewName} 快速预览`"
         @error="useCompatiblePdfPreview"
+      />
+      <ClientPdfPreview
+        v-else-if="receiptPreviewKind === 'pdf'
+          && receiptPreviewMode === 'direct'
+          && props.mobile
+          && receiptPreviewBlob"
+        :source="receiptPreviewBlob"
+        @failed="useCompatiblePdfPreview"
       />
     </div>
     <nav
@@ -2914,8 +2929,17 @@ async function retryItemRecognition(id: string): Promise<void> {
 <style scoped>
 .receipt-upload-button { min-width: 148px; }
 .expense-table.expense-table--hidden { display: none; }
-.expense-table { margin-top: 12px; }
+.expense-table {
+  width: 100%;
+  max-width: 100%;
+  margin-top: 12px;
+}
 .expense-table :deep(.el-table__cell) { vertical-align: top; }
+.expense-table :deep(.cell) {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .expense-summary-cell {
   display: grid;
   justify-items: end;

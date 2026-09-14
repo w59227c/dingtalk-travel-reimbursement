@@ -8,6 +8,8 @@ for required in \
     "server_tokens off" \
     "Content-Security-Policy" \
     "frame-src 'self' blob:" \
+    "worker-src 'self' blob:" \
+    "application/javascript mjs" \
     "X-Content-Type-Options" \
     "Cache-Control" \
     "client_body_temp_path /var/cache/nginx/client_temp" \

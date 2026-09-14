@@ -2461,7 +2461,7 @@ describe('ExpenseItemsCard durable files', () => {
     expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview-page-2')
   })
 
-  it('renders mobile PDFs inside the reimbursement page without downloading them', async () => {
+  it('renders mobile PDFs with the in-page client renderer without opening a PDF iframe', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
     const drafts = useReimbursementDraftStore()
@@ -2471,7 +2471,7 @@ describe('ExpenseItemsCard durable files', () => {
     expense.upsertDraftOcrItem(source)
     const directPdf = new Blob(['pdf'], { type: 'application/pdf' })
     vi.mocked(getReimbursementFileContent).mockResolvedValue(directPdf)
-    const createUrl = vi.fn().mockReturnValue('blob:mobile-pdf')
+    const createUrl = vi.fn()
     const revokeUrl = vi.fn()
     vi.stubGlobal('URL', class extends URL {
       static createObjectURL = createUrl
@@ -2479,7 +2479,72 @@ describe('ExpenseItemsCard durable files', () => {
     })
     const wrapper = mount(ExpenseItemsCard, {
       props: { mobile: true },
-      global: { plugins: [pinia, ElementPlus] },
+      global: {
+        plugins: [pinia, ElementPlus],
+        stubs: {
+          ClientPdfPreview: {
+            props: ['source'],
+            template: '<div data-testid="client-pdf-preview" />',
+          },
+        },
+      },
+    })
+    await flushPromises()
+
+    const preview = wrapper.findAll('.expense-mobile-card button').find((button) =>
+      button.text().includes('发票.pdf · 预览'),
+    )!
+    await preview.trigger('click')
+    expect(wrapper.text()).toContain('票据预览：发票.pdf')
+    expect(getReimbursementFileContent).toHaveBeenCalledWith(
+      'draft-1',
+      'file-1',
+      { signal: expect.any(AbortSignal) },
+    )
+    await flushPromises()
+    expect(wrapper.find('[data-testid="client-pdf-preview"]').exists()).toBe(true)
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    expect(getReimbursementPdfPreviewPage).not.toHaveBeenCalled()
+    expect(createUrl).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('无法显示？使用兼容预览')
+    expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
+    wrapper.unmount()
+    expect(revokeUrl).not.toHaveBeenCalled()
+  })
+
+  it('automatically switches a failed mobile client render to the compatible page preview', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const source = recognizedFile('file-1', '发票.pdf', '10.00')
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+    vi.mocked(getReimbursementFileContent).mockResolvedValue(
+      new Blob(['pdf'], { type: 'application/pdf' }),
+    )
+    const compatiblePage = new Blob(['page'], { type: 'image/png' })
+    vi.mocked(getReimbursementPdfPreviewPage).mockResolvedValue({
+      blob: compatiblePage,
+      pageNumber: 1,
+      pageCount: 1,
+    })
+    const createUrl = vi.fn().mockReturnValue('blob:compatible-mobile-page')
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createUrl
+      static revokeObjectURL = vi.fn()
+    })
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: {
+        plugins: [pinia, ElementPlus],
+        stubs: {
+          ClientPdfPreview: {
+            emits: ['failed'],
+            template: '<button data-testid="client-pdf-preview" @click="$emit(\'failed\', \'unsupported\')" />',
+          },
+        },
+      },
     })
     await flushPromises()
 
@@ -2488,18 +2553,20 @@ describe('ExpenseItemsCard durable files', () => {
     )!
     await preview.trigger('click')
     await flushPromises()
-    expect(getReimbursementFileContent).toHaveBeenCalledWith(
+    await wrapper.get('[data-testid="client-pdf-preview"]').trigger('click')
+    await flushPromises()
+
+    expect(getReimbursementPdfPreviewPage).toHaveBeenCalledWith(
       'draft-1',
       'file-1',
+      1,
       { signal: expect.any(AbortSignal) },
     )
-    expect(createUrl).toHaveBeenCalledWith(directPdf)
-    expect(wrapper.get('iframe').attributes('src')).toBe('blob:mobile-pdf')
-    expect(wrapper.text()).toContain('无法显示？使用兼容预览')
-    expect(getReimbursementPdfPreviewPage).not.toHaveBeenCalled()
-    expect(wrapper.text()).not.toContain('在新标签页打开 PDF')
+    expect(wrapper.get('[data-testid="receipt-preview-page"]').attributes('src')).toBe(
+      'blob:compatible-mobile-page',
+    )
+    expect(wrapper.find('iframe').exists()).toBe(false)
     wrapper.unmount()
-    expect(revokeUrl).toHaveBeenCalledWith('blob:mobile-pdf')
   })
 
   it('retries one transient compatible PDF render failure without leaving a blank preview', async () => {
@@ -2643,6 +2710,13 @@ describe('ExpenseItemsCard durable files', () => {
     const operationColumn = wrapper.findAllComponents({ name: 'ElTableColumn' })
       .find((column) => column.props('label') === '操作')
     expect(operationColumn?.props('fixed')).toBe(false)
+    expect(operationColumn?.props('width')).toBe(145)
+    const columns = wrapper.findAllComponents({ name: 'ElTableColumn' })
+    expect(columns.find((column) => column.props('label') === '类型')?.props('width')).toBe(120)
+    expect(columns.find((column) => column.props('label') === '日期')?.props('width')).toBe(105)
+    expect(columns.find((column) => column.props('label') === '说明')?.props('minWidth')).toBe(200)
+    expect(columns.find((column) => column.props('label') === '金额 / 张数')?.props('width')).toBe(120)
+    expect(wrapper.getComponent({ name: 'ElTable' }).props('tableLayout')).toBe('fixed')
     expect(row.get('.expense-desktop-actions').text()).not.toContain('重新识别')
     expect(row.get('.expense-item-card__description').text()).toContain('打车发票.pdf 的行程')
     const materials = row.get('.expense-item-card__materials--desktop')

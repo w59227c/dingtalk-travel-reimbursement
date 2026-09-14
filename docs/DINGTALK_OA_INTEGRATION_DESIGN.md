@@ -165,7 +165,7 @@ H5 负责员工看得见的交互：
 - 展示行程单金额、日期、次数、路线和关联状态，默认选择一个文件，按需补充；交通类型不明确时由员工确认保守推荐；
 - 在缺住宿明细或付款凭证的费用下提供上传及已上传材料复用入口，底部列出材料待办并定位；展示国外票据原币信息并要求确认人民币报销金额；
 - 查询并选择本人已通过的出差审批；
-- 通过当前已鉴权页面读取已上传图片或 PDF 并生成临时 Blob 地址；预览弹窗立即打开，文件加载完成后在弹窗中内嵌显示，当前浏览器或钉钉 WebView 无法显示 PDF Blob 时切换为服务器按需渲染当前页的兼容预览；下载当前内容的 Excel 预览；
+- 通过当前已鉴权页面读取已上传图片或 PDF Blob；预览弹窗立即打开，桌面 PDF 使用浏览器内嵌能力，移动 PDF 由客户端 PDF.js 在 Canvas 中逐页绘制，客户端不支持或渲染失败时自动切换为服务器按需渲染当前页的兼容预览；下载当前内容的 Excel 预览；
 - 在正式提交前给出不可撤销提示；
 - 展示后台进度、最终 OA 编号和打开入口。
 
@@ -330,7 +330,7 @@ DRAFT / REVIEW_READY --超过 expiresAt--> EXPIRED
 
 费用来源、已关联证明及未关联材料都提供“修改用途”。同值确认只确认用途，不额外启动 OCR，也不覆盖人工费用字段。来源发票实际改成证明材料时，先明确提示“保留原文件、移除对应费用”，员工确认后才修改角色并清理失效引用；修改用途不等于删除原文件。
 
-数据库保存大小和 SHA-256。后续预览、OCR、生成快照和汇总材料每次都按这两个值重新核对文件，避免磁盘内容被替换。图片和 PDF 预览通过 `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/content` 由当前已鉴权页面取得原件，再创建临时 Blob URL 内嵌显示；不把受保护的原件 URL 直接交给 PDF 查看器，避免钉钉 WebView 转交外部浏览器后丢失登录态。若当前 PDF 查看器显示为空，员工可在原弹窗内切换 `/preview/pages/{pageNumber}` 兼容通道，按需生成当前页 PNG。两个接口都校验企业、员工、部门、文件状态和有效期并禁止缓存。兼容渲染复用单槽有界文件校验进程，限制为最多 30 页、当前页最多 250 万像素和 2200 像素边长；对偶发进程资源失败自动重试一次，翻页时替换 Blob，关闭预览时释放对象 URL。
+数据库保存大小和 SHA-256。后续预览、OCR、生成快照和汇总材料每次都按这两个值重新核对文件，避免磁盘内容被替换。图片和 PDF 预览通过 `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/content` 由当前已鉴权页面取得原件；不把受保护的原件 URL 直接交给 PDF 查看器，避免钉钉 WebView 转交外部浏览器后丢失登录态。桌面端为 PDF 创建临时 Blob URL 并使用浏览器内嵌能力；移动端不创建 PDF iframe，而是按需加载经过安全锁定的 PDF.js 构建，将原件数据限制为不可执行脚本后在 Canvas 中逐页绘制，单页画布同样限制为最多 250 万像素和 2200 像素边长。移动客户端缺少必要运行时能力或加载、绘制失败时自动切换 `/preview/pages/{pageNumber}` 兼容通道，员工也可手动切换，服务器按需生成当前页 PNG。两个接口都校验企业、员工、部门、文件状态和有效期并禁止缓存。兼容渲染复用单槽有界文件校验进程，对偶发进程资源失败自动重试一次；翻页或切换模式时替换 Blob，关闭预览时释放对象 URL，并销毁客户端 PDF 文档与渲染任务。
 
 分类元数据复用 `ocr_result_json._materialClassification` 持久化，对外以独立 `materialClassification` 字段返回。删除、改角色或改用途复用 revision/锁定保护，并原子清理失效的来源、行程单、住宿明细和付款凭证引用；只改文件名不确认用途。
 
@@ -593,7 +593,7 @@ Workflow 适配代码见 [workflow.py](../backend/app/integrations/dingtalk/work
 | `PUT /api/reimbursements/drafts/{draftId}/related-approvals` | 远端复核并原子替换关联审批 |
 | `POST /api/reimbursements/drafts/{draftId}/review` | 检查完整性并标记 `REVIEW_READY` |
 | `GET /api/reimbursements/drafts/{draftId}/files` | 读取持久附件清单 |
-| `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/content` | 鉴权后返回图片/PDF 原件；校验归属、有效期和文件哈希，双端在当前页面取回内容并创建临时 Blob URL 预览 |
+| `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/content` | 鉴权后返回图片/PDF 原件；校验归属、有效期和文件哈希，当前页面取回内容后供桌面 Blob 内嵌或移动 Canvas 预览 |
 | `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/preview/pages/{pageNumber}` | PDF 快速预览无法显示时，对校验后的 PDF 按需生成一页受限尺寸 PNG，供桌面和移动端兼容翻页预览 |
 | `POST /api/reimbursements/drafts/{draftId}/files?expectedRevision=&role=&attachmentKind=&autoClassify=` | 上传一份持久原始文件；统一入口用 `ATTACHMENT_ONLY/other/true`，明确付款凭证用 `ATTACHMENT_ONLY/payment_proof/false` |
 | `PATCH /api/reimbursements/drafts/{draftId}/files/{fileId}` | 按 revision 修改文件名、角色或 `attachmentKind`；显式传角色/用途（含同值）即人工确认，改为费用来源须通过单页检查 |
