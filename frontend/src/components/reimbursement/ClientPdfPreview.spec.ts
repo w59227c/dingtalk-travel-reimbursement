@@ -80,6 +80,30 @@ describe('ClientPdfPreview', () => {
     wrapper.unmount()
   })
 
+  it('renders at the real mobile pixel ratio so fitted PDF text stays sharp', async () => {
+    vi.spyOn(window, 'devicePixelRatio', 'get').mockReturnValue(3)
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(342)
+    getPage.mockResolvedValueOnce({
+      getViewport: ({ scale }: { scale: number }) => ({
+        width: 595 * scale,
+        height: 842 * scale,
+      }),
+      render,
+    })
+    const wrapper = mount(ClientPdfPreview, {
+      props: { source: new Blob(['pdf'], { type: 'application/pdf' }) },
+      global: { plugins: [ElementPlus] },
+    })
+
+    await vi.waitFor(() => expect(render).toHaveBeenCalledOnce())
+
+    const canvas = wrapper.get('canvas').element as HTMLCanvasElement
+    expect(canvas.style.width).toBe('318px')
+    expect(canvas.width).toBe(954)
+    expect(canvas.height).toBe(1351)
+    wrapper.unmount()
+  })
+
   it('hands unsupported client rendering to the compatible preview exactly once', async () => {
     pdfMocks.getDocument.mockReturnValue({
       promise: Promise.reject(new Error('unsupported runtime')),

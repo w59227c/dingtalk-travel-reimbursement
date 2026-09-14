@@ -68,7 +68,10 @@ async function releaseDocument(): Promise<void> {
 }
 
 function boundedScale(viewport: PdfViewport, cssScale: number): number {
-  const pixelRatio = Math.min(window.devicePixelRatio || 1, 1.5)
+  const devicePixelRatio = window.devicePixelRatio
+  const pixelRatio = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+    ? Math.max(devicePixelRatio, 1)
+    : 1
   const requested = cssScale * pixelRatio
   const maxEdgeScale = Math.min(2200 / viewport.width, 2200 / viewport.height)
   const maxPixelScale = Math.sqrt(2_500_000 / (viewport.width * viewport.height))
