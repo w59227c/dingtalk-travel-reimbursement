@@ -102,7 +102,7 @@ async function loadDocument(): Promise<void> {
     pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
     const data = new Uint8Array(await props.source.arrayBuffer())
     if (generation !== loadGeneration) return
-    const task = pdfjs.getDocument({ data }) as unknown as LoadingTask
+    const task = pdfjs.getDocument({ data, isEvalSupported: false }) as unknown as LoadingTask
     loadingTask = task
     const document = await task.promise
     if (generation !== loadGeneration) return

@@ -664,11 +664,17 @@ function durableOcrSummary(file: ReimbursementDraftFile): string {
 }
 
 function canRetryDurableRecognition(file: ReimbursementDraftFile | undefined): boolean {
+  const result = file?.ocrResult
+  const hasUsableCompletedResult = Boolean(file?.ocrStatus === 'COMPLETE'
+    && file.ocrStale !== true
+    && result?.status === 'recognized'
+    && (!isItineraryOcrResult(result) || result.complete))
   return Boolean(file
     && file.status === 'ACTIVE'
     && (file.role === 'EXPENSE_SOURCE' || isActiveProof(file, 'itinerary')
       || isActiveProof(file, 'hotel_bill') || needsMaterialConfirmation(file))
-    && (file.ocrStatus !== 'RUNNING' || file.ocrStale === true))
+    && (file.ocrStatus !== 'RUNNING' || file.ocrStale === true)
+    && !hasUsableCompletedResult)
 }
 
 function canAdoptDurableRecognition(file: ReimbursementDraftFile): boolean {
@@ -2010,75 +2016,73 @@ async function retryItemRecognition(id: string): Promise<void> {
         </template>
       </el-table-column>
       <el-table-column
-        label="金额"
-        width="110"
+        label="金额 / 张数"
+        width="160"
         align="right"
       >
         <template #default="scope">
-          {{ scope.row.amount ? `¥${scope.row.amount}` : '待补充' }}
-          <div
-            v-if="moneyToCents(scope.row.amount) === 0"
-            class="ocr-warning"
-            data-testid="zero-amount-warning"
-          >
-            金额为 0，请核实原票据
-          </div>
-          <div
-            v-if="isForeignExpense(scope.row)"
-            class="receipt-meta"
-          >
-            原币 {{ scope.row.originalAmount || '待补充' }} {{ scope.row.originalCurrency || '币种待确认' }}
-            <span
-              v-if="!scope.row.cnyAmountConfirmed"
-              class="field-error"
-            >请确认人民币金额</span>
+          <div class="expense-summary-cell">
+            <strong>{{ scope.row.amount ? `¥${scope.row.amount}` : '金额待补充' }}</strong>
+            <span>{{ scope.row.receiptCount }} 张</span>
+            <div
+              v-if="moneyToCents(scope.row.amount) === 0"
+              class="ocr-warning"
+              data-testid="zero-amount-warning"
+            >
+              金额为 0，请核实原票据
+            </div>
+            <div
+              v-if="isForeignExpense(scope.row)"
+              class="receipt-meta"
+            >
+              原币 {{ scope.row.originalAmount || '待补充' }} {{ scope.row.originalCurrency || '币种待确认' }}
+              <span
+                v-if="!scope.row.cnyAmountConfirmed"
+                class="field-error"
+              >请确认人民币金额</span>
+            </div>
           </div>
         </template>
       </el-table-column>
       <el-table-column
-        prop="receiptCount"
-        label="张数"
-        width="72"
-        align="center"
-      />
-      <el-table-column
         label="操作"
-        width="190"
-        fixed="right"
+        width="170"
       >
         <template #default="scope">
-          <el-button
-            link
-            type="primary"
-            :disabled="props.readonly || batchActive"
-            @click="openEditItem(scope.row)"
-          >
-            编辑
-          </el-button>
-          <el-button
-            v-if="Boolean(durableFileByItemId(scope.row.id)
-              && canRetryDurableRecognition(durableFileByItemId(scope.row.id)))"
-            link
-            type="primary"
-            :loading="isRetryingDurableRecognition(durableFileByItemId(scope.row.id))"
-            :disabled="props.readonly || Boolean(durableActionDisabledReason)"
-            :title="durableActionDisabledReason"
-            @click="retryItemRecognition(scope.row.id)"
-          >
-            重新识别
-          </el-button>
-          <el-button
-            link
-            type="danger"
-            :disabled="props.readonly || batchActive || (Boolean(durableFileByItemId(scope.row.id))
-              && Boolean(durableActionDisabledReason))"
-            :title="durableFileByItemId(scope.row.id)
-              ? durableActionDisabledReason
-              : ''"
-            @click="removeItem(scope.row.id)"
-          >
-            删除
-          </el-button>
+          <div class="expense-desktop-actions">
+            <el-button
+              link
+              type="primary"
+              :disabled="props.readonly || batchActive"
+              @click="openEditItem(scope.row)"
+            >
+              编辑
+            </el-button>
+            <el-button
+              v-if="Boolean(durableFileByItemId(scope.row.id)
+                && canRetryDurableRecognition(durableFileByItemId(scope.row.id)))"
+              link
+              type="primary"
+              :loading="isRetryingDurableRecognition(durableFileByItemId(scope.row.id))"
+              :disabled="props.readonly || Boolean(durableActionDisabledReason)"
+              :title="durableActionDisabledReason"
+              @click="retryItemRecognition(scope.row.id)"
+            >
+              重新识别
+            </el-button>
+            <el-button
+              link
+              type="danger"
+              :disabled="props.readonly || batchActive || (Boolean(durableFileByItemId(scope.row.id))
+                && Boolean(durableActionDisabledReason))"
+              :title="durableFileByItemId(scope.row.id)
+                ? durableActionDisabledReason
+                : ''"
+              @click="removeItem(scope.row.id)"
+            >
+              删除
+            </el-button>
+          </div>
         </template>
       </el-table-column>
     </el-table>
@@ -2719,6 +2723,32 @@ async function retryItemRecognition(id: string): Promise<void> {
 .receipt-upload-button { min-width: 148px; }
 .expense-table.expense-table--hidden { display: none; }
 .expense-table { margin-top: 12px; }
+.expense-table :deep(.el-table__cell) { vertical-align: top; }
+.expense-summary-cell {
+  display: grid;
+  justify-items: end;
+  gap: 5px;
+  white-space: normal;
+}
+.expense-summary-cell > strong {
+  color: #0958d9;
+  font-size: 16px;
+  white-space: nowrap;
+}
+.expense-summary-cell > span {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.expense-summary-cell .receipt-meta { max-width: 150px; line-height: 1.45; }
+.expense-summary-cell .field-error { display: block; margin-top: 3px; }
+.expense-desktop-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 12px;
+}
+.expense-desktop-actions :deep(.el-button) { margin-left: 0; }
 .material-workbench__heading {
   margin-top: 18px;
   padding: 14px 14px 0;

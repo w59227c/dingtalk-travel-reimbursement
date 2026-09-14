@@ -518,6 +518,31 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    { presentation: 'desktop', mobile: false, selector: '.expense-table' },
+    { presentation: 'mobile', mobile: true, selector: '.expense-mobile-list' },
+  ])('hides redundant OCR retry after successful recognition on $presentation', async ({ mobile, selector }) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const source = recognizedFile('file-complete', '识别完成.pdf')
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const itemList = wrapper.get(selector)
+    expect(itemList.text()).toContain('编辑')
+    expect(itemList.findAll('button').some((button) =>
+      button.text().trim() === '重新识别',
+    )).toBe(false)
+    wrapper.unmount()
+  })
+
   it('lets desktop and mobile source rows correct a misclassified invoice, with explicit consequences and harmless cancellation', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
@@ -2456,7 +2481,7 @@ describe('ExpenseItemsCard durable files', () => {
     const materials = card.get('.expense-item-card__materials')
     expect(materials.text()).toContain('来源票据')
     expect(materials.text()).toContain('行程单')
-    expect(card.get('.expense-item-card__actions').text()).toContain('重新识别')
+    expect(card.get('.expense-item-card__actions').text()).not.toContain('重新识别')
     expect(wrapper.get('.expense-table').classes()).toContain('expense-table--hidden')
     wrapper.unmount()
   })
@@ -2478,6 +2503,12 @@ describe('ExpenseItemsCard durable files', () => {
     const heading = wrapper.get('[data-testid="expense-items-group"]')
     expect(heading.text()).toContain('已计入费用明细')
     const row = wrapper.get('.el-table__row')
+    expect(row.get('.expense-summary-cell').text()).toContain('¥60.00')
+    expect(row.get('.expense-summary-cell').text()).toContain('1 张')
+    const operationColumn = wrapper.findAllComponents({ name: 'ElTableColumn' })
+      .find((column) => column.props('label') === '操作')
+    expect(operationColumn?.props('fixed')).toBe(false)
+    expect(row.get('.expense-desktop-actions').text()).not.toContain('重新识别')
     expect(row.get('.expense-item-card__description').text()).toContain('打车发票.pdf 的行程')
     const materials = row.get('.expense-item-card__materials--desktop')
     expect(materials.text()).toContain('来源票据')
@@ -2751,6 +2782,12 @@ describe('ExpenseItemsCard durable files', () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft(8)
     const source = recognizedFile('file-1', '待核对票据.pdf', '10.00')
+    source.ocrStatus = 'FAILED'
+    source.ocrResult = {
+      ...source.ocrResult,
+      status: 'failed',
+      error: { code: 'OCR_FAILED', message: '识别失败，请重试' },
+    }
     drafts.files = [source,
       serverFile('itinerary-1', '行程单.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'itinerary' }),
       serverFile('payment-1', '付款.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' }),

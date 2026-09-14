@@ -45,7 +45,10 @@ describe('PdfPreview', () => {
     await flushPromises()
 
     await vi.waitFor(() => expect(getPage).toHaveBeenCalledWith(1))
-    expect(pdfMocks.getDocument).toHaveBeenCalledWith({ data: expect.any(Uint8Array) })
+    expect(pdfMocks.getDocument).toHaveBeenCalledWith({
+      data: expect.any(Uint8Array),
+      isEvalSupported: false,
+    })
     expect(pdfMocks.workerOptions.workerSrc).toBe('/assets/pdf.worker.mjs')
     expect(wrapper.text()).toContain('第 1 / 2 页')
     expect(render).toHaveBeenCalledOnce()
