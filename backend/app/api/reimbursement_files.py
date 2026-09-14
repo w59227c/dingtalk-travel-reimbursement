@@ -289,7 +289,11 @@ async def preview_pdf_page(
     except ProcessJobTimeout as exc:
         raise ApiError("PDF_PREVIEW_TIMEOUT", "PDF 页面生成超时，请重试", 504) from exc
     except ProcessJobResourceLimit as exc:
-        raise ApiError("PDF_PREVIEW_RESOURCE_LIMIT", "PDF 页面超过预览资源限制", 422) from exc
+        raise ApiError(
+            "PDF_PREVIEW_RESOURCE_LIMIT",
+            "PDF 兼容预览进程暂时失败，可返回快速预览或稍后再试",
+            422,
+        ) from exc
 
     if not isinstance(result, dict) or not result.get("ok"):
         if isinstance(result, dict):

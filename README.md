@@ -97,7 +97,7 @@ Python/前端缓存和可重新生成的构建产物，不会删除这些运行�
 - OCR 获取文本，Parser 负责票据类型和字段；新增费用类别不要求新增 Parser。
 - 内置 Parser 明确分类时不允许管理员关键词覆盖；仅当结果为“其他”时应用管理员关键词，同一票据命中多个不同类别仍保留“其他”并提示核对。
 - 无法可靠分类、缺少字段或识别失败时，前端保留带警告的可编辑费用行；未完成字段仍可自动保存，汇总只计算完整行，Excel 预览和正式提交要求补齐。前端对每个文件分别发起请求，一张失败或超时不会影响下一张。
-- 原始图片通过鉴权接口读取并生成临时 Blob 地址；PDF 由服务器按需把当前页渲染为受限尺寸的 PNG，双端在当前页面内统一翻页预览，不依赖浏览器或钉钉 WebView 的 PDF 能力，也不跳转浏览器或触发系统下载。每次只生成当前页并复用有界文件校验进程槽，繁忙时明确提示稍后重试。
+- 原始图片通过鉴权接口读取并生成临时 Blob 地址；桌面和移动端 PDF 默认在立即打开的弹窗中通过同源鉴权 URL 直接预览，不跳转浏览器或触发系统下载。当前浏览器或钉钉 WebView 无法显示时，员工可切换兼容预览，由服务器按需把当前页渲染为受限尺寸的 PNG；每次只生成当前页、复用有界文件校验进程槽，并对偶发的进程资源失败自动重试一次。
 - 所有业务 API 必须鉴权，写接口必须校验 CSRF，管理员接口必须后端鉴权。
 - CSRF token 只保存在前端内存；每次登录随新的 HttpOnly Session 生成新 token，同一登录 Session 内保持稳定，页面刷新或多标签页调用 `GET /api/me` 会取得同一个 token，避免标签页相互失效。
 - Client Secret 只在后端；上传目录不可公开；原始 OCR 文本不入库、不写普通日志。
@@ -217,8 +217,8 @@ PC 钉钉本机调试时，不配置 `DINGTALK_DEV_PUBLIC_HOST`，保持
 当前报销页使用报销记录级文件接口，依靠服务端持久内容完成预览、恢复和正式提交：
 
 - `POST /api/reimbursements/drafts/{draftId}/files` 按 `expectedRevision` 上传一份 `EXPENSE_SOURCE` 或 `ATTACHMENT_ONLY`；证明材料另传查询参数 `attachmentKind=itinerary|payment_proof|hotel_bill|other`（默认 `other`），响应持久返回该用途，PATCH 可修改用途。费用来源只能为 `other`。元数据和 OCR 状态写入 SQLite，文件字节写入受控 staging。票据 PDF 单页，证明材料 PDF 最多 30 页；页面刷新、进程重启或换设备后通过身份和归属检查恢复。
-- `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/content` 返回图片原件用于预览，校验企业、员工、部门、文件状态、有效期、大小和 SHA-256，响应禁止缓存；浏览器关闭预览时释放 Blob URL。
-- `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/preview/pages/{pageNumber}` 对已经过相同归属与完整性校验的 PDF 按需渲染一页 PNG，最多 30 页、单页最多 250 万像素和 2200 像素边长；双端只保留当前页的 Blob URL，并提供上一页、下一页操作。
+- `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/content` 返回原件用于图片 Blob 预览及 PDF 同源内嵌快速预览，校验企业、员工、部门、文件状态、有效期、大小和 SHA-256，响应禁止缓存；浏览器关闭图片预览时释放 Blob URL。
+- `GET /api/reimbursements/drafts/{draftId}/files/{fileId}/preview/pages/{pageNumber}` 是 PDF 兼容预览通道，对已经过相同归属与完整性校验的 PDF 按需渲染一页 PNG，最多 30 页、单页最多 250 万像素和 2200 像素边长；双端只保留当前页的 Blob URL 并提供翻页，偶发的渲染进程资源失败自动重试一次。
 - `POST /api/reimbursements/drafts/{draftId}/files/{fileId}/ocr` 持久结构化 OCR 候选和状态。费用行通过 `sourceFileId` 关联票据；每份终态票据正式提交前必须计入费用或被员工明确选择仅作为材料保留。自动保存允许尚未完成这项选择；后端完整性检查会拦截未处理票据。
 - 行程单通过费用行 `itineraryFileIds` 关联同一报销中的活动 `ATTACHMENT_ONLY + itinerary`，付款凭证通过 `paymentProofFileIds` 关联活动 `ATTACHMENT_ONLY + payment_proof`；普通材料不能冒充任一种证明。网约车必须关联至少一份行程单，允许多笔费用分别选择同一份多行程 PDF。删除、改角色或改用途会原子清理旧引用并重新要求补齐。
 - 每笔住宿费必须通过 `hotelBillFileIds` 关联至少一份活动的住宿明细文件；姓名、入住/离店日期、价格等字段只做尽力识别，字段缺失不单独提示，也不阻止提交。

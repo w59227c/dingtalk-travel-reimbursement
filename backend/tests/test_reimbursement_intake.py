@@ -17,6 +17,7 @@ from app.excel.template_contract import EXCEL_TEMPLATE
 from app.models.reimbursement import ReimbursementDraft, ReimbursementDraftFile, utc_now
 from app.schemas.reimbursements import ReimbursementDraftInput
 from app.services import reimbursement_files
+from app.services.process_jobs import ProcessJobResourceLimit
 from app.services.reimbursement_drafts import (
     apply_ocr_evidence,
     require_complete_draft_input,
@@ -409,6 +410,46 @@ def test_pdf_preview_renders_requested_pages_as_bounded_pngs(client_factory):
     out_of_range = client.get(f"{base_url}/3")
     assert out_of_range.status_code == 416
     assert out_of_range.json()["error"]["code"] == "PDF_PREVIEW_PAGE_OUT_OF_RANGE"
+
+
+def test_pdf_preview_does_not_misreport_a_transient_worker_exit_as_a_large_page(
+    client_factory,
+):
+    class ResourceLimitedRunner:
+        async def run(self, *_args, **_kwargs):
+            raise ProcessJobResourceLimit("worker exited")
+
+    output = io.BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=595, height=842)
+    writer.write(output)
+    client = client_factory(auth_mock_enabled=True)
+    csrf = mock_login(client)["csrfToken"]
+    draft_id = _insert_draft(client)
+    uploaded = _upload(
+        client,
+        csrf,
+        draft_id,
+        revision=1,
+        name="行程单.pdf",
+        content=output.getvalue(),
+        role="ATTACHMENT_ONLY",
+    ).json()["data"]["file"]
+    original_runner = client.app.state.file_validation_runner
+    client.app.state.file_validation_runner = ResourceLimitedRunner()
+    try:
+        response = client.get(
+            f"/api/reimbursements/drafts/{draft_id}/files/{uploaded['id']}/preview/pages/1"
+        )
+    finally:
+        client.app.state.file_validation_runner = original_runner
+
+    assert response.status_code == 422
+    assert response.json()["error"] == {
+        "code": "PDF_PREVIEW_RESOURCE_LIMIT",
+        "message": "PDF 兼容预览进程暂时失败，可返回快速预览或稍后再试",
+    }
+    assert "页面超过" not in response.text
 
 
 def test_preview_rejects_changed_file_bytes_and_wrong_department(client_factory):

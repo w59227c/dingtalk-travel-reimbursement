@@ -65,6 +65,10 @@ function fileUrl(draftId: string, fileId: string): string {
   return `${draftUrl(draftId)}/files/${encodeURIComponent(fileId)}`
 }
 
+export function getReimbursementFileContentUrl(draftId: string, fileId: string): string {
+  return `/api${fileUrl(draftId, fileId)}/content`
+}
+
 function uploadPercent(event: AxiosProgressEvent): number {
   if (!event.total || event.total <= 0) return 0
   return Math.min(100, Math.max(0, Math.round((event.loaded / event.total) * 100)))
