@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
@@ -54,6 +55,11 @@ const materialEditorVisible = ref(false)
 const materialEditorFile = ref<ReimbursementDraftFile | null>(null)
 const materialEditorKind = ref<ReimbursementAttachmentKind | 'expense'>('other')
 const durableOperating = ref(false)
+const retryingRecognition = ref<{
+  fileId: string
+  fileName: string
+  generation: number
+} | null>(null)
 const durableErrors = reactive<Record<string, string>>({})
 type BatchFileStatus = 'queued' | 'uploading' | 'uploaded' | 'recognizing' | 'done' | 'skipped' | 'failed'
 interface BatchFile {
@@ -80,6 +86,8 @@ const batchUploadedCount = computed(() => batchFiles.value.filter((file) => file
 const batchRecognizedCount = computed(() => batchFiles.value.filter((file) => file.recognized).length)
 const batchFailedCount = computed(() => batchFiles.value.filter((file) => file.status === 'failed').length)
 const batchSkippedCount = computed(() => batchFiles.value.filter((file) => file.status === 'skipped').length)
+const uploadOperationActive = computed(() => batchActive.value && batchFiles.value.some((file) =>
+  ['queued', 'uploading'].includes(file.status)))
 const visibleBatchFiles = computed(() => batchActive.value
   ? batchFiles.value
   : batchFiles.value.filter((file) => ['failed', 'skipped'].includes(file.status)))
@@ -161,6 +169,26 @@ const categoryNames = computed<Record<string, string>>(() =>
 const showLockedFileMetadata = computed(() => props.readonly && drafts.currentDraft?.status === 'LOCKED')
 const durableFiles = computed(() => drafts.files.filter((file) =>
   file.status !== 'PURGED' || showLockedFileMetadata.value))
+const activeRecognitionStatus = computed(() => {
+  if (batchActive.value) return null
+  const retrying = retryingRecognition.value
+  if (retrying) {
+    return {
+      fileId: retrying.fileId,
+      title: `正在重新识别“${retrying.fileName}”`,
+      description: 'OCR 正在重新解析票据信息，完成后会更新识别结果；如明细已被人工修改，系统会保留你的人工修改。',
+    }
+  }
+  const running = durableFiles.value.find((file) =>
+    file.status === 'ACTIVE' && file.ocrStatus === 'RUNNING' && file.ocrStale !== true)
+  return running
+    ? {
+        fileId: running.id,
+        title: `正在识别“${running.name}”`,
+        description: 'OCR 任务仍在处理中，页面会自动同步最新结果。',
+      }
+    : null
+})
 const hasVisibleDurableFiles = computed(() => durableFiles.value.some((file) =>
   !batchActive.value || batchOriginalFileIds.has(file.id),
 ))
@@ -213,6 +241,11 @@ const unresolvedDurableOcrFiles = computed(() => durableFiles.value.filter(
   (file) => (!batchActive.value || batchOriginalFileIds.has(file.id)) && isUnresolvedDurableOcrFile(file),
 ))
 const durableBusy = computed(() => durableOperating.value || drafts.busy)
+const receiptOperationStatus = computed(() => {
+  if (activeRecognitionStatus.value) return activeRecognitionStatus.value.title
+  if (uploadOperationActive.value) return `正在上传本批 ${batchFiles.value.length} 个文件`
+  return durableBusy.value ? '请等待当前文件操作完成' : ''
+})
 const durableMutationDisabledReason = computed(() => {
   const current = drafts.currentDraft
   if (!current) return '正在准备报销表单'
@@ -223,7 +256,7 @@ const durableMutationDisabledReason = computed(() => {
   return '当前报销不能再修改附件'
 })
 const durableActionDisabledReason = computed(() => durableMutationDisabledReason.value
-  || (durableBusy.value ? '请等待当前文件操作完成' : ''))
+  || (durableBusy.value ? receiptOperationStatus.value : ''))
 const canAddExpenseItem = computed(
   () =>
     !props.readonly
@@ -239,7 +272,6 @@ const receiptUploadConstraintReason = computed(() => {
   }
   return ''
 })
-const receiptOperationStatus = computed(() => durableBusy.value ? '请等待当前文件操作完成' : '')
 const receiptUploadDisabledReason = computed(() => receiptUploadConstraintReason.value || receiptOperationStatus.value)
 const newItemDisabledReason = computed(() => {
   if (durableMutationDisabledReason.value) return durableMutationDisabledReason.value
@@ -265,6 +297,7 @@ onBeforeUnmount(() => {
   durableUnmounted = true
   durableOperationGeneration += 1
   activeDurableOperation = null
+  retryingRecognition.value = null
   if (batchScope?.generation === durableOperationGeneration - 1) drafts.processingFiles = false
   releaseReceiptPreview()
   previewController?.abort()
@@ -328,6 +361,7 @@ watch(
     ) return
     durableOperationGeneration += 1
     activeDurableOperation = null
+    retryingRecognition.value = null
     durableOperating.value = false
     batchFiles.value = []
     batchPhase.value = null
@@ -391,6 +425,7 @@ function isDurableDraftEditable(): boolean {
 
 function finishDurableOperation(scope: DurableOperationScope): void {
   if (scope.generation !== durableOperationGeneration) return
+  if (retryingRecognition.value?.generation === scope.generation) retryingRecognition.value = null
   activeDurableOperation = null
   durableOperating.value = false
 }
@@ -484,6 +519,7 @@ function recordPaymentExpense(file: ReimbursementDraftFile): void {
 }
 
 function durableStatusLabel(file: ReimbursementDraftFile): string {
+  if (isRetryingDurableRecognition(file)) return '重新识别中'
   if (file.status === 'RESERVED') return '等待上传'
   if (file.status === 'WRITING') return '上传中'
   if (file.status === 'FAILED') return '上传失败'
@@ -501,11 +537,21 @@ function durableStatusLabel(file: ReimbursementDraftFile): string {
 function durableStatusType(
   file: ReimbursementDraftFile,
 ): 'success' | 'warning' | 'danger' | 'info' {
+  if (isDurableRecognitionRunning(file)) return 'warning'
   if (file.status === 'FAILED' || file.ocrStatus === 'FAILED' || file.ocrStale) return 'danger'
   if (needsMaterialConfirmation(file)) return 'warning'
   if (file.status !== 'ACTIVE' || file.ocrStatus === 'RUNNING') return 'warning'
   if (file.role === 'ATTACHMENT_ONLY' || file.ocrStatus === 'COMPLETE') return 'success'
   return 'info'
+}
+
+function isRetryingDurableRecognition(file: ReimbursementDraftFile | undefined): boolean {
+  return Boolean(file && retryingRecognition.value?.fileId === file.id)
+}
+
+function isDurableRecognitionRunning(file: ReimbursementDraftFile | undefined): boolean {
+  return Boolean(file && (isRetryingDurableRecognition(file)
+    || (file.status === 'ACTIVE' && file.ocrStatus === 'RUNNING' && file.ocrStale !== true)))
 }
 
 function durableFileByItemId(itemId: string): ReimbursementDraftFile | undefined {
@@ -575,6 +621,7 @@ async function saveMaterialKind(): Promise<void> {
 
 function durableFileError(file: ReimbursementDraftFile | undefined): string {
   if (!file) return ''
+  if (isRetryingDurableRecognition(file)) return ''
   return durableErrors[file.id]
     ?? file.ocrResult?.error?.message
     ?? (file.ocrStale ? '材料识别因服务中断未完成，请重新识别或修改用途' : '')
@@ -1052,11 +1099,21 @@ async function retryDurableRecognition(file: ReimbursementDraftFile): Promise<vo
     expense.items.find((item) => item.sourceFileId === file.id),
   )
   const previouslyDismissed = expense.dismissedOcrFileIds.includes(file.id)
+  retryingRecognition.value = {
+    fileId: file.id,
+    fileName: file.name,
+    generation: scope.generation,
+  }
   durableOperating.value = true
   try {
     const recognized = await recognizeDurableFile(file, scope, false)
     if (!recognized) return
-    if (recognized.role !== 'EXPENSE_SOURCE' || !recognized.ocrResult || isItineraryOcrResult(recognized.ocrResult)) return
+    if (recognized.role !== 'EXPENSE_SOURCE' || !recognized.ocrResult || isItineraryOcrResult(recognized.ocrResult)) {
+      if (recognized.ocrResult && !recognitionFailure(recognized)) {
+        ElMessage.success(`已更新“${file.name}”的识别结果`)
+      }
+      return
+    }
     if (
       previouslyDismissed || expense.dismissedOcrFileIds.includes(file.id)
       || expenseItemSnapshot(expense.items.find((item) => item.sourceFileId === file.id))
@@ -1070,7 +1127,9 @@ async function retryDurableRecognition(file: ReimbursementDraftFile): Promise<vo
       return
     }
     void expense.refreshCalculations()
-    if (!durableFileError(recognized)) ElMessage.success('已用新的 OCR 结果更新明细')
+    if (!recognitionFailure(recognized) && !durableErrors[recognized.id]) {
+      ElMessage.success('已用新的 OCR 结果更新明细')
+    }
   } catch (error) {
     if (!acceptsDurableOperation(scope)) return
     durableErrors[file.id] = readableOperationError(error, '票据识别失败，请重试')
@@ -1351,7 +1410,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           <el-button
             :class="props.mobile ? 'mobile-upload-button' : 'receipt-upload-button'"
             type="primary"
-            :loading="durableBusy"
+            :loading="uploadOperationActive"
             :disabled="Boolean(receiptUploadDisabledReason)"
             :title="receiptUploadDisabledReason"
             :data-testid="props.mobile ? 'mobile-file-upload-button' : undefined"
@@ -1452,6 +1511,25 @@ async function retryItemRecognition(id: string): Promise<void> {
       show-icon
       class="receipt-alert"
     />
+    <div
+      v-if="activeRecognitionStatus"
+      class="material-operation-status"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="material-operation-status"
+    >
+      <el-icon
+        class="is-loading material-operation-status__icon"
+        aria-hidden="true"
+      >
+        <Loading />
+      </el-icon>
+      <div>
+        <strong>{{ activeRecognitionStatus.title }}</strong>
+        <span>{{ activeRecognitionStatus.description }}</span>
+      </div>
+    </div>
     <el-alert
       v-if="unresolvedDurableOcrFiles.length > 0"
       :title="`${unresolvedDurableOcrFiles.length} 张票据的 OCR 结果待确认`"
@@ -1643,6 +1721,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             :link="!props.mobile"
             :plain="props.mobile"
             type="primary"
+            :loading="isRetryingDurableRecognition(file)"
             :disabled="Boolean(durableActionDisabledReason)"
             :title="durableActionDisabledReason"
             @click="retryDurableRecognition(file)"
@@ -1706,6 +1785,13 @@ async function retryItemRecognition(id: string): Promise<void> {
               type="info"
             >
               OCR
+            </el-tag>
+            <el-tag
+              v-if="isDurableRecognitionRunning(durableFileByItemId(scope.row.id))"
+              size="small"
+              type="warning"
+            >
+              {{ isRetryingDurableRecognition(durableFileByItemId(scope.row.id)) ? '重新识别中' : '识别中' }}
             </el-tag>
             <button
               v-if="durableFileByItemId(scope.row.id)?.name
@@ -1874,6 +1960,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               && canRetryDurableRecognition(durableFileByItemId(scope.row.id)))"
             link
             type="primary"
+            :loading="isRetryingDurableRecognition(durableFileByItemId(scope.row.id))"
             :disabled="props.readonly || Boolean(durableActionDisabledReason)"
             :title="durableActionDisabledReason"
             @click="retryItemRecognition(scope.row.id)"
@@ -1913,6 +2000,13 @@ async function retryItemRecognition(id: string): Promise<void> {
               type="warning"
             >
               待完善
+            </el-tag>
+            <el-tag
+              v-if="isDurableRecognitionRunning(durableFileByItemId(item.id))"
+              size="small"
+              type="warning"
+            >
+              {{ isRetryingDurableRecognition(durableFileByItemId(item.id)) ? '重新识别中' : '识别中' }}
             </el-tag>
           </div>
           <span class="mobile-expense-amount">{{ item.amount ? `¥${item.amount}` : '金额待补充' }}</span>
@@ -2051,6 +2145,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           <el-button
             v-if="canRetryDurableRecognition(durableFileByItemId(item.id))"
             size="small"
+            :loading="isRetryingDurableRecognition(durableFileByItemId(item.id))"
             :disabled="props.readonly || Boolean(durableActionDisabledReason)"
             :title="durableActionDisabledReason"
             @click="retryItemRecognition(item.id)"
@@ -2626,6 +2721,28 @@ async function retryItemRecognition(id: string): Promise<void> {
 .upload-guidance--mobile :deep(.el-alert__content) { min-width: 0; }
 .upload-guidance--mobile :deep(.el-alert__title) { font-size: 14px; }
 .upload-guidance--mobile :deep(.el-alert__description) { margin-top: 2px; line-height: 1.5; }
+.material-operation-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--el-color-primary-light-7);
+  border-radius: 8px;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-text-color-regular);
+}
+.material-operation-status__icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--el-color-primary);
+  font-size: 20px;
+}
+.material-operation-status > div { min-width: 0; }
+.material-operation-status strong,
+.material-operation-status span { display: block; overflow-wrap: anywhere; }
+.material-operation-status strong { color: var(--el-color-primary); }
+.material-operation-status span { margin-top: 4px; color: var(--el-text-color-secondary); line-height: 1.55; }
 .expense-mobile-list--active .mobile-expense-heading { align-items: flex-start; }
 .mobile-expense-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .mobile-expense-amount { flex: none; font-size: 18px; }

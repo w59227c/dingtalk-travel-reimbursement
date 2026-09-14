@@ -570,12 +570,17 @@ export const useExpenseStore = defineStore('expense', () => {
   async function refreshCalculations(): Promise<void> {
     const payload = subsidyTrips.value.length ? tripPayloads() : tripPayload()
     const version = ++calculationVersion
-    totals.value = null
     calculatedSignature.value = ''
     calculationError.value = includeSubsidy.value ? policyInputError.value : ''
     if (includeSubsidy.value && (policyInputError.value || !payload || (Array.isArray(payload)
-      && payload.length !== subsidyTrips.value.length))) return
+      && payload.length !== subsidyTrips.value.length))) {
+      totals.value = null
+      calculating.value = false
+      return
+    }
     if (itemReadinessError.value) {
+      totals.value = null
+      calculating.value = false
       calculationError.value = itemReadinessError.value
       return
     }
@@ -588,6 +593,7 @@ export const useExpenseStore = defineStore('expense', () => {
       }
     } catch (error) {
       if (version !== calculationVersion) return
+      totals.value = null
       calculationError.value = axios.isAxiosError(error)
         ? (error.response?.data as { error?: { message?: string } } | undefined)?.error?.message ??
           '金额计算失败，请检查填写内容'

@@ -2206,6 +2206,63 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    { presentation: 'desktop', mobile: false },
+    { presentation: 'mobile', mobile: true },
+  ])('shows persistent file-specific feedback during OCR retry on $presentation', async ({ mobile }) => {
+    const pending = deferred<Awaited<ReturnType<typeof recognizeReimbursementDraftFile>>>()
+    const expense = useExpenseStore()
+    expense.categories = [
+      { id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true },
+    ]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const failed = recognizedFile('file-1', '待重试发票.pdf', '10.00')
+    failed.ocrStatus = 'FAILED'
+    failed.ocrResult = {
+      ...failed.ocrResult!,
+      status: 'failed',
+      error: { code: 'OCR_FAILED', message: '识别失败，请重试' },
+    }
+    drafts.files = [failed]
+    expense.upsertDraftOcrItem(failed)
+    vi.mocked(recognizeReimbursementDraftFile).mockReturnValueOnce(pending.promise)
+    const success = vi.spyOn(ElMessage, 'success')
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const itemList = wrapper.get(mobile ? '.expense-mobile-list' : '.expense-table')
+    const retry = itemList.findAll('button').find((button) =>
+      button.text().trim() === '重新识别',
+    )!
+    await retry.trigger('click')
+    await vi.waitFor(() => expect(recognizeReimbursementDraftFile).toHaveBeenCalledOnce())
+
+    const status = wrapper.get('[data-testid="material-operation-status"]')
+    expect(status.text()).toContain('正在重新识别“待重试发票.pdf”')
+    expect(status.text()).toContain('保留你的人工修改')
+    expect(retry.classes()).toContain('is-loading')
+    const upload = wrapper.findAll('button').find((button) =>
+      button.text().trim() === '上传报销材料',
+    )!
+    expect(upload.attributes('disabled')).toBeDefined()
+    expect(upload.classes()).not.toContain('is-loading')
+
+    pending.resolve({
+      draftId: 'draft-1',
+      revision: 9,
+      file: recognizedFile('file-1', '待重试发票.pdf', '20.00'),
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="material-operation-status"]').exists()).toBe(false)
+    expect(success).toHaveBeenCalledWith('已用新的 OCR 结果更新明细')
+    wrapper.unmount()
+  })
+
   it('previews server-held invoices and shows linked itinerary only with the expense row', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]

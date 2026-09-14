@@ -1,14 +1,20 @@
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { enableAutoUnmount, mount } from '@vue/test-utils'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 
+import { calculateTotals } from '@/api/expenses'
 import { useExpenseStore } from '@/stores/expense'
-import type { TripType } from '@/types/expenses'
+import type { ExpenseTotals, TripType } from '@/types/expenses'
 import TripSubsidyCard from './TripSubsidyCard.vue'
 
 enableAutoUnmount(afterEach)
+
+vi.mock('@/api/expenses', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/api/expenses')>(),
+  calculateTotals: vi.fn(),
+}))
 
 const approvals = [
   { processInstanceId: 'approval-1', title: '合肥出差', startDate: '2026-09-01', endDate: '2026-09-03' },
@@ -16,19 +22,23 @@ const approvals = [
 ]
 
 describe('TripSubsidyCard', () => {
-  beforeEach(() => setActivePinia(createPinia()))
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.mocked(calculateTotals).mockReset()
+  })
 
   function mountCard(
     tripType: TripType = 'business',
     selected = approvals,
     readonly = false,
+    mobile = false,
   ) {
     const expense = useExpenseStore()
     expense.setTripType(tripType)
     expense.syncSubsidyApprovals(selected)
     expense.setSubsidyIncluded(true)
     return mount(TripSubsidyCard, {
-      props: { readonly, approvals: selected, approvalTripType: tripType },
+      props: { mobile, readonly, approvals: selected, approvalTripType: tripType },
       global: { plugins: [ElementPlus] },
     })
   }
@@ -107,6 +117,52 @@ describe('TripSubsidyCard', () => {
     const previews = wrapper.findAll('.subsidy-preview')
     expect(previews[0]?.text()).toContain('补助 ¥500.00')
     expect(previews[1]?.text()).toContain('补助 ¥200.00')
+  })
+
+  it.each([
+    { presentation: 'desktop', mobile: false },
+    { presentation: 'mobile', mobile: true },
+  ])('keeps the previous subsidy preview mounted while a changed period is recalculated on $presentation', async ({ mobile }) => {
+    const selected = [approvals[0]!]
+    const expense = useExpenseStore()
+    const wrapper = mountCard('business', selected, false, mobile)
+    expense.totals = {
+      expenseTotal: '0.00', subsidyTotal: '300.00', totalAmount: '300.00',
+      receiptCount: 0, uppercaseAmount: '叁佰元整', subsidy: null,
+      subsidies: [{
+        relatedApprovalId: 'approval-1', tripType: 'business', calendarDays: 3,
+        effectiveDays: '3.0', dailyRate: '100.00', total: '300.00',
+      }],
+    }
+    await nextTick()
+
+    let finishCalculation!: (totals: ExpenseTotals) => void
+    vi.mocked(calculateTotals).mockImplementationOnce(() => new Promise((resolve) => {
+      finishCalculation = resolve
+    }))
+    await wrapper
+      .get('[aria-label="补助 1 出发时段"] input[value="afternoon"]')
+      .setValue()
+    const refresh = expense.refreshCalculations()
+    await nextTick()
+
+    expect(expense.calculating).toBe(true)
+    expect(wrapper.get('.subsidy-preview').text()).toContain('有效 3.0 天')
+    expect(wrapper.get('.subsidy-preview').text()).toContain('补助 ¥300.00')
+
+    finishCalculation({
+      expenseTotal: '0.00', subsidyTotal: '250.00', totalAmount: '250.00',
+      receiptCount: 0, uppercaseAmount: '贰佰伍拾元整', subsidy: null,
+      subsidies: [{
+        relatedApprovalId: 'approval-1', tripType: 'business', calendarDays: 3,
+        effectiveDays: '2.5', dailyRate: '100.00', total: '250.00',
+      }],
+    })
+    await refresh
+    await nextTick()
+
+    expect(wrapper.get('.subsidy-preview').text()).toContain('有效 2.5 天')
+    expect(wrapper.get('.subsidy-preview').text()).toContain('补助 ¥250.00')
   })
 
   it('shows a subsidy calculation failure inside the subsidy card', async () => {
