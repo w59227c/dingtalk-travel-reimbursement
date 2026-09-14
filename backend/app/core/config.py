@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     dingtalk_client_secret: str = ""
     dingtalk_corp_id: str = ""
     dingtalk_agent_id: int | None = None
+    dingtalk_workflow_instance_read_min_interval_seconds: float = 0.2
     dingtalk_storage_upload_timeout_seconds: float = 120.0
     dingtalk_storage_upload_host_suffixes: str = "trans.dingtalk.com"
     dingtalk_oa_worker_enabled: bool = False
@@ -149,6 +150,15 @@ class Settings(BaseSettings):
     def validate_dingtalk_storage_upload_timeout(cls, value: float) -> float:
         if not 5 <= value <= 900:
             raise ValueError("DINGTALK_STORAGE_UPLOAD_TIMEOUT_SECONDS must be between 5 and 900")
+        return value
+
+    @field_validator("dingtalk_workflow_instance_read_min_interval_seconds")
+    @classmethod
+    def validate_dingtalk_workflow_instance_read_min_interval(cls, value: float) -> float:
+        if not 0.01 <= value <= 5:
+            raise ValueError(
+                "DINGTALK_WORKFLOW_INSTANCE_READ_MIN_INTERVAL_SECONDS must be between 0.01 and 5"
+            )
         return value
 
     @field_validator("dingtalk_storage_upload_host_suffixes")

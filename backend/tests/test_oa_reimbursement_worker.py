@@ -694,6 +694,30 @@ async def test_permanent_readback_error_requires_manual_review() -> None:
     assert state.job.status is ReimbursementSubmissionStatus.MANUAL_REVIEW
 
 
+async def test_rate_limited_readback_error_is_retried() -> None:
+    state = FakeState(
+        _job(
+            ReimbursementSubmissionStatus.VERIFYING,
+            upload=_upload(ReimbursementUploadStatus.COMMITTED),
+            process_instance_id="instance-1",
+            checkpointed=True,
+        )
+    )
+    workflow = FakeWorkflow(
+        get_error=DingTalkOpenAPIError._rate_limited(
+            http_status=403,
+            upstream_code="Forbidden.AccessDenied.QpsLimitForAppkeyAndApi",
+        )
+    )
+
+    await _processor(state, workflow, FakeStorage()).process(
+        _lease(ReimbursementSubmissionStatus.VERIFYING)
+    )
+
+    assert state.job.status is ReimbursementSubmissionStatus.FAILED_RETRYABLE
+    assert state.job.resume_status is ReimbursementSubmissionStatus.VERIFYING
+
+
 @pytest.mark.parametrize(
     "code",
     (
@@ -965,6 +989,27 @@ async def test_transient_validation_failure_is_retried_from_validation_phase() -
     processor = OAReimbursementProcessor(
         state=state,
         materializer=FailingValidationMaterializer(DingTalkOpenAPIError(http_status=503)),
+        workflow=FakeWorkflow(),
+        storage=FakeStorage(),
+        lease_seconds=30,
+        clock=lambda: NOW,
+    )
+
+    await processor.process(_lease(ReimbursementSubmissionStatus.VALIDATING))
+
+    assert state.job.status is ReimbursementSubmissionStatus.FAILED_RETRYABLE
+    assert state.job.resume_status is ReimbursementSubmissionStatus.VALIDATING
+
+
+async def test_rate_limited_validation_failure_is_retried_from_validation_phase() -> None:
+    state = FakeState(_job(ReimbursementSubmissionStatus.VALIDATING))
+    rate_limit = DingTalkOpenAPIError._rate_limited(
+        http_status=403,
+        upstream_code="Forbidden.AccessDenied.QpsLimitForAppkeyAndApi",
+    )
+    processor = OAReimbursementProcessor(
+        state=state,
+        materializer=FailingValidationMaterializer(rate_limit),
         workflow=FakeWorkflow(),
         storage=FakeStorage(),
         lease_seconds=30,

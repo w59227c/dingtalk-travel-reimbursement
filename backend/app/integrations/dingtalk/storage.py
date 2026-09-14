@@ -871,6 +871,8 @@ def _is_definitive_commit_rejection(error: DingTalkOpenAPIError) -> bool:
 def _is_definitive_cleanup_rejection(error: DingTalkOpenAPIError) -> bool:
     if error.code == "DINGTALK_PERMISSION_MISSING":
         return True
+    if error.code == "DINGTALK_RATE_LIMITED":
+        return False
     status_code = error.http_status
     return bool(
         status_code is not None

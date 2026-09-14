@@ -728,7 +728,11 @@ COMMITTING -> COMMIT_UNCERTAIN
 
 ### 12.3 哪些操作能自动重试
 
-- 读取 Schema、查询审批、回读 OA 可以做有上限的退避重试；
+- 读取 Schema、查询审批、回读 OA 可以做有上限的退避重试；审批详情读取通过共享
+  OpenAPI 客户端在单个后端进程内跨用户统一间隔请求，避免单次列表的并发详情读取与多个
+  用户查询叠加形成突发流量。HTTP 429 及上游错误码
+  `Forbidden.AccessDenied.QpsLimitForAppkeyAndApi` 均按临时限流处理，读取操作以 0.5 秒、
+  1 秒退避重试，耗尽后返回 `503 / DINGTALK_RATE_LIMITED`，不得归类为权限不足；
 - 签名 `PUT` 可安全重做；进程在 `PUT_DONE` 后崩溃时会申请新票据并重新 PUT；
 - commit 明确被钉钉拒绝时，确认没有生成远端文件，状态重置为 `PENDING` 后重新上传；
 - 已保存为 `COMMITTED` 的文件先按 `spaceId/fileId` 探测并核对元数据，存在且完全一致时复用，不重复上传；
@@ -898,6 +902,7 @@ SQLite CAS、唯一约束和触发器共同保证：
 | `DINGTALK_CLIENT_SECRET` | 生产必填 | 只注入后端的应用 Secret |
 | `DINGTALK_CORP_ID` | 生产必填 | 企业 CorpId |
 | `DINGTALK_AGENT_ID` | 生产必填，正整数 | 同一应用的 AgentId |
+| `DINGTALK_WORKFLOW_INSTANCE_READ_MIN_INTERVAL_SECONDS` | `0.2` | 同一后端进程内跨用户审批详情请求的最小启动间隔，允许 0.01～5 秒 |
 | `DINGTALK_STORAGE_UPLOAD_TIMEOUT_SECONDS` | `120` | 单次签名上传超时，允许 5～900 秒 |
 | `DINGTALK_STORAGE_UPLOAD_HOST_SUFFIXES` | `trans.dingtalk.com` | 允许接收签名 PUT 的 HTTPS 主机后缀白名单 |
 | `DINGTALK_OA_WORKER_ENABLED` | `false` | 代码、开发和生产示例均安全默认关闭；只在预检通过并明确准备验收或正式接单时显式开启 |

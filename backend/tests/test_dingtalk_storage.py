@@ -1100,7 +1100,7 @@ async def test_probe_does_not_treat_permission_failure_as_missing(settings_facto
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("delete_kind", ["success", "timeout", "not-found"])
+@pytest.mark.parametrize("delete_kind", ["success", "timeout", "not-found", "qps-limit"])
 async def test_recycle_attachment_verifies_missing_after_one_delete_attempt(
     settings_factory,
     delete_kind: str,
@@ -1129,6 +1129,11 @@ async def test_recycle_attachment_verifies_missing_after_one_delete_attempt(
             raise httpx.ReadTimeout("private delete timeout", request=request)
         if delete_kind == "not-found":
             return httpx.Response(404, json={"code": "NotFound"})
+        if delete_kind == "qps-limit":
+            return httpx.Response(
+                403,
+                json={"code": "Forbidden.AccessDenied.QpsLimitForAppkeyAndApi"},
+            )
         return httpx.Response(200, json={"taskId": "task-1"})
 
     openapi, storage = storage_clients(

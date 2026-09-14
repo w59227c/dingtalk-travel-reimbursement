@@ -2534,6 +2534,8 @@ def _is_retryable_validation_error(error: ApiError) -> bool:
         return False
     if error.code == "DINGTALK_PERMISSION_MISSING":
         return False
+    if error.code == "DINGTALK_RATE_LIMITED":
+        return True
     return (
         error.http_status is None
         or error.http_status in {408, 425, 429}
@@ -2564,6 +2566,8 @@ def _is_retryable_remote_error(error: ApiError) -> bool:
         return False
     if error.code == "DINGTALK_PERMISSION_MISSING":
         return False
+    if error.code == "DINGTALK_RATE_LIMITED":
+        return True
     return (
         error.http_status is None
         or error.http_status in {408, 425, 429}

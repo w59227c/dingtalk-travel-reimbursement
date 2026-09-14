@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
+from time import monotonic
 
 import httpx
 import pytest
@@ -199,12 +201,166 @@ async def test_idempotent_get_retries_rate_limit_with_sanitized_error(
 
     error = caught.value
     assert calls == {"token": 1, "openapi": 3}
-    assert error.status_code == 502
-    assert error.code == "DINGTALK_OPENAPI_FAILED"
+    assert error.status_code == 503
+    assert error.code == "DINGTALK_RATE_LIMITED"
+    assert error.message == "钉钉接口请求繁忙，请稍后重试"
     assert error.http_status == 429
     assert error.upstream_code == "Throttling.RateLimit"
     assert "private" not in str(error)
     assert "private" not in repr(error)
+
+
+@pytest.mark.asyncio
+async def test_idempotent_get_retries_qps_limit_returned_as_403(
+    settings_factory,
+) -> None:
+    calls = {"token": 0, "openapi": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            calls["token"] += 1
+            return httpx.Response(200, json={"access_token": "private-token"})
+        calls["openapi"] += 1
+        if calls["openapi"] < 3:
+            return httpx.Response(
+                403,
+                json={
+                    "code": "Forbidden.AccessDenied.QpsLimitForAppkeyAndApi",
+                    "message": "private upstream diagnostic",
+                },
+            )
+        return httpx.Response(200, json={"success": True})
+
+    client = DingTalkOpenAPIClient(
+        settings_factory(),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await client.request_openapi_json(
+            "GET",
+            "/v1.0/workflow/processInstances",
+        )
+    finally:
+        await client.close()
+
+    assert result == {"success": True}
+    assert calls == {"token": 1, "openapi": 3}
+
+
+@pytest.mark.asyncio
+async def test_exhausted_qps_limit_is_not_reported_as_permission_failure(
+    settings_factory,
+) -> None:
+    calls = {"token": 0, "openapi": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            calls["token"] += 1
+            return httpx.Response(200, json={"access_token": "private-token"})
+        calls["openapi"] += 1
+        return httpx.Response(
+            403,
+            json={"code": "Forbidden.AccessDenied.QpsLimitForAppkeyAndApi"},
+        )
+
+    client = DingTalkOpenAPIClient(
+        settings_factory(),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(DingTalkOpenAPIError) as caught:
+            await client.request_openapi_json(
+                "GET",
+                "/v1.0/workflow/processInstances",
+            )
+    finally:
+        await client.close()
+
+    assert calls == {"token": 1, "openapi": 3}
+    assert caught.value.code == "DINGTALK_RATE_LIMITED"
+    assert caught.value.status_code == 503
+    assert caught.value.message == "钉钉接口请求繁忙，请稍后重试"
+    assert caught.value.http_status == 403
+
+
+@pytest.mark.asyncio
+async def test_workflow_instance_reads_are_paced_across_concurrent_callers(
+    settings_factory,
+) -> None:
+    starts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"access_token": "private-token"})
+        starts.append(monotonic())
+        return httpx.Response(200, json={"success": True})
+
+    client = DingTalkOpenAPIClient(
+        settings_factory(
+            dingtalk_workflow_instance_read_min_interval_seconds=0.03,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await asyncio.gather(
+            *(
+                client.request_openapi_json(
+                    "GET",
+                    "/v1.0/workflow/processInstances",
+                    params={"processInstanceId": f"synthetic-{index}"},
+                )
+                for index in range(3)
+            )
+        )
+    finally:
+        await client.close()
+
+    assert len(starts) == 3
+    assert all(
+        current - previous >= 0.02 for previous, current in zip(starts, starts[1:], strict=False)
+    )
+
+
+@pytest.mark.asyncio
+async def test_qps_limit_defers_other_workflow_instance_read_callers(
+    settings_factory,
+) -> None:
+    starts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"access_token": "private-token"})
+        starts.append(monotonic())
+        if len(starts) == 1:
+            return httpx.Response(
+                403,
+                json={"code": "Forbidden.AccessDenied.QpsLimitForAppkeyAndApi"},
+            )
+        return httpx.Response(200, json={"success": True})
+
+    client = DingTalkOpenAPIClient(
+        settings_factory(
+            dingtalk_workflow_instance_read_min_interval_seconds=0.03,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        results = await asyncio.gather(
+            *(
+                client.request_openapi_json(
+                    "GET",
+                    "/v1.0/workflow/processInstances",
+                    params={"processInstanceId": f"synthetic-{index}"},
+                )
+                for index in range(2)
+            )
+        )
+    finally:
+        await client.close()
+
+    assert results == [{"success": True}, {"success": True}]
+    assert len(starts) == 3
+    assert starts[1] - starts[0] >= 0.45
 
 
 @pytest.mark.asyncio

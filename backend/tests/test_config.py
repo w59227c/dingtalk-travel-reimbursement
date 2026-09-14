@@ -230,6 +230,40 @@ def test_storage_upload_boundary_settings_are_normalized_and_bounded() -> None:
             Settings(dingtalk_storage_upload_host_suffixes=hosts)
 
 
+def test_workflow_instance_read_pacing_is_bounded_and_wired_for_deployment() -> None:
+    assert Settings().dingtalk_workflow_instance_read_min_interval_seconds == 0.2
+    assert (
+        Settings(
+            dingtalk_workflow_instance_read_min_interval_seconds=0.01
+        ).dingtalk_workflow_instance_read_min_interval_seconds
+        == 0.01
+    )
+    assert (
+        Settings(
+            dingtalk_workflow_instance_read_min_interval_seconds=5
+        ).dingtalk_workflow_instance_read_min_interval_seconds
+        == 5
+    )
+    for interval in (0, 5.01):
+        with pytest.raises(ValidationError, match="WORKFLOW_INSTANCE_READ_MIN_INTERVAL_SECONDS"):
+            Settings(dingtalk_workflow_instance_read_min_interval_seconds=interval)
+
+    expected = "DINGTALK_WORKFLOW_INSTANCE_READ_MIN_INTERVAL_SECONDS=0.2"
+    for env_name in (
+        ".env.example",
+        ".env.production.example",
+        ".env.production.16c32g.example",
+        ".env.dingtalk-dev.example",
+    ):
+        assert expected in (REPOSITORY_ROOT / env_name).read_text()
+
+    compose = (REPOSITORY_ROOT / "docker-compose.yml").read_text()
+    assert (
+        "DINGTALK_WORKFLOW_INSTANCE_READ_MIN_INTERVAL_SECONDS: "
+        "${DINGTALK_WORKFLOW_INSTANCE_READ_MIN_INTERVAL_SECONDS:-0.2}"
+    ) in compose
+
+
 def test_storage_upload_settings_are_wired_through_deployment_entrypoints() -> None:
     required = (
         "DINGTALK_STORAGE_UPLOAD_TIMEOUT_SECONDS=120",

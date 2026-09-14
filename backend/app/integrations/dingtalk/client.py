@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
 
@@ -18,7 +19,14 @@ _OPENAPI_PERMISSION_CODES = frozenset(
     {
         "Forbidden.AccessDenied.AccessTokenPermissionDenied",
         "Forbidden.AccessDenied.PermissionDenied",
+        "Forbidden.Private",
         "noPermission",
+    }
+)
+_OPENAPI_RATE_LIMIT_CODES = frozenset(
+    {
+        "forbidden.accessdenied.qpslimitforappkeyandapi",
+        "throttling.ratelimit",
     }
 )
 _OPENAPI_OPERATIONS = {
@@ -79,6 +87,45 @@ class DingTalkOpenAPIError(ApiError):
         error.message = "钉钉应用权限不足，请联系管理员"
         return error
 
+    @classmethod
+    def _rate_limited(
+        cls,
+        *,
+        http_status: int | None,
+        upstream_code: object = None,
+    ) -> DingTalkOpenAPIError:
+        error = cls(http_status=http_status, upstream_code=upstream_code)
+        error.code = "DINGTALK_RATE_LIMITED"
+        error.message = "钉钉接口请求繁忙，请稍后重试"
+        error.status_code = 503
+        return error
+
+
+class _RequestPacer:
+    """Space request starts across every caller sharing one application client."""
+
+    def __init__(self, minimum_interval_seconds: float) -> None:
+        self._minimum_interval_seconds = minimum_interval_seconds
+        self._lock = asyncio.Lock()
+        self._next_start_at = 0.0
+
+    async def wait(self) -> None:
+        while True:
+            async with self._lock:
+                now = monotonic()
+                delay = self._next_start_at - now
+                if delay <= 0:
+                    self._next_start_at = now + self._minimum_interval_seconds
+                    return
+            await asyncio.sleep(delay)
+
+    async def defer(self, delay_seconds: float) -> None:
+        async with self._lock:
+            self._next_start_at = max(
+                self._next_start_at,
+                monotonic() + delay_seconds,
+            )
+
 
 class DingTalkOpenAPIClient:
     """Shared organization-app token and HTTP boundary for DingTalk APIs."""
@@ -97,6 +144,9 @@ class DingTalkOpenAPIClient:
         self._access_token: str | None = None
         self._access_token_expires_at = 0.0
         self._token_lock = asyncio.Lock()
+        self._workflow_instance_read_pacer = _RequestPacer(
+            settings.dingtalk_workflow_instance_read_min_interval_seconds
+        )
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -116,6 +166,10 @@ class DingTalkOpenAPIClient:
         retry_transient: bool | None = None,
     ) -> dict[str, Any]:
         _validate_path(path)
+        operation = _openapi_operation(method, path)
+        pacer = (
+            self._workflow_instance_read_pacer if operation == "workflow_instance_read" else None
+        )
         for token_attempt in range(2):
             token = await self._get_access_token()
             error: DingTalkOpenAPIError | None = None
@@ -127,6 +181,8 @@ class DingTalkOpenAPIClient:
                     json=json,
                     headers={"x-acs-dingtalk-access-token": token},
                     retry_transient=_should_retry(method, retry_transient),
+                    before_attempt=pacer.wait if pacer is not None else None,
+                    on_rate_limit=pacer.defer if pacer is not None else None,
                 )
             except DingTalkOpenAPIError as exc:
                 error = exc
@@ -136,7 +192,12 @@ class DingTalkOpenAPIClient:
                     self.evict_token()
                     if retry_invalid_token and token_attempt == 0:
                         continue
-                if error.http_status == 403:
+                if _is_rate_limit_error(error):
+                    error = DingTalkOpenAPIError._rate_limited(
+                        http_status=error.http_status,
+                        upstream_code=error.upstream_code,
+                    )
+                elif error.http_status == 403 and _is_permission_code(error.upstream_code):
                     error = DingTalkOpenAPIError._permission_denied(
                         http_status=error.http_status,
                         upstream_code=error.upstream_code,
@@ -211,10 +272,14 @@ class DingTalkOpenAPIClient:
         headers: dict[str, str] | None = None,
         retry_transient: bool,
         retry_oapi_error: bool = False,
+        before_attempt: Callable[[], Awaitable[None]] | None = None,
+        on_rate_limit: Callable[[float], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         attempts = 3 if retry_transient else 1
         error: DingTalkOpenAPIError | None = None
         for attempt in range(attempts):
+            if before_attempt is not None:
+                await before_attempt()
             response: httpx.Response | None = None
             try:
                 response = await self._http.request(
@@ -228,13 +293,25 @@ class DingTalkOpenAPIClient:
                 error = DingTalkOpenAPIError(http_status=None)
 
             if response is not None:
-                if response.status_code == 429 or response.status_code >= 500:
-                    error = _response_error(response)
-                elif not 200 <= response.status_code < 300:
-                    raise _response_error(response)
+                if not 200 <= response.status_code < 300:
+                    response_error = _response_error(response)
+                    if (
+                        response.status_code == 429
+                        or response.status_code >= 500
+                        or _is_rate_limit_code(response_error.upstream_code)
+                    ):
+                        error = response_error
+                    else:
+                        raise response_error
                 else:
                     payload = _response_json(response)
-                    if retry_oapi_error and _integer_error_code(payload) == -1:
+                    upstream_code = _sanitized_upstream_code(_payload_code(payload))
+                    if _is_rate_limit_code(upstream_code):
+                        error = DingTalkOpenAPIError(
+                            http_status=response.status_code,
+                            upstream_code=upstream_code,
+                        )
+                    elif retry_oapi_error and _integer_error_code(payload) == -1:
                         error = DingTalkOpenAPIError(
                             http_status=response.status_code,
                             upstream_code=-1,
@@ -242,8 +319,13 @@ class DingTalkOpenAPIClient:
                     else:
                         return payload
 
+            is_rate_limit = _is_rate_limit_error(error)
+            retry_base_seconds = 0.5 if is_rate_limit else 0.2
+            retry_delay_seconds = retry_base_seconds * (2**attempt)
+            if is_rate_limit and on_rate_limit is not None:
+                await on_rate_limit(retry_delay_seconds)
             if attempt + 1 < attempts:
-                await asyncio.sleep(0.2 * (2**attempt))
+                await asyncio.sleep(retry_delay_seconds)
                 continue
             if error is not None:
                 raise error
@@ -336,6 +418,16 @@ def _validate_path(path: str) -> None:
 
 def _is_permission_code(code: str | None) -> bool:
     return bool(code and (code in _OPENAPI_PERMISSION_CODES or "PermissionDenied" in code))
+
+
+def _is_rate_limit_code(code: str | None) -> bool:
+    return bool(code and code.casefold() in _OPENAPI_RATE_LIMIT_CODES)
+
+
+def _is_rate_limit_error(error: DingTalkOpenAPIError | None) -> bool:
+    return bool(
+        error is not None and (error.http_status == 429 or _is_rate_limit_code(error.upstream_code))
+    )
 
 
 def _log_openapi_failure(
