@@ -7,7 +7,6 @@ import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
 
 import {
   getReimbursementFileContent,
-  getReimbursementFileContentUrl,
   getReimbursementPdfPreviewPage,
 } from '@/api/reimbursements'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
@@ -858,12 +857,8 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
   receiptPreviewFileId.value = file.id
   receiptPreviewPage.value = 1
   receiptPreviewPageCount.value = 1
-  if (isPdf) {
-    receiptPreviewMode.value = 'direct'
-    receiptPreviewUrl.value = getReimbursementFileContentUrl(draft.id, file.id)
-    receiptPreviewVisible.value = true
-    return
-  }
+  receiptPreviewMode.value = 'direct'
+  receiptPreviewVisible.value = true
 
   const controller = new AbortController()
   previewController = controller
@@ -874,7 +869,14 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
       pageNumber: 1,
       pageCount: 1,
     }
-    if (controller.signal.aborted || drafts.currentDraft?.id !== draft.id || durableUnmounted) return
+    if (
+      controller.signal.aborted
+      || drafts.currentDraft?.id !== draft.id
+      || receiptPreviewFileId.value !== file.id
+      || receiptPreviewMode.value !== 'direct'
+      || !receiptPreviewVisible.value
+      || durableUnmounted
+    ) return
     receiptPreviewPage.value = preview.pageNumber
     receiptPreviewPageCount.value = preview.pageCount
     replaceReceiptPreviewUrl(preview.blob)
@@ -943,24 +945,20 @@ async function loadCompatiblePdfPage(pageNumber: number): Promise<void> {
 
 async function useCompatiblePdfPreview(): Promise<void> {
   if (receiptPreviewKind.value !== 'pdf' || receiptPreviewMode.value === 'compatible') return
+  previewController?.abort()
+  previewController = null
+  previewLoading.value = false
+  if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl)
+  receiptPreviewObjectUrl = ''
   receiptPreviewMode.value = 'compatible'
   receiptPreviewUrl.value = ''
   await loadCompatiblePdfPage(1)
 }
 
-function useDirectPdfPreview(): void {
-  const draft = drafts.currentDraft
+async function useDirectPdfPreview(): Promise<void> {
   const fileId = receiptPreviewFileId.value
-  if (!draft || !fileId || receiptPreviewKind.value !== 'pdf') return
-  previewController?.abort()
-  previewController = null
-  if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl)
-  receiptPreviewObjectUrl = ''
-  receiptPreviewMode.value = 'direct'
-  receiptPreviewUrl.value = getReimbursementFileContentUrl(draft.id, fileId)
-  receiptPreviewPage.value = 1
-  receiptPreviewPageCount.value = 1
-  previewLoading.value = false
+  if (!fileId || receiptPreviewKind.value !== 'pdf') return
+  await previewDurableFile(durableFiles.value.find((file) => file.id === fileId))
 }
 
 async function changeReceiptPreviewPage(pageNumber: number): Promise<void> {

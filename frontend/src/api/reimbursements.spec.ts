@@ -10,7 +10,6 @@ import {
   getOaReimbursementSubmissionForDraft,
   getReimbursementDraft,
   getReimbursementFileContent,
-  getReimbursementFileContentUrl,
   getReimbursementPdfPreviewPage,
   getReimbursementDraftExcelPreview,
   getOaReimbursementOptions,
@@ -84,12 +83,6 @@ describe('persistent reimbursement API', () => {
     expect(http.get).toHaveBeenCalledWith('/reimbursements/drafts/draft%2F1/files/file%202/content', {
       responseType: 'blob', signal, timeout: 60_000,
     })
-  })
-
-  it('builds a same-origin authenticated attachment URL for direct embedded preview', () => {
-    expect(getReimbursementFileContentUrl('draft/一', 'file 2')).toBe(
-      '/api/reimbursements/drafts/draft%2F%E4%B8%80/files/file%202/content',
-    )
   })
 
   it('fetches a rendered PDF page and validates its pagination headers', async () => {
