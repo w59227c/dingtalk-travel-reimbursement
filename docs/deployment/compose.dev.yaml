@@ -4,8 +4,7 @@ services:
   backend:
     image: ghcr.io/w59227c/dingtalk-travel-reimbursement-backend:${IMAGE_TAG:-main}
     platform: linux/amd64
-    env_file:
-      - ${APP_ENV_FILE:-.env}
+    env_file: .env
     environment:
       APP_ENV: production
       DATABASE_URL: sqlite:////app/data/app.db
@@ -18,9 +17,8 @@ services:
       - sqlite_data:/app/data
       - reimbursement_staging:/app/staging
     read_only: true
-    cpus: "${BACKEND_CPUS:-12.0}"
-    mem_limit: ${BACKEND_MEMORY_LIMIT:-16g}
-    pids_limit: ${BACKEND_PIDS_LIMIT:-256}
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-3g}
+    pids_limit: ${BACKEND_PIDS_LIMIT:-128}
     tmpfs:
       - /tmp/expense:uid=10001,gid=10001,mode=0700,size=1073741824
     healthcheck:
@@ -36,9 +34,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "20m"
-        max-file: "5"
-    stop_grace_period: 30s
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   web:
@@ -51,8 +48,7 @@ services:
       - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:8080"
     user: "101:101"
     read_only: true
-    cpus: "${WEB_CPUS:-1.0}"
-    mem_limit: ${WEB_MEMORY_LIMIT:-256m}
+    mem_limit: ${WEB_MEMORY_LIMIT:-128m}
     pids_limit: ${WEB_PIDS_LIMIT:-64}
     cap_drop:
       - ALL
@@ -70,8 +66,8 @@ services:
     logging:
       driver: json-file
       options:
-        max-size: "20m"
-        max-file: "5"
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
 volumes:

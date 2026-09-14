@@ -12,6 +12,12 @@
 └── .env
 ```
 
+仓库当前的 `compose.yaml` 即为 16C / 32 GiB 内存 / 100 GiB 磁盘准备的资源配置；将项目
+根目录的 `.env.production.16c32g.example` 复制为同目录 `.env`。该配置为后端限制 12 核、16 GiB，
+OCR 单槽使用 8 个 CPU 线程并限制为 8 GiB，Web 限制 1 核、256 MiB，持久材料逻辑上限为
+30 GiB；剩余资源保留给宿主系统、Docker、页缓存、备份和突发任务。当前程序只允许一个 OCR
+执行槽，不要把 `OCR_CONCURRENCY` 改成大于 1。低资源测试服务器可参考 `compose.dev.yaml`。
+
 `.env` 不需要添加 `IMAGE_TAG`，缺省会使用 `main`；也可以显式设置：
 
 ```dotenv
