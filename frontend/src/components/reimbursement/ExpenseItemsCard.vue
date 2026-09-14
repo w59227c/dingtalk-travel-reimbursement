@@ -5,7 +5,10 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
 import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
 
-import { getReimbursementFileContent } from '@/api/reimbursements'
+import {
+  getReimbursementFileContent,
+  requestReimbursementDraftFilePreviewTicket,
+} from '@/api/reimbursements'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
@@ -19,6 +22,7 @@ import type {
   ReimbursementDraftFile,
   ReimbursementDraftFileRole,
 } from '@/types/reimbursements'
+import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import { formatFileSize } from '@/utils/receiptFiles'
 import {
   evidenceRailType,
@@ -816,6 +820,18 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
   previewController = controller
   previewLoading.value = true
   try {
+    if (props.mobile && file.mediaType === 'application/pdf') {
+      const ticket = await requestReimbursementDraftFilePreviewTicket(draft.id, file.id, {
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || drafts.currentDraft?.id !== draft.id || durableUnmounted) return
+      await downloadAndOpenDingTalkDocument({
+        url: new URL(ticket.downloadUrl, window.location.origin).href,
+        headers: { 'X-Reimbursement-Download-Token': ticket.downloadToken },
+        fileType: ticket.fileType,
+      })
+      return
+    }
     const blob = await getReimbursementFileContent(draft.id, file.id, { signal: controller.signal })
     if (controller.signal.aborted || drafts.currentDraft?.id !== draft.id || durableUnmounted) return
     receiptPreviewName.value = file.name
@@ -1843,7 +1859,7 @@ async function retryItemRecognition(id: string): Promise<void> {
     >
       <el-table-column
         label="类型"
-        min-width="120"
+        min-width="160"
       >
         <template #default="scope">
           <div class="expense-category-cell">
@@ -2263,11 +2279,11 @@ async function retryItemRecognition(id: string): Promise<void> {
     <p class="field-help receipt-preview-help">
       <span>预览本次报销的原始材料，请核对金额、日期和票面内容。</span>
       <a
-        v-if="receiptPreviewKind === 'pdf'"
+        v-if="receiptPreviewKind === 'pdf' && !props.mobile"
         :href="receiptPreviewUrl"
         target="_blank"
         rel="noopener noreferrer"
-      >PDF 未显示时在新窗口打开</a>
+      >在新标签页打开 PDF</a>
     </p>
     <template #footer>
       <el-button @click="receiptPreviewVisible = false">
@@ -2673,6 +2689,8 @@ async function retryItemRecognition(id: string): Promise<void> {
 <style scoped>
 .receipt-upload-button { min-width: 148px; }
 .expense-table.expense-table--hidden { display: none; }
+.expense-table :deep(.el-table__body td.el-table__cell) { vertical-align: top; }
+.expense-table :deep(.el-table__body td.el-table__cell > .cell) { padding-block: 12px; }
 .material-workbench__heading {
   margin-top: 18px;
   padding: 14px 14px 0;

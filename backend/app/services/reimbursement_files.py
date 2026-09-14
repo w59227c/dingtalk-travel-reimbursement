@@ -275,12 +275,12 @@ def read_draft_file_content(
     file_id: str,
     staging: ReimbursementStaging,
 ) -> tuple[DraftFileSnapshot, bytes]:
-    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
-    if draft.expires_at <= utc_now() or draft.status == "EXPIRED":
-        raise ApiError("REIMBURSEMENT_DRAFT_EXPIRED", "报销资料已过期，请重新上传", 409)
-    file = _snapshot(_require_active_file(database, draft_id=draft.id, file_id=file_id))
-    if file.media_type not in {"application/pdf", "image/png", "image/jpeg"}:
-        raise ApiError("UNSUPPORTED_FILE_TYPE", "此文件类型不能预览", 415)
+    file = require_previewable_draft_file(
+        database,
+        actor=actor,
+        draft_id=draft_id,
+        file_id=file_id,
+    )
     try:
         content = staging.read_bytes(
             file.storage_key, expected_size=file.size_bytes, expected_sha256=file.sha256
@@ -290,6 +290,22 @@ def read_draft_file_content(
             "REIMBURSEMENT_DRAFT_FILE_CHANGED", "附件已丢失或内容发生变化，请重新上传", 409
         ) from None
     return file, content
+
+
+def require_previewable_draft_file(
+    database: Session,
+    *,
+    actor: DraftActor,
+    draft_id: str,
+    file_id: str,
+) -> DraftFileSnapshot:
+    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    if draft.expires_at <= utc_now() or draft.status == "EXPIRED":
+        raise ApiError("REIMBURSEMENT_DRAFT_EXPIRED", "报销资料已过期，请重新上传", 409)
+    file = _snapshot(_require_active_file(database, draft_id=draft.id, file_id=file_id))
+    if file.media_type not in {"application/pdf", "image/png", "image/jpeg"}:
+        raise ApiError("UNSUPPORTED_FILE_TYPE", "此文件类型不能预览", 415)
+    return file
 
 
 async def persist_draft_upload(

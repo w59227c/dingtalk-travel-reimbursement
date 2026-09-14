@@ -19,6 +19,7 @@ import type {
   ReimbursementDraftOcrInput,
   ReimbursementExcelPreview,
   ReimbursementExcelPreviewTicket,
+  ReimbursementFilePreviewTicket,
   ReimbursementRelatedApprovalSelection,
   ReimbursementSubmission,
   SubmitReimbursementInput,
@@ -343,6 +344,19 @@ export async function getReimbursementFileContent(
     timeout: 60_000,
   }).catch(normalizeBlobApiError)
   return response.data
+}
+
+export async function requestReimbursementDraftFilePreviewTicket(
+  draftId: string,
+  fileId: string,
+  options: ReimbursementRequestOptions = {},
+): Promise<ReimbursementFilePreviewTicket> {
+  const response = await http.post<ApiEnvelope<ReimbursementFilePreviewTicket>>(
+    `${fileUrl(draftId, fileId)}/preview-ticket`,
+    undefined,
+    { signal: options.signal },
+  )
+  return response.data.data
 }
 
 export async function downloadReimbursementDraftExcelPreview(

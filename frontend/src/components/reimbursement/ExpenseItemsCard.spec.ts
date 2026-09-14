@@ -11,6 +11,7 @@ import {
   getReimbursementFileContent,
   listReimbursementDraftFiles,
   recognizeReimbursementDraftFile,
+  requestReimbursementDraftFilePreviewTicket,
   updateReimbursementDraft,
   updateReimbursementDraftFile,
   uploadReimbursementDraftFile,
@@ -21,6 +22,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import type { OcrReceiptCandidate, ItineraryOcrResult } from '@/types/receipts'
 import { receiptOcrResult } from '@/types/reimbursements'
+import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import type {
   ReimbursementDraft,
   ReimbursementDraftFile,
@@ -42,11 +44,16 @@ vi.mock('@/api/reimbursements', async (importOriginal) => {
     getReimbursementFileContent: vi.fn(),
     listReimbursementDraftFiles: vi.fn(),
     recognizeReimbursementDraftFile: vi.fn(),
+    requestReimbursementDraftFilePreviewTicket: vi.fn(),
     updateReimbursementDraft: vi.fn(),
     updateReimbursementDraftFile: vi.fn(),
     uploadReimbursementDraftFile: vi.fn(),
   }
 })
+
+vi.mock('@/utils/dingtalk', () => ({
+  downloadAndOpenDingTalkDocument: vi.fn(),
+}))
 
 function draft(revision = 1, id = 'draft-1'): ReimbursementDraft {
   return {
@@ -2388,6 +2395,47 @@ describe('ExpenseItemsCard durable files', () => {
     expect(wrapper.get('iframe').attributes('src')).toBe('blob:server-preview')
     wrapper.unmount()
     expect(revokeUrl).toHaveBeenCalledWith('blob:server-preview')
+  })
+
+  it('opens mobile PDFs through the authenticated DingTalk document flow', async () => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const source = recognizedFile('file-1', '发票.pdf', '10.00')
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+    vi.mocked(requestReimbursementDraftFilePreviewTicket).mockResolvedValue({
+      downloadUrl: '/api/reimbursements/drafts/draft-1/files/file-1/preview/native',
+      downloadToken: 'signed-file-ticket',
+      fileType: 'pdf',
+    })
+    vi.mocked(downloadAndOpenDingTalkDocument).mockResolvedValue()
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const preview = wrapper.findAll('.expense-mobile-card button').find((button) =>
+      button.text().includes('发票.pdf · 预览'),
+    )!
+    await preview.trigger('click')
+    await flushPromises()
+
+    expect(requestReimbursementDraftFilePreviewTicket).toHaveBeenCalledWith(
+      'draft-1',
+      'file-1',
+      { signal: expect.any(AbortSignal) },
+    )
+    expect(downloadAndOpenDingTalkDocument).toHaveBeenCalledWith({
+      url: `${window.location.origin}/api/reimbursements/drafts/draft-1/files/file-1/preview/native`,
+      headers: { 'X-Reimbursement-Download-Token': 'signed-file-ticket' },
+      fileType: 'pdf',
+    })
+    expect(getReimbursementFileContent).not.toHaveBeenCalled()
+    expect(wrapper.find('iframe').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it.each([

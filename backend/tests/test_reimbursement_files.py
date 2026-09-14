@@ -1228,6 +1228,71 @@ def test_excel_preview_native_ticket_survives_external_download_without_session_
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_original_file_preview_ticket_survives_native_download_without_session_cookie(
+    client_factory,
+) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    uploaded = _upload(client, csrf, draft_id, revision=1, name="原始票据.png")
+    assert uploaded.status_code == 201, uploaded.text
+    file_id = uploaded.json()["data"]["file"]["id"]
+
+    issued = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/files/{file_id}/preview-ticket",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert issued.status_code == 200, issued.text
+    ticket = issued.json()["data"]
+    assert ticket["fileType"] == "png"
+
+    client.cookies.clear()
+    response = client.get(
+        ticket["downloadUrl"],
+        headers={"X-Reimbursement-Download-Token": ticket["downloadToken"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.content == _named_image_bytes("原始票据.png")
+    assert response.headers["content-type"].startswith("image/png")
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.headers["cache-control"] == "no-store, private"
+
+
+def test_original_file_preview_ticket_rejects_tampering_without_session_cookie(
+    client_factory,
+) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id = _insert_draft(client)
+    uploaded = _upload(client, csrf, draft_id, revision=1, name="原始票据.png")
+    file_id = uploaded.json()["data"]["file"]["id"]
+    issued = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/files/{file_id}/preview-ticket",
+        headers={"X-CSRF-Token": csrf},
+    )
+    token = issued.json()["data"]["downloadToken"]
+    swapped_path = issued.json()["data"]["downloadUrl"].replace(
+        file_id, f"{file_id}-other"
+    )
+    tampered = f"{token[:-1]}{'0' if token[-1] != '0' else '1'}"
+
+    client.cookies.clear()
+    wrong_file = client.get(
+        swapped_path,
+        headers={"X-Reimbursement-Download-Token": token},
+    )
+    response = client.get(
+        issued.json()["data"]["downloadUrl"],
+        headers={"X-Reimbursement-Download-Token": tampered},
+    )
+
+    assert wrong_file.status_code == 401
+    assert wrong_file.json()["error"]["code"] == "FILE_PREVIEW_TICKET_INVALID"
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "FILE_PREVIEW_TICKET_INVALID"
+
+
 def test_excel_preview_native_ticket_rejects_tampering_without_session_cookie(
     client_factory,
 ) -> None:
