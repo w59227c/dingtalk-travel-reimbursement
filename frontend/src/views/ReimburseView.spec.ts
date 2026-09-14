@@ -1234,6 +1234,30 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it('hides the unsupported OA deep link in the mobile presentation', async () => {
+    serverDraft = makeDraft({ status: 'LOCKED', revision: 5, lockedAt: '2026-09-04T00:02:00Z' })
+    vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({
+      status: 'SUBMITTED', statusVersion: 8, processInstanceId: 'oa-process-1',
+      businessId: 'OA-20260904001', approvalUrl: 'dingtalk://dingtalkclient/action/openapp?process=oa-process-1',
+      pollAfterMs: 0, submittedAt: '2026-09-04T00:03:00Z',
+    }))
+
+    const { wrapper } = await mountView(undefined, false, true)
+
+    expect(wrapper.text()).toContain('OA-20260904001')
+    expect(wrapper.find('[data-testid="approval-link"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('打开钉钉 OA')
+    await wrapper.findAll('.mobile-step-nav button')[3]!.trigger('click')
+    expect(wrapper.get('[data-testid="mobile-review-step"]').isVisible()).toBe(true)
+
+    await visibleButton(wrapper, '再报销一笔').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="mobile-approval-step"]').isVisible()).toBe(true)
+    expect(wrapper.findAll('.mobile-step-nav button')[0]!.attributes('aria-current')).toBe('step')
+    wrapper.unmount()
+  })
+
   it('preserves a definitive failure but lets the employee start a fresh reimbursement', async () => {
     serverDraft = makeDraft({ status: 'LOCKED', revision: 5, lockedAt: '2026-09-04T00:02:00Z' })
     vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({

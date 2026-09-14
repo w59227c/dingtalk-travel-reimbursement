@@ -457,7 +457,15 @@ async function newReimbursement(): Promise<void> {
   // retain its existing submission identity until reconciliation completes.
   if (!canStartNewReimbursement.value) return
   initializingWorkspace.value = true
-  try { await createBlankReimbursement() }
+  try {
+    await createBlankReimbursement()
+    if (props.mobile) {
+      mobileStep.value = 0
+      await nextTick()
+      document.querySelector<HTMLElement>('[data-testid="mobile-approval-step"]')
+        ?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    }
+  }
   catch (error) { ElMessage.error(error instanceof Error ? error.message : '新报销准备失败') }
   finally { initializingWorkspace.value = false }
 }
@@ -1109,7 +1117,7 @@ onBeforeUnmount(() => {
                     重新核对（不会重复提交）
                   </el-button>
                   <a
-                    v-if="submission.status === 'SUBMITTED' && submission.submission?.approvalUrl?.trim()"
+                    v-if="!props.mobile && submission.status === 'SUBMITTED' && submission.submission?.approvalUrl?.trim()"
                     :href="submission.submission.approvalUrl"
                     target="_blank"
                     rel="noopener noreferrer"
