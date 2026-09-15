@@ -18,6 +18,7 @@ import type {
   ReimbursementRelatedApproval,
   ReimbursementRelatedApprovalSelection,
   ReimbursementSubmissionStatus,
+  OaTravelApproval,
 } from '@/types/reimbursements'
 import {
   isActiveProof,
@@ -59,6 +60,8 @@ const pendingDepartmentApproval = ref<ReimbursementRelatedApprovalSelection | nu
 const selectedDepartmentChoiceId = ref('')
 const saving = ref(false)
 const saveError = ref('')
+const verifyingRelatedApprovals = ref(false)
+const relatedApprovalVerificationError = ref('')
 const submitFlowPending = ref(false)
 const replacingTemplate = ref(false)
 const refreshingServiceStatus = ref(false)
@@ -93,29 +96,29 @@ const pendingDepartmentApprovalTitle = computed(() => {
 })
 const companyLabel = computed(() => companyOptions.value.find((option) => option.value === companyValue.value)?.label ?? companyValue.value)
 const budgetLabel = computed(() => budgetOptions.value.find((option) => option.value === budgetCodeValue.value)?.label ?? budgetCodeValue.value)
+function approvalForDisplay(
+  selection: ReimbursementRelatedApprovalSelection,
+): OaTravelApproval | ReimbursementRelatedApproval | undefined {
+  const candidate = drafts.travelApprovals.find(
+    (approval) => approval.processInstanceId === selection.processInstanceId,
+  )
+  const linked = drafts.currentDraft?.relatedApprovals.find(
+    (approval) => approval.processInstanceId === selection.processInstanceId,
+  )
+  return relatedDirty.value ? candidate ?? linked : linked ?? candidate
+}
 const selectedTravelTypeLabel = computed(() => {
   const first = selectedRelatedApprovals.value[0]
   if (!first) return ''
-  const candidate = drafts.travelApprovals.find(
-    (approval) => approval.processInstanceId === first.processInstanceId,
-  )
-  if (candidate) return candidate.travelTypeOption.label
-  const linked = drafts.currentDraft?.relatedApprovals.find(
-    (approval) => approval.processInstanceId === first.processInstanceId,
-  )
+  const approval = approvalForDisplay(first)
+  if (approval && 'travelTypeOption' in approval) return approval.travelTypeOption.label
   const profile = drafts.reimbursementOptions?.travelProfiles.find(
     (item) => item.profileKey === first.profileKey,
   )
-  return mappedTravelTypeOption(profile, linked?.sourceTravelTypeValue)?.label ?? ''
+  return mappedTravelTypeOption(profile, approval?.sourceTravelTypeValue)?.label ?? ''
 })
 const selectedSubsidyApprovals = computed(() => selectedRelatedApprovals.value.flatMap((selection) => {
-  const candidate = drafts.travelApprovals.find(
-    (approval) => approval.processInstanceId === selection.processInstanceId,
-  )
-  const linked = drafts.currentDraft?.relatedApprovals.find(
-    (approval) => approval.processInstanceId === selection.processInstanceId,
-  )
-  const approval = candidate ?? linked
+  const approval = approvalForDisplay(selection)
   return approval ? [{
     processInstanceId: approval.processInstanceId,
     title: approval.title,
@@ -126,17 +129,14 @@ const selectedSubsidyApprovals = computed(() => selectedRelatedApprovals.value.f
 const selectedSubsidyTripType = computed<TripType | null>(() => {
   const first = selectedRelatedApprovals.value[0]
   if (!first) return null
-  const candidate = drafts.travelApprovals.find(
-    (approval) => approval.processInstanceId === first.processInstanceId,
-  )
-  if (candidate?.subsidyTripType) return candidate.subsidyTripType
-  const linked = drafts.currentDraft?.relatedApprovals.find(
-    (approval) => approval.processInstanceId === first.processInstanceId,
-  )
+  const approval = approvalForDisplay(first)
+  if (approval && 'subsidyTripType' in approval && approval.subsidyTripType) {
+    return approval.subsidyTripType
+  }
   const profile = drafts.reimbursementOptions?.travelProfiles.find(
     (item) => item.profileKey === first.profileKey,
   )
-  return subsidyTripTypeForProfile(profile, linked?.sourceTravelTypeValue)
+  return subsidyTripTypeForProfile(profile, approval?.sourceTravelTypeValue)
     ?? subsidyTripTypeForTravelLabel(selectedTravelTypeLabel.value)
 })
 const selectedTravelPeriods = computed(() => groupOverlappingSubsidyTrips(expense.subsidyTrips)
@@ -193,6 +193,37 @@ const currentFormInput = computed<ReimbursementDraftInput>(() => {
 const inputDirty = computed(() => inputSignature(currentFormInput.value) !== savedInputSignature.value)
 const relatedDirty = computed(() => relatedSignature(selectedRelatedApprovals.value) !== savedRelatedSignature.value)
 const formDirty = computed(() => inputDirty.value || relatedDirty.value)
+const pendingApprovalAccounting = computed(() => {
+  if (!relatedDirty.value || !selectedRelatedApprovals.value.length) return null
+  const candidates = selectedRelatedApprovals.value.map((selection) => drafts.travelApprovals.find(
+    (approval) => approval.processInstanceId === selection.processInstanceId,
+  ))
+  if (candidates.some((candidate) => !candidate)) return null
+  const company = candidates[0]?.companyOption
+  const budget = candidates[0]?.budgetCodeOption
+  if (!company || !budget || candidates.some((candidate) => (
+    candidate?.companyOption?.value !== company.value
+    || candidate?.budgetCodeOption?.value !== budget.value
+  ))) return null
+  return {
+    companyLabel: company.label || company.value,
+    budgetLabel: budget.label || budget.value,
+  }
+})
+const displayedCompanyLabel = computed(() => relatedDirty.value
+  ? pendingApprovalAccounting.value?.companyLabel ?? ''
+  : companyLabel.value)
+const displayedBudgetLabel = computed(() => relatedDirty.value
+  ? pendingApprovalAccounting.value?.budgetLabel ?? ''
+  : budgetLabel.value)
+const relatedApprovalVerificationPending = computed(() => Boolean(
+  verifyingRelatedApprovals.value || (selectedRelatedApprovals.value.length && relatedDirty.value),
+))
+const relatedApprovalVerified = computed(() => Boolean(
+  selectedRelatedApprovals.value.length
+  && !relatedApprovalVerificationPending.value
+  && drafts.currentDraft?.input.accountingSourceVerified,
+))
 const saveLabel = computed(() => trackedSubmission.value && submission.succeeded ? 'OA 已成功发起'
   : trackedSubmission.value && submission.status === 'QUEUED' ? '已排队，内容已锁定'
   : trackedSubmission.value || drafts.currentDraft?.status === 'LOCKED' ? '内容已锁定'
@@ -216,6 +247,7 @@ const materialSubmissionIssues = computed(() => drafts.files
   }))
   .filter((issue) => Boolean(issue.reason)))
 const submissionButtonReason = computed(() => formReadOnlyReason.value || submissionServiceReason.value
+  || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (drafts.busy ? '请等待材料处理完成' : '')
   || (materialSubmissionIssues.value.length
     ? `还有 ${materialSubmissionIssues.value.length} 份材料需处理后才能提交 OA` : '')
@@ -227,6 +259,7 @@ const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({
   .filter((entry) => entry.missing.length))
 const previewDisabledReason = computed(() => expense.itemReadinessError
   || (!budgetCodeValue.value ? '请先选择预算代码' : '')
+  || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (props.mobile && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
   || (submitFlowPending.value ? '正在提交，请稍候' : ''))
 const submissionProgress: ReimbursementSubmissionStatus[] = [
@@ -273,17 +306,6 @@ function acceptDerivedAccounting(): void {
     savedInputSignature.value = inputSignature({ ...saved, companyValue: input.companyValue, budgetCodeValue: input.budgetCodeValue })
   }
 }
-async function reconfirmRelatedApprovals(): Promise<void> {
-  try {
-    await flushAutosave()
-    const selections = JSON.parse(JSON.stringify(selectedRelatedApprovals.value)) as ReimbursementRelatedApprovalSelection[]
-    await drafts.saveRelatedApprovals(selections)
-    savedRelatedSignature.value = relatedSignature(selections)
-    acceptDerivedAccounting()
-  } catch (error) {
-    saveError.value = error instanceof Error ? error.message : '出差审批核验失败，请重试'
-  }
-}
 function shanghaiDate(milliseconds: number): string {
   const parts = new Intl.DateTimeFormat('en', {
     timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -297,6 +319,92 @@ function approvalSelection(approval: ReimbursementRelatedApproval): Reimbursemen
     queryWindow: { from: shanghaiDate(approval.queryWindow.startTimeMs), to: shanghaiDate(approval.queryWindow.endTimeMs) },
   }
 }
+function cloneRelatedApprovalSelections(
+  selections: ReimbursementRelatedApprovalSelection[],
+): ReimbursementRelatedApprovalSelection[] {
+  return JSON.parse(JSON.stringify(selections)) as ReimbursementRelatedApprovalSelection[]
+}
+function acceptAuthoritativeRelatedApprovals(): void {
+  const authoritativeSelections = drafts.currentDraft?.relatedApprovals.map(approvalSelection) ?? []
+  selectedRelatedApprovals.value = authoritativeSelections
+  savedRelatedSignature.value = relatedSignature(authoritativeSelections)
+  acceptDerivedAccounting()
+}
+function reconcileRelatedApprovalsFromServer(
+  targetSignature: string,
+  draftId: string,
+  scope: string,
+): 'accepted' | 'restored' | 'stale' {
+  const draft = drafts.currentDraft
+  if (
+    !draft
+    || draft.id !== draftId
+    || sessionScope() !== scope
+    || relatedSignature(selectedRelatedApprovals.value) !== targetSignature
+  ) return 'stale'
+  acceptAuthoritativeRelatedApprovals()
+  return savedRelatedSignature.value === targetSignature
+    && (targetSignature === relatedSignature([]) || draft.input.accountingSourceVerified === true)
+    ? 'accepted'
+    : 'restored'
+}
+async function runSerializedSave<T>(operation: () => Promise<T>): Promise<T> {
+  if (savePromise) {
+    await savePromise
+    return runSerializedSave(operation)
+  }
+  const running = operation()
+  const lock = running.then(() => undefined, () => undefined)
+  savePromise = lock
+  try {
+    return await running
+  } finally {
+    if (savePromise === lock) savePromise = null
+  }
+}
+async function verifyRelatedApprovals(
+  selections: ReimbursementRelatedApprovalSelection[],
+): Promise<'accepted' | 'restored' | 'stale'> {
+  const requestedSelections = cloneRelatedApprovalSelections(selections)
+  const targetSignature = relatedSignature(requestedSelections)
+  const draftId = drafts.currentDraft?.id ?? ''
+  const scope = sessionScope()
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  relatedApprovalVerificationError.value = ''
+  verifyingRelatedApprovals.value = true
+  selectedRelatedApprovals.value = requestedSelections
+  try {
+    await runSerializedSave(() => drafts.saveRelatedApprovals(requestedSelections))
+    const reconciliation = reconcileRelatedApprovalsFromServer(targetSignature, draftId, scope)
+    if (reconciliation === 'accepted') {
+      drafts.mutationError = ''
+      saveError.value = ''
+    } else if (reconciliation === 'restored') {
+      relatedApprovalVerificationError.value = '服务器未保存所选出差审批，请重新选择或重试'
+      drafts.mutationError = ''
+      saveError.value = relatedApprovalVerificationError.value
+    }
+    return reconciliation
+  } catch (error) {
+    const reconciliation = reconcileRelatedApprovalsFromServer(targetSignature, draftId, scope)
+    if (reconciliation === 'accepted') {
+      drafts.mutationError = ''
+      saveError.value = ''
+    } else if (reconciliation === 'restored') {
+      relatedApprovalVerificationError.value = drafts.mutationError
+        || (error instanceof Error ? error.message : '出差审批核验失败，请重新选择或重试')
+      drafts.mutationError = ''
+      saveError.value = relatedApprovalVerificationError.value
+    }
+    return reconciliation
+  } finally {
+    verifyingRelatedApprovals.value = false
+    scheduleAutosave()
+  }
+}
+async function reconfirmRelatedApprovals(): Promise<void> {
+  await verifyRelatedApprovals(selectedRelatedApprovals.value)
+}
 function hydrate(draft: ReimbursementDraft): void {
   companyValue.value = draft.input.companyValue
   budgetCodeValue.value = draft.input.budgetCodeValue
@@ -305,6 +413,7 @@ function hydrate(draft: ReimbursementDraft): void {
   savedInputSignature.value = inputSignature(draft.input)
   savedRelatedSignature.value = relatedSignature(selectedRelatedApprovals.value)
   saveError.value = ''
+  relatedApprovalVerificationError.value = ''
 }
 async function createBlankReimbursement(): Promise<void> {
   const created = await drafts.createDraft({
@@ -373,39 +482,43 @@ function initializeWorkspace(force = false): Promise<void> {
 }
 function scheduleAutosave(): void {
   if (autosaveTimer) clearTimeout(autosaveTimer)
-  if (disposed || !sessionScope() || initializingWorkspace.value || formReadOnly.value || drafts.busy || !formDirty.value) return
+  if (disposed || !sessionScope() || initializingWorkspace.value || formReadOnly.value
+    || drafts.busy || verifyingRelatedApprovals.value || bindingApprovalDepartment.value
+    || pendingDepartmentApproval.value || !formDirty.value) return
   autosaveTimer = setTimeout(() => { void flushAutosave().catch(() => undefined) }, 600)
 }
-async function flushAutosave(): Promise<void> {
+async function flushAutosave(options: { includeRelated?: boolean } = {}): Promise<void> {
   if (autosaveTimer) clearTimeout(autosaveTimer)
-  if (savePromise) { await savePromise; return flushAutosave() }
-  // Never enqueue a snapshot behind a file mutation: its references can already
-  // be deleted by the time the queued save runs. The idle watcher retries using
-  // the latest form; explicit preview/submit must not treat a skipped save as success.
-  if (drafts.busy) throw new Error('请等待材料处理完成后重试')
-  if (!drafts.currentDraft || !formDirty.value) return
-  const draftId = drafts.currentDraft.id
-  const scope = sessionScope()
-  const fileOperationPause = new Error('请等待材料处理完成后重试')
-  const run = async () => {
+  const includeRelated = options.includeRelated !== false
+  await runSerializedSave(async () => {
+    // Never enqueue a snapshot behind a file mutation: its references can already
+    // be deleted by the time the queued save runs. The idle watcher retries using
+    // the latest form; explicit preview/submit must not treat a skipped save as success.
+    if (drafts.busy) throw new Error('请等待材料处理完成后重试')
+    if (!drafts.currentDraft || (!inputDirty.value && !(includeRelated && relatedDirty.value))) return
+    const draftId = drafts.currentDraft.id
+    const scope = sessionScope()
+    const fileOperationPause = new Error('请等待材料处理完成后重试')
     saving.value = true
     saveError.value = ''
     try {
       // Keep typing enabled, save snapshots, and never hydrate an older response over live edits.
-      while (formDirty.value && drafts.currentDraft?.id === draftId && sessionScope() === scope) {
+      while ((inputDirty.value || (includeRelated && relatedDirty.value))
+        && drafts.currentDraft?.id === draftId && sessionScope() === scope) {
         if (drafts.busy) throw fileOperationPause
+        // Verify the selected approvals first. Their company/budget values are
+        // server-owned and should not wait behind unrelated form autosaves.
+        if (includeRelated && relatedDirty.value) {
+          const selections = cloneRelatedApprovalSelections(selectedRelatedApprovals.value)
+          await drafts.saveRelatedApprovals(selections)
+          if (drafts.currentDraft?.id !== draftId || sessionScope() !== scope) return
+          acceptAuthoritativeRelatedApprovals()
+        }
         if (inputDirty.value) {
           const snapshot = JSON.parse(JSON.stringify(currentFormInput.value)) as ReimbursementDraftInput
           await drafts.saveDraft(snapshot)
           if (drafts.currentDraft?.id !== draftId || sessionScope() !== scope) return
           savedInputSignature.value = inputSignature(snapshot)
-          acceptDerivedAccounting()
-        }
-        if (relatedDirty.value) {
-          const selections = JSON.parse(JSON.stringify(selectedRelatedApprovals.value)) as ReimbursementRelatedApprovalSelection[]
-          await drafts.saveRelatedApprovals(selections)
-          if (drafts.currentDraft?.id !== draftId || sessionScope() !== scope) return
-          savedRelatedSignature.value = relatedSignature(selections)
           acceptDerivedAccounting()
         }
       }
@@ -415,10 +528,7 @@ async function flushAutosave(): Promise<void> {
       }
       throw error
     } finally { saving.value = false }
-  }
-  const running = run()
-  savePromise = running
-  try { await running } finally { if (savePromise === running) savePromise = null }
+  })
 }
 function validateSubmission(): string {
   if (!companyOptions.value.some((option) => option.value === companyValue.value)) return '请选择所属公司'
@@ -520,20 +630,34 @@ async function chooseTravelApprovalForDepartment(
     selectedRelatedApprovals.value = []
     pendingDepartmentApproval.value = null
     selectedDepartmentChoiceId.value = ''
+    verifyingRelatedApprovals.value = false
+    relatedApprovalVerificationError.value = ''
     return
   }
   await resolveDepartmentForApproval(selection)
+}
+async function persistRelatedApprovalsImmediately(
+  selections: ReimbursementRelatedApprovalSelection[],
+): Promise<void> {
+  await verifyRelatedApprovals(selections)
 }
 async function resolveDepartmentForApproval(
   selection: ReimbursementRelatedApprovalSelection,
   selectedDepartmentId?: string,
 ): Promise<void> {
   if (bindingApprovalDepartment.value) return
+  const requestedSelections = [selection]
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  relatedApprovalVerificationError.value = ''
+  verifyingRelatedApprovals.value = true
+  selectedRelatedApprovals.value = requestedSelections
   bindingApprovalDepartment.value = true
   departmentBindingError.value = ''
   try {
-    if (auth.status === 'authenticated' && drafts.currentDraft && formDirty.value) {
-      await flushAutosave()
+    if (auth.status === 'authenticated' && drafts.currentDraft && inputDirty.value) {
+      // Preserve edits in the previous department, but never attach the newly
+      // selected approval to that department while its destination is unresolved.
+      await flushAutosave({ includeRelated: false })
     }
     const previousScope = sessionScope()
     const resolution = await auth.selectDepartmentFromTravelApproval(
@@ -556,7 +680,12 @@ async function resolveDepartmentForApproval(
     const alreadyLinked = opened.relatedApprovals.some(
       (item) => item.processInstanceId === selection.processInstanceId,
     )
-    if (alreadyLinked) return
+    if (alreadyLinked) {
+      acceptAuthoritativeRelatedApprovals()
+      drafts.mutationError = ''
+      saveError.value = ''
+      return
+    }
     if (!['DRAFT', 'REVIEW_READY'].includes(opened.status)) {
       throw new Error('该部门有正在提交的报销，请先确认提交结果后再新建报销')
     }
@@ -565,10 +694,10 @@ async function resolveDepartmentForApproval(
       opened = drafts.currentDraft
       if (!opened) throw new Error('新报销准备失败，请重试')
     }
-    selectedRelatedApprovals.value = [selection]
-    const updated = await drafts.saveRelatedApprovals([selection])
-    hydrate(updated)
+    await verifyRelatedApprovals(requestedSelections)
   } catch (error) {
+    acceptAuthoritativeRelatedApprovals()
+    verifyingRelatedApprovals.value = false
     const message = error instanceof Error
       ? error.message
       : '无法读取出差审批的所在部门，请重试'
@@ -576,6 +705,8 @@ async function resolveDepartmentForApproval(
     if (auth.status === 'authenticated') initializationError.value = message
   } finally {
     bindingApprovalDepartment.value = false
+    if (!pendingDepartmentApproval.value) verifyingRelatedApprovals.value = false
+    scheduleAutosave()
   }
 }
 function updateRelatedApprovals(
@@ -585,7 +716,7 @@ function updateRelatedApprovals(
     ? selections[0]
     : undefined
   if (!firstSelection || selectableDepartments.value.length <= 1) {
-    selectedRelatedApprovals.value = selections
+    void persistRelatedApprovalsImmediately(selections)
     return
   }
   const candidate = drafts.travelApprovals.find(
@@ -593,7 +724,7 @@ function updateRelatedApprovals(
   )
   const currentDepartmentId = auth.session?.selectedDepartment?.id
   if (candidate?.originatorDepartmentId === currentDepartmentId) {
-    selectedRelatedApprovals.value = selections
+    void persistRelatedApprovalsImmediately(selections)
     return
   }
   void resolveDepartmentForApproval(firstSelection)
@@ -606,7 +737,10 @@ function confirmDepartmentChoice(): void {
 function cancelDepartmentChoice(): void {
   pendingDepartmentApproval.value = null
   selectedDepartmentChoiceId.value = ''
-  if (auth.status === 'department_required') selectedRelatedApprovals.value = []
+  acceptAuthoritativeRelatedApprovals()
+  verifyingRelatedApprovals.value = false
+  relatedApprovalVerificationError.value = ''
+  scheduleAutosave()
 }
 function selectMobileStep(step: number): void {
   if (!props.mobile || step < 0 || step >= mobileSteps.length) return
@@ -665,7 +799,7 @@ watch([currentFormInput, selectedRelatedApprovals], scheduleAutosave, { deep: tr
 watch(() => drafts.busy, () => {
   // A file operation becoming idle should resume saving. Our own failed save
   // must keep the existing explicit-retry behavior, not retry every 600 ms.
-  if (!saving.value) scheduleAutosave()
+  if (!saving.value && !saveError.value) scheduleAutosave()
 })
 watch(budgetLabel, (label) => { expense.manualProjectText = label })
 watch(selectedSubsidyApprovals, (approvals) => expense.syncSubsidyApprovals(approvals), {
@@ -910,7 +1044,7 @@ onBeforeUnmount(() => {
                 :model-value="selectedRelatedApprovals"
                 :mobile="props.mobile"
                 :linked-approvals="drafts.currentDraft.relatedApprovals"
-                :readonly="formReadOnly || drafts.processingFiles"
+                :readonly="formReadOnly || drafts.processingFiles || verifyingRelatedApprovals || bindingApprovalDepartment"
                 @update:model-value="updateRelatedApprovals"
               />
               <el-alert
@@ -940,6 +1074,22 @@ onBeforeUnmount(() => {
                     </h2>
                     <p>以所选出差审批为准，无需重复填写。</p>
                   </div>
+                  <el-tag
+                    v-if="relatedApprovalVerificationPending"
+                    type="info"
+                    effect="plain"
+                    data-testid="related-approval-verification-status"
+                  >
+                    正在核验
+                  </el-tag>
+                  <el-tag
+                    v-else-if="relatedApprovalVerified"
+                    type="success"
+                    effect="plain"
+                    data-testid="related-approval-verification-status"
+                  >
+                    已核验
+                  </el-tag>
                 </div>
                 <el-descriptions
                   :column="props.mobile ? 1 : 2"
@@ -947,10 +1097,10 @@ onBeforeUnmount(() => {
                   class="derived-accounting-grid"
                 >
                   <el-descriptions-item label="所属公司">
-                    {{ companyLabel || '选择出差审批后自动填入' }}
+                    {{ displayedCompanyLabel || '选择出差审批后自动填入' }}
                   </el-descriptions-item>
                   <el-descriptions-item label="预算代码 / 项目">
-                    {{ budgetLabel || '选择出差审批后自动填入' }}
+                    {{ displayedBudgetLabel || '选择出差审批后自动填入' }}
                   </el-descriptions-item>
                   <el-descriptions-item label="出差类别">
                     {{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}
@@ -982,6 +1132,14 @@ onBeforeUnmount(() => {
                     </template>
                   </el-descriptions-item>
                 </el-descriptions>
+                <el-alert
+                  v-if="relatedApprovalVerificationError"
+                  :title="relatedApprovalVerificationError"
+                  type="error"
+                  show-icon
+                  :closable="false"
+                  class="related-approval-verification-error"
+                />
                 <p class="field-help">
                   所属公司和预算代码由关联审批自动填入，不可修改；预算代码完整名称会填入报销单 Excel 的项目栏。
                 </p>
@@ -1338,11 +1496,13 @@ onBeforeUnmount(() => {
 .plain-fieldset, .editor-fieldset { min-width: 0; padding: 0; margin: 0; border: 0; }
 .accounting-verification-alert { margin-top: 18px; }
 .derived-accounting-section { margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--el-border-color-lighter); }
+.derived-accounting-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .derived-accounting-heading h2 { margin: 0; color: var(--el-text-color-primary); font-size: 16px; }
 .derived-accounting-heading p { margin: 6px 0 14px; color: var(--el-text-color-secondary); font-size: 13px; }
 .derived-accounting-grid { margin-bottom: 12px; }
 .derived-accounting-grid :deep(.el-descriptions__table) { table-layout: fixed; }
 .derived-accounting-grid :deep(.el-descriptions__content) { overflow-wrap: anywhere; }
+.related-approval-verification-error { margin-bottom: 12px; }
 .travel-periods { display: grid; justify-items: start; gap: 5px; }
 .travel-periods__count { color: var(--el-text-color-secondary); font-size: 12px; }
 .travel-periods__item {

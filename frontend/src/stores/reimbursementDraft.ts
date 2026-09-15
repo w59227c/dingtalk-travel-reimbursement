@@ -984,6 +984,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       ),
       applyDraftMutation,
       '关联出差审批保存失败，请重试',
+      { reloadAfterFailure: true },
     )
   }
 

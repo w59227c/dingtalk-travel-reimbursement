@@ -664,19 +664,34 @@ describe('ReimburseView single-form OA flow', () => {
       serverDraft = makeDraft({
         department: { id: '200', name: '产品开发部' },
       })
-      vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
+      const departmentResolution = deferred<Awaited<ReturnType<typeof selectDepartmentFromTravelApproval>>>()
+      vi.mocked(selectDepartmentFromTravelApproval).mockReturnValue(departmentResolution.promise)
+      const resolvedDepartment = {
         selectedDepartment: { id: '200', name: '产品开发部' },
         selectionRequired: false,
         departments: [
           { id: '100', name: '技术管理中心' },
           { id: '200', name: '产品开发部' },
         ],
-      })
+      }
 
       wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit(
         'update:modelValue',
         [selection],
       )
+      await nextTick()
+      await vi.waitFor(() => expect(selectDepartmentFromTravelApproval).toHaveBeenCalledOnce())
+
+      const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
+      expect(summary.text()).toContain('北京分公司')
+      expect(summary.text()).toContain('26007 · MES 项目')
+      expect(summary.text()).toContain('境内出差')
+      expect(summary.text()).toContain('2026-08-31')
+      expect(summary.text()).toContain('2026-09-02')
+      expect(summary.text()).toContain('正在核验')
+      expect(replaceReimbursementRelatedApprovals).not.toHaveBeenCalled()
+
+      departmentResolution.resolve(resolvedDepartment)
       await flushPromises()
 
       expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(
@@ -870,9 +885,309 @@ describe('ReimburseView single-form OA flow', () => {
     expect(expense.items).toEqual(items)
     expect(expense.includeSubsidy).toBe(true)
     expect(expense.trip.startDate).toBe('2026-09-01')
+    await saveCurrent(wrapper)
     expect(wrapper.get('[data-testid="autosave-status"]').text()).toBe('已保存')
     wrapper.unmount()
   })
+
+  it.each([false, true])(
+    'shows all approval-derived fields immediately while the server verifies them (mobile=%s)',
+    async (mobile) => {
+      vi.useFakeTimers()
+      serverDraft.input = { ...serverDraft.input, companyValue: '', budgetCodeValue: '' }
+      const { wrapper, drafts } = await mountView(undefined, false, mobile)
+      drafts.travelApprovals = [{
+        ...linkedApproval,
+        originatorDepartmentId: '100',
+        profileDisplayName: '境内出差',
+        travelTypeOption: { value: 'business', label: '境内出差', key: null },
+        companyOption: options.companyOptions[0]!,
+        budgetCodeOption: options.budgetCodeOptions[0]!,
+        unavailableReason: null,
+        createdAt: '2026-08-30T00:00:00Z',
+        finishedAt: '2026-08-31T00:00:00Z',
+      }]
+      const pendingSave = deferred<ReimbursementDraft>()
+      vi.mocked(replaceReimbursementRelatedApprovals).mockReturnValueOnce(pendingSave.promise)
+
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+      await nextTick()
+      await Promise.resolve()
+
+      const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
+      expect(summary.text()).toContain('北京分公司')
+      expect(summary.text()).toContain('26007 · MES 项目')
+      expect(summary.text()).toContain('境内出差')
+      expect(summary.text()).toContain('2026-08-31')
+      expect(summary.text()).toContain('2026-09-02')
+      expect(summary.text()).toContain('正在核验')
+      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce()
+
+      serverDraft = makeDraft({
+        revision: 2,
+        relatedApprovalCount: 1,
+        input: {
+          ...serverDraft.input,
+          companyValue: '北京',
+          budgetCodeValue: '26007',
+          accountingSourceVerified: true,
+        },
+        relatedApprovals: [linkedApproval],
+        relatedApprovalSummary: {
+          count: 1,
+          startDate: linkedApproval.startDate,
+          endDate: linkedApproval.endDate,
+        },
+      })
+      pendingSave.resolve(serverDraft)
+      await flushPromises()
+
+      expect(summary.text()).not.toContain('正在核验')
+      expect(summary.text()).toContain('已核验')
+      wrapper.unmount()
+    },
+  )
+
+  it.each([false, true])(
+    'restores the authoritative approval fields when immediate verification fails (mobile=%s)',
+    async (mobile) => {
+      serverDraft.input = { ...serverDraft.input, companyValue: '', budgetCodeValue: '' }
+      const { wrapper, drafts } = await mountView(undefined, false, mobile)
+      drafts.travelApprovals = [{
+        ...linkedApproval,
+        originatorDepartmentId: '100',
+        profileDisplayName: '境内出差',
+        travelTypeOption: { value: 'business', label: '境内出差', key: null },
+        companyOption: options.companyOptions[0]!,
+        budgetCodeOption: options.budgetCodeOptions[0]!,
+        unavailableReason: null,
+        createdAt: '2026-08-30T00:00:00Z',
+        finishedAt: '2026-08-31T00:00:00Z',
+      }]
+      vi.mocked(replaceReimbursementRelatedApprovals).mockRejectedValueOnce(
+        new Error('网络中断'),
+      )
+
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+      await flushPromises()
+
+      const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
+      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce()
+      expect(drafts.currentDraft?.relatedApprovals).toEqual([])
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('modelValue')).toEqual([])
+      expect(summary.text()).not.toContain('北京分公司')
+      expect(summary.text()).not.toContain('26007 · MES 项目')
+      expect(summary.text()).toContain('网络中断')
+      expect(summary.text()).not.toContain('正在核验')
+      wrapper.unmount()
+    },
+  )
+
+  it.each([false, true])(
+    'switches all approval-derived fields to authoritative values after verification (mobile=%s)',
+    async (mobile) => {
+      vi.useFakeTimers()
+      serverDraft.input = { ...serverDraft.input, companyValue: '', budgetCodeValue: '' }
+      const { wrapper, drafts } = await mountView(undefined, false, mobile)
+      drafts.reimbursementOptions = {
+        ...options,
+        travelProfiles: [{
+          ...options.travelProfiles[0]!,
+          travelTypeMappings: {
+            internal: { value: 'internal', label: '公司内部出差', key: null },
+          },
+          subsidyTripTypeMappings: { internal: 'internal' },
+        }],
+      }
+      drafts.travelApprovals = [{
+        ...linkedApproval,
+        startDate: '2026-08-31',
+        endDate: '2026-09-02',
+        originatorDepartmentId: '100',
+        profileDisplayName: '境内出差',
+        travelTypeOption: { value: 'business', label: '查询时的出差类别', key: null },
+        companyOption: options.companyOptions[0]!,
+        budgetCodeOption: options.budgetCodeOptions[0]!,
+        unavailableReason: null,
+        createdAt: '2026-08-30T00:00:00Z',
+        finishedAt: '2026-08-31T00:00:00Z',
+      }]
+      const pendingSave = deferred<ReimbursementDraft>()
+      vi.mocked(replaceReimbursementRelatedApprovals).mockReturnValueOnce(pendingSave.promise)
+
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+      await nextTick()
+
+      const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
+      expect(summary.text()).toContain('查询时的出差类别')
+      expect(summary.text()).toContain('2026-08-31')
+      expect(summary.text()).toContain('2026-09-02')
+      expect(summary.text()).toContain('正在核验')
+
+      const authoritativeApproval: ReimbursementRelatedApproval = {
+        ...linkedApproval,
+        sourceTravelTypeValue: 'internal',
+        startDate: '2026-09-05',
+        endDate: '2026-09-06',
+      }
+      serverDraft = makeDraft({
+        revision: 2,
+        relatedApprovalCount: 1,
+        input: {
+          ...serverDraft.input,
+          companyValue: '北京',
+          budgetCodeValue: '26007',
+          accountingSourceVerified: true,
+        },
+        relatedApprovals: [authoritativeApproval],
+        relatedApprovalSummary: {
+          count: 1,
+          startDate: authoritativeApproval.startDate,
+          endDate: authoritativeApproval.endDate,
+        },
+      })
+      pendingSave.resolve(serverDraft)
+      await flushPromises()
+
+      expect(summary.text()).toContain('公司内部出差')
+      expect(summary.text()).toContain('2026-09-05')
+      expect(summary.text()).toContain('2026-09-06')
+      expect(summary.text()).not.toContain('查询时的出差类别')
+      expect(summary.text()).not.toContain('2026-08-31')
+      expect(summary.text()).toContain('已核验')
+      wrapper.unmount()
+    },
+  )
+
+  it.each([false, true])(
+    'accepts the reloaded server result when approval verification succeeded but its response was lost (mobile=%s)',
+    async (mobile) => {
+      serverDraft.input = { ...serverDraft.input, companyValue: '', budgetCodeValue: '' }
+      const { wrapper, drafts } = await mountView(undefined, false, mobile)
+      drafts.travelApprovals = [{
+        ...linkedApproval,
+        originatorDepartmentId: '100',
+        profileDisplayName: '境内出差',
+        travelTypeOption: { value: 'business', label: '境内出差', key: null },
+        companyOption: options.companyOptions[0]!,
+        budgetCodeOption: options.budgetCodeOptions[0]!,
+        unavailableReason: null,
+        createdAt: '2026-08-30T00:00:00Z',
+        finishedAt: '2026-08-31T00:00:00Z',
+      }]
+      serverDraft = makeDraft({
+        revision: 2,
+        relatedApprovalCount: 1,
+        input: {
+          ...serverDraft.input,
+          companyValue: '北京',
+          budgetCodeValue: '26007',
+          accountingSourceVerified: true,
+        },
+        relatedApprovals: [linkedApproval],
+        relatedApprovalSummary: {
+          count: 1,
+          startDate: linkedApproval.startDate,
+          endDate: linkedApproval.endDate,
+        },
+      })
+      vi.mocked(replaceReimbursementRelatedApprovals).mockRejectedValueOnce(
+        new Error('响应丢失'),
+      )
+
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+      await flushPromises()
+
+      const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('modelValue')).toEqual([selection])
+      expect(summary.text()).toContain('北京分公司')
+      expect(summary.text()).toContain('26007 · MES 项目')
+      expect(summary.text()).toContain('已核验')
+      expect(summary.text()).not.toContain('响应丢失')
+      expect(wrapper.get('[data-testid="autosave-status"]').text()).not.toContain('保存失败')
+      expect(drafts.mutationError).toBe('')
+      wrapper.unmount()
+    },
+  )
+
+  it.each([false, true])(
+    'reconciles a lost response from explicit approval reconfirmation (mobile=%s)',
+    async (mobile) => {
+      serverDraft = makeDraft({
+        relatedApprovalCount: 1,
+        input: { ...serverDraft.input, accountingSourceVerified: false },
+        relatedApprovals: [linkedApproval],
+        relatedApprovalSummary: {
+          count: 1,
+          startDate: linkedApproval.startDate,
+          endDate: linkedApproval.endDate,
+        },
+      })
+      const { wrapper, drafts } = await mountView(undefined, false, mobile)
+      serverDraft = makeDraft({
+        revision: 2,
+        relatedApprovalCount: 1,
+        input: { ...serverDraft.input, accountingSourceVerified: true },
+        relatedApprovals: [linkedApproval],
+        relatedApprovalSummary: {
+          count: 1,
+          startDate: linkedApproval.startDate,
+          endDate: linkedApproval.endDate,
+        },
+      })
+      vi.mocked(replaceReimbursementRelatedApprovals).mockRejectedValueOnce(
+        new Error('重新核验响应丢失'),
+      )
+
+      await visibleButton(wrapper, '重新确认出差审批').trigger('click')
+      await flushPromises()
+
+      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce()
+      expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('已核验')
+      expect(wrapper.text()).not.toContain('重新核验响应丢失')
+      expect(drafts.mutationError).toBe('')
+      wrapper.unmount()
+    },
+  )
+
+  it.each([false, true])(
+    'keeps a later ordinary-input save failure visible after approval verification (mobile=%s)',
+    async (mobile) => {
+      vi.useFakeTimers()
+      serverDraft.input = { ...serverDraft.input, companyValue: '', budgetCodeValue: '' }
+      const { wrapper, drafts, expense } = await mountView(undefined, false, mobile)
+      drafts.travelApprovals = [{
+        ...linkedApproval,
+        originatorDepartmentId: '100',
+        profileDisplayName: '境内出差',
+        travelTypeOption: { value: 'business', label: '境内出差', key: null },
+        companyOption: options.companyOptions[0]!,
+        budgetCodeOption: options.budgetCodeOptions[0]!,
+        unavailableReason: null,
+        createdAt: '2026-08-30T00:00:00Z',
+        finishedAt: '2026-08-31T00:00:00Z',
+      }]
+      expense.items[0]!.description = '尚未保存的说明'
+      vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(
+        new Error('普通输入保存失败'),
+      )
+
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+      await flushPromises()
+
+      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce()
+      expect(updateReimbursementDraft).not.toHaveBeenCalled()
+      expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('已核验')
+
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+
+      expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+      await vi.waitFor(() => expect(drafts.mutationError).toContain('普通输入保存失败'))
+      expect(wrapper.get('[data-testid="autosave-status"]').text()).toContain('保存失败')
+      wrapper.unmount()
+    },
+  )
 
   it.each([
     { processCode: 'PROC-OLD', configVersion: 12 },
@@ -1097,7 +1412,7 @@ describe('ReimburseView single-form OA flow', () => {
     const { wrapper } = await mountView()
     vi.mocked(updateReimbursementDraft).mockClear()
     wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
-    await nextTick()
+    await flushPromises()
     const submit = visibleButton(wrapper, '提交 OA')
     await Promise.all([submit.trigger('click'), submit.trigger('click')])
     await flushPromises()
@@ -1126,7 +1441,7 @@ describe('ReimburseView single-form OA flow', () => {
     }]
     wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
     expense.includeSubsidy = true
-    await nextTick()
+    await flushPromises()
 
     expect(wrapper.findComponent(TravelApprovalSelectorStub).props()).toMatchObject({
       requiredStartDate: '',
@@ -1284,7 +1599,7 @@ describe('ReimburseView single-form OA flow', () => {
     Object.assign(expense.items[0]!, { category: 'rail_fare', amount, railType, receiptCount: 10, paymentProofFileIds: linked ? ['proof-1'] : [] })
     drafts.files.push({ ...activeFile, id: 'proof-1', role: 'ATTACHMENT_ONLY', attachmentKind: kind, ocrResult: null })
     wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
-    await nextTick()
+    await flushPromises()
     await visibleButton(wrapper, '提交 OA').trigger('click')
     await flushPromises()
     expect(confirm).toHaveBeenCalledTimes(blocked ? 0 : 1)
@@ -1314,7 +1629,7 @@ describe('ReimburseView single-form OA flow', () => {
     vi.spyOn(ElMessageBox, 'confirm').mockReturnValueOnce(confirmation.promise)
     const { wrapper } = await mountView()
     wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
-    await nextTick()
+    await flushPromises()
     void visibleButton(wrapper, '提交 OA').trigger('click')
     await vi.waitFor(() => expect(ElMessageBox.confirm).toHaveBeenCalledOnce())
     expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(true)
