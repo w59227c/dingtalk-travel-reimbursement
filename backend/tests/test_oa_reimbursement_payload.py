@@ -234,6 +234,7 @@ def _source(*, original_count: int = 2) -> SnapshotSource:
             business_id="TRAVEL-20260901",
             instance_created_at=datetime(2026, 8, 20, 1, 2, 3),
             verified_at=datetime(2026, 9, 4, 2, 3, 4),
+            originator_department_id="100",
         ),
     )
     originals = tuple(

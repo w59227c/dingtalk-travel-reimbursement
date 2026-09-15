@@ -132,6 +132,7 @@ class TravelApprovalCandidate:
             "subsidyTripType": _subsidy_trip_type_value(self.listed.travel_type_option),
             "title": self.instance.title,
             "businessId": self.instance.business_id,
+            "originatorDepartmentId": self.instance.originator_department_id,
             "startDate": self.start_date.isoformat(),
             "endDate": self.end_date.isoformat(),
             "createdAt": self.instance.created_at,
@@ -265,7 +266,6 @@ async def reverify_travel_approval_selection(
     *,
     current_user_id: str,
     selections: tuple[TravelApprovalSelection, ...],
-    expected_department_id: str | None = None,
 ) -> VerifiedTravelSelection:
     """Re-prove list membership before trusting selected instance details."""
 
@@ -330,15 +330,6 @@ async def reverify_travel_approval_selection(
             422,
         )
     department_id = next(iter(department_ids))
-    if expected_department_id is not None and department_id != _required_text(
-        expected_department_id,
-        field="expected_department_id",
-    ):
-        raise ApiError(
-            "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH",
-            "所选出差审批不属于本次报销部门，请重新选择",
-            422,
-        )
     travel_type_values = {item.listed.travel_type_option.value for item in approvals}
     source_travel_type_values = [
         item.listed.source_travel_type_value

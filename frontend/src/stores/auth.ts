@@ -11,7 +11,7 @@ import {
   selectDepartmentFromTravelApproval as selectDepartmentFromTravelApprovalRequest,
 } from '@/api/auth'
 import { setCsrfToken, setUnauthorizedHandler } from '@/api/http'
-import type { AuthSession } from '@/types/auth'
+import type { AuthSession, ReimbursementDepartmentResolution } from '@/types/auth'
 import type { ReimbursementRelatedApprovalSelection } from '@/types/reimbursements'
 import { requestDingTalkAuthCode } from '@/utils/dingtalk'
 import { useExpenseStore } from '@/stores/expense'
@@ -131,20 +131,25 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function selectDepartmentFromTravelApproval(
     selection: ReimbursementRelatedApprovalSelection,
-  ): Promise<void> {
-    if (!session.value) return
-    useExpenseStore().reset()
-    useReimbursementDraftStore().reset()
-    useReimbursementSubmissionStore().reset()
-    const selected = await selectDepartmentFromTravelApprovalRequest(selection)
-    session.value.departments = [
-      selected,
-      ...session.value.departments.filter(
-        (item) => item.id !== selected.id && item.name !== selected.name,
-      ),
-    ]
-    session.value.selectedDepartment = selected
+    selectedDepartmentId?: string,
+  ): Promise<ReimbursementDepartmentResolution> {
+    if (!session.value) throw new Error('登录状态已失效，请重新进入')
+    const resolution = await selectDepartmentFromTravelApprovalRequest(
+      selection,
+      selectedDepartmentId,
+    )
+    session.value.departments = resolution.departments
+    if (!resolution.selectedDepartment) return resolution
+    const scopeChanged = session.value.selectedDepartment?.id
+      !== resolution.selectedDepartment.id
+    if (scopeChanged) {
+      useExpenseStore().reset()
+      useReimbursementDraftStore().reset()
+      useReimbursementSubmissionStore().reset()
+    }
+    session.value.selectedDepartment = resolution.selectedDepartment
     status.value = 'authenticated'
+    return resolution
   }
 
   async function logout(): Promise<void> {

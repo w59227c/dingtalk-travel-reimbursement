@@ -189,13 +189,20 @@ function unavailableReason(row: ApprovalRow): string {
   const first = props.modelValue[0]
   if (!first) return ''
   const baseline = candidateCache.get(first.processInstanceId)
+  const restoredApproval = props.linkedApprovals?.find(
+    (item) => item.processInstanceId === first.processInstanceId,
+  )
+  const sourceDepartmentId = baseline?.originatorDepartmentId
+    ?? restoredApproval?.originatorDepartmentId
+  if (sourceDepartmentId
+    && candidate.originatorDepartmentId !== sourceDepartmentId) {
+    return '发起部门与已选审批不同，请按部门分别报销'
+  }
   const company = baseline?.companyOption?.value ?? drafts.currentDraft?.input.companyValue
   const budget = baseline?.budgetCodeOption?.value ?? drafts.currentDraft?.input.budgetCodeValue
   const profile = drafts.reimbursementOptions?.travelProfiles
     .find((item) => item.profileKey === first.profileKey)
-  const restoredSource = props.linkedApprovals?.find(
-    (item) => item.processInstanceId === first.processInstanceId,
-  )?.sourceTravelTypeValue
+  const restoredSource = restoredApproval?.sourceTravelTypeValue
   const restoredType = profile?.travelTypeMappings
     ? (restoredSource ? profile.travelTypeMappings[restoredSource]?.value : undefined)
     : profile?.travelTypeOption.value
@@ -231,10 +238,10 @@ function accountingLabel(row: ApprovalRow): string {
           {{ props.single ? '选择本次出差申请' : '关联已通过的出差审批' }}
         </h2>
         <p v-if="props.single">
-          系统会读取审批中的所在部门，无需再次选择部门。
+          系统会优先匹配审批的发起部门；无法匹配当前部门时再请你确认。
         </p>
         <p v-else>
-          先选本人已通过的审批；可继续关联相同公司、预算和出差类别的多张审批，日期不连续也可以。
+          先选本人已通过的审批；可继续关联同一发起部门、公司、预算和出差类别的多张审批，日期不连续也可以。
         </p>
       </div>
       <el-tag

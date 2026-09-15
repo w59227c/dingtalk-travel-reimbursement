@@ -251,6 +251,7 @@ class ReimbursementDraftRelatedApproval(Base):
     travel_start_date: Mapped[date] = mapped_column(Date)
     travel_end_date: Mapped[date] = mapped_column(Date)
     source_travel_type_value: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    originator_department_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     title: Mapped[str] = mapped_column(String(500))
     business_id: Mapped[str] = mapped_column(String(128))
     instance_created_at: Mapped[datetime] = mapped_column(DateTime())

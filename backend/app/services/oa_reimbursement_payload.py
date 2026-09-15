@@ -290,6 +290,10 @@ class SnapshotRelatedApproval(_SnapshotModel):
     business_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     instance_created_at: ShortText
     verified_at: ShortText
+    originator_department_id: Annotated[
+        str,
+        StringConstraints(min_length=1, max_length=128),
+    ] | None = Field(default=None, exclude_if=lambda value: value is None)
     source_travel_type_value: LongText | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -374,6 +378,7 @@ class RelatedApprovalSource:
     business_id: str
     instance_created_at: datetime
     verified_at: datetime
+    originator_department_id: str | None = None
     source_travel_type_value: str | None = None
 
 
@@ -921,6 +926,7 @@ def _related_source(item: ReimbursementDraftRelatedApproval) -> RelatedApprovalS
         business_id=item.business_id,
         instance_created_at=item.instance_created_at,
         verified_at=item.verified_at,
+        originator_department_id=item.originator_department_id,
         source_travel_type_value=item.source_travel_type_value,
     )
 
@@ -1164,6 +1170,7 @@ def _snapshot_related(item: RelatedApprovalSource) -> SnapshotRelatedApproval:
         business_id=item.business_id,
         instance_created_at=_utc_timestamp(item.instance_created_at),
         verified_at=_utc_timestamp(item.verified_at),
+        originator_department_id=item.originator_department_id,
         source_travel_type_value=item.source_travel_type_value,
     )
 
@@ -1338,6 +1345,14 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         snapshot.related_approvals
     ):
         raise ValueError("related approval ids must be unique")
+    related_department_ids = [
+        item.originator_department_id for item in snapshot.related_approvals
+    ]
+    if any(related_department_ids) and (
+        any(item is None for item in related_department_ids)
+        or len(set(related_department_ids)) != 1
+    ):
+        raise ValueError("related approval departments must be complete and identical")
     if len({item.draft_file_id for item in snapshot.original_files}) != len(
         snapshot.original_files
     ):

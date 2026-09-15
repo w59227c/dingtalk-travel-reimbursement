@@ -233,6 +233,7 @@ def test_travel_list_ignores_claimed_identity_and_process_code(monkeypatch) -> N
             "subsidyTripType": "project",
             "title": "本人 TARGET 境内出差申请",
             "businessId": "TARGET-2026-001",
+            "originatorDepartmentId": "100",
             "startDate": "2026-08-10",
             "endDate": "2026-08-12",
             "createdAt": "2026-08-01T08:00:00+08:00",

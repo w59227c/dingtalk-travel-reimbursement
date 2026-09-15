@@ -588,6 +588,7 @@ def _persist_ready_draft(
                     listed_to_ms=1_790_000_000_000,
                     travel_start_date=date(2026, 9, 1),
                     travel_end_date=date(2026, 9, 3),
+                    originator_department_id="100",
                     title="境内出差申请",
                     business_id=f"TRAVEL-{instance_id}",
                     instance_created_at=now,
@@ -830,6 +831,45 @@ def test_worker_rechecks_source_accounting_before_any_upload(
         f"/api/oa/reimbursements/submissions/{response.json()['data']['submissionId']}"
     )
     assert result.json()["data"]["error"]["code"] == "TRAVEL_APPROVAL_ACCOUNTING_CHANGED"
+    assert storage.put_files == []
+    assert workflow.create_calls == 0
+
+
+def test_worker_rechecks_the_saved_travel_approval_department_before_upload(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+
+    class ChangedDepartmentWorkflow(LocalWorkflowBoundary):
+        async def get_process_instance(self, instance_id):
+            instance = await super().get_process_instance(instance_id)
+            if instance_id == OA_INSTANCE_ID:
+                return instance
+            return replace(instance, originator_department_id="changed-department")
+
+    workflow = ChangedDepartmentWorkflow(reimbursement_schema, travel_schema)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    response = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 4},
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "78787878-7878-4787-8787-787878787878",
+        },
+    )
+    assert response.status_code == 202, response.text
+    storage = LocalStorageBoundary()
+
+    assert asyncio.run(_worker(client, workflow, storage).run_once()) is True
+
+    result = client.get(
+        f"/api/oa/reimbursements/submissions/{response.json()['data']['submissionId']}"
+    )
+    assert result.json()["data"]["error"]["code"] == (
+        "TRAVEL_APPROVAL_DEPARTMENT_CHANGED"
+    )
     assert storage.put_files == []
     assert workflow.create_calls == 0
 

@@ -16,6 +16,12 @@ export interface AuthSession {
   csrfToken: string
 }
 
+export interface ReimbursementDepartmentResolution {
+  selectedDepartment: Department | null
+  selectionRequired: boolean
+  departments: Department[]
+}
+
 export interface PublicConfig {
   appTitle?: string
   corpId: string

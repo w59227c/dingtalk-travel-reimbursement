@@ -64,6 +64,7 @@ class DraftActor:
     user_id: str
     department_id: str
     department_name: str
+    available_department_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +110,7 @@ def draft_actor(current: CurrentSession) -> DraftActor:
         user_id=user_id,
         department_id=department_id,
         department_name=department_name,
+        available_department_ids=tuple(department.id for department in current.departments),
     )
 
 
@@ -503,7 +505,6 @@ async def replace_related_approvals(
             catalog,
             current_user_id=actor.user_id,
             selections=domain_selections,
-            expected_department_id=actor.department_id,
         )
         if domain_selections
         else None
@@ -944,6 +945,16 @@ def _store_related_approvals(
     )
     _require_catalog_binding(current_draft, current_binding)
     approvals = verified.approvals if verified is not None else ()
+    if (
+        verified is not None
+        and verified.department_id in actor.available_department_ids
+        and verified.department_id != actor.department_id
+    ):
+        raise ApiError(
+            "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH",
+            "所选出差审批属于另一个当前部门，请按部门分别报销",
+            422,
+        )
     instance_ids = [item.instance.instance_id for item in approvals]
     derived_input = _stored_input(current_draft).model_copy(
         update={
@@ -985,6 +996,7 @@ def _store_related_approvals(
                     travel_start_date=approval.start_date,
                     travel_end_date=approval.end_date,
                     source_travel_type_value=approval.listed.source_travel_type_value,
+                    originator_department_id=approval.instance.originator_department_id,
                     title=approval.instance.title,
                     business_id=approval.instance.business_id,
                     instance_created_at=_upstream_datetime(approval.instance.created_at),
@@ -1325,6 +1337,11 @@ def _related_data(item: ReimbursementDraftRelatedApproval) -> dict[str, object]:
         **(
             {"sourceTravelTypeValue": item.source_travel_type_value}
             if item.source_travel_type_value is not None
+            else {}
+        ),
+        **(
+            {"originatorDepartmentId": item.originator_department_id}
+            if item.originator_department_id is not None
             else {}
         ),
         "title": item.title,

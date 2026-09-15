@@ -51,7 +51,7 @@
 
 ## 数据库迁移
 
-- 始终保持唯一 Alembic head。本文件创建时的 head 为 `20260914_0018`；实际值应执行 `cd backend && uv run --frozen --extra dev alembic heads` 获取，不得只信任本句。
+- 始终保持唯一 Alembic head。本文件创建时的 head 为 `20260915_0019`；实际值应执行 `cd backend && uv run --frozen --extra dev alembic heads` 获取，不得只信任本句。
 - 数据库结构变更通常需要同步更新 SQLAlchemy model、必要的 model export、Alembic revision、迁移测试、readiness 的 revision/table/column 预期、测试数据库 revision 初始化，以及 `README.md` 和 `docs/DINGTALK_OA_INTEGRATION_DESIGN.md` 中的当前迁移说明。
 - 同时测试受支持旧数据的升级路径和空数据库升级路径。若降级会静默丢失业务记录、审计证据、锁定快照或文件关系，必须拒绝降级。
 - 生产迁移前必须对同一时点的 SQLite 和 staging 一致性备份。

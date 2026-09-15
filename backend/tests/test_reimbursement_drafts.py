@@ -175,13 +175,14 @@ def _travel_instance(
     *,
     start_date: str = "2026-09-01",
     end_date: str = "2026-09-02",
+    department_id: str = "100",
 ) -> WorkflowProcessInstance:
     return WorkflowProcessInstance(
         instance_id=instance_id,
         title="当前员工提交的境内出差申请",
         business_id=f"BIZ-{instance_id}",
         originator_user_id="mock-user",
-        originator_department_id="100",
+        originator_department_id=department_id,
         status="COMPLETED",
         result="agree",
         created_at="2026-08-01T08:00:00+08:00",
@@ -218,10 +219,12 @@ class FakeTravelWorkflow:
         *,
         start_date: str = "2026-09-01",
         end_date: str = "2026-09-02",
+        department_id: str = "100",
     ) -> None:
         self.instance_ids = instance_ids
         self.start_date = start_date
         self.end_date = end_date
+        self.department_id = department_id
         self.list_calls: list[dict[str, object]] = []
         self.detail_calls: list[str] = []
 
@@ -235,6 +238,7 @@ class FakeTravelWorkflow:
             instance_id,
             start_date=self.start_date,
             end_date=self.end_date,
+            department_id=self.department_id,
         )
 
 
@@ -909,8 +913,9 @@ def test_related_approvals_are_reverified_and_atomically_replace_the_snapshot(
     }
     assert data["relatedApprovals"][0] == {
         "processInstanceId": "travel-1",
-        "profileKey": "domestic",
-        "sourceProcessCode": "PROC-DOMESTIC",
+            "profileKey": "domestic",
+            "sourceProcessCode": "PROC-DOMESTIC",
+            "originatorDepartmentId": "100",
         "title": "当前员工提交的境内出差申请",
         "businessId": "BIZ-travel-1",
         "startDate": "2026-09-01",
@@ -1139,6 +1144,91 @@ async def test_related_reverification_runs_without_an_open_database_transaction(
         database.close()
 
     assert result["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_related_approval_rejects_another_current_department(
+    client_factory,
+    monkeypatch,
+) -> None:
+    catalog = _catalog_with_travel()
+    monkeypatch.setattr(
+        reimbursement_drafts,
+        "require_submission_ready_catalog",
+        lambda _database: catalog,
+    )
+    client = client_factory(auth_mock_enabled=True)
+    login = mock_login(client)
+    draft_id = _create(
+        client,
+        {"X-CSRF-Token": login["csrfToken"]},
+    ).json()["data"]["id"]
+    database = client.app.state.database_session_factory()
+    actor = reimbursement_drafts.DraftActor(
+        corp_id="corp-fixed",
+        user_id="mock-user",
+        department_id="100",
+        department_name="测试部门",
+        available_department_ids=("100", "200"),
+    )
+
+    try:
+        with pytest.raises(ApiError) as caught:
+            await reimbursement_drafts.replace_related_approvals(
+                database,
+                FakeTravelWorkflow(department_id="200"),
+                actor=actor,
+                draft_id=draft_id,
+                expected_revision=1,
+                selections=[RelatedApprovalSelectionInput.model_validate(_selection())],
+            )
+    finally:
+        database.close()
+
+    assert caught.value.code == "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_related_approval_allows_and_records_a_historical_department(
+    client_factory,
+    monkeypatch,
+) -> None:
+    catalog = _catalog_with_travel()
+    monkeypatch.setattr(
+        reimbursement_drafts,
+        "require_submission_ready_catalog",
+        lambda _database: catalog,
+    )
+    client = client_factory(auth_mock_enabled=True)
+    login = mock_login(client)
+    draft_id = _create(
+        client,
+        {"X-CSRF-Token": login["csrfToken"]},
+    ).json()["data"]["id"]
+    database = client.app.state.database_session_factory()
+    actor = reimbursement_drafts.DraftActor(
+        corp_id="corp-fixed",
+        user_id="mock-user",
+        department_id="100",
+        department_name="测试部门",
+        available_department_ids=("100", "200"),
+    )
+
+    try:
+        result = await reimbursement_drafts.replace_related_approvals(
+            database,
+            FakeTravelWorkflow(department_id="historical-department"),
+            actor=actor,
+            draft_id=draft_id,
+            expected_revision=1,
+            selections=[RelatedApprovalSelectionInput.model_validate(_selection())],
+        )
+    finally:
+        database.close()
+
+    assert result["relatedApprovals"][0]["originatorDepartmentId"] == (
+        "historical-department"
+    )
 
 
 def test_review_requires_verified_approval_and_active_file_then_marks_ready(

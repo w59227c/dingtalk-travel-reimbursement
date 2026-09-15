@@ -23,6 +23,7 @@ const candidate: OaTravelApproval = {
   unavailableReason: null,
   title: '合肥出差申请',
   businessId: 'TRAVEL-1',
+  originatorDepartmentId: '100',
   startDate: '2026-09-01',
   endDate: '2026-09-03',
   createdAt: '2026-08-30T00:00:00Z',
@@ -39,6 +40,7 @@ const linked: ReimbursementRelatedApproval = {
   processInstanceId: 'travel-1',
   profileKey: 'business',
   sourceProcessCode: 'PROC-TRAVEL',
+  originatorDepartmentId: '100',
   title: '合肥出差申请',
   businessId: 'TRAVEL-1',
   startDate: '2026-09-01',
@@ -106,7 +108,7 @@ describe('TravelApprovalSelector', () => {
     replacement.vm.$emit('change', true)
     await nextTick()
 
-    expect(wrapper.text()).toContain('无需再次选择部门')
+    expect(wrapper.text()).toContain('无法匹配当前部门时再请你确认')
     expect(wrapper.emitted('update:modelValue')?.[0]).toEqual([[
       { ...selection, processInstanceId: 'travel-2' },
     ]])
@@ -139,16 +141,18 @@ describe('TravelApprovalSelector', () => {
       { ...candidate, processInstanceId: 'other-company', companyOption: { value: 'other', label: '另一公司', key: null } },
       { ...candidate, processInstanceId: 'other-budget', budgetCodeOption: { value: 'other', label: '另一预算', key: null } },
       { ...candidate, processInstanceId: 'other-type', travelTypeOption: { value: 'other', label: '另一类别', key: null } },
+      { ...candidate, processInstanceId: 'other-department', originatorDepartmentId: '200' },
       { ...candidate, processInstanceId: 'missing', companyOption: null, unavailableReason: '出差审批的所属公司缺失' },
     ]
     const wrapper = mount(TravelApprovalSelector, {
       props: { modelValue: [selection] }, global: { plugins: [ElementPlus] },
     })
     expect(wrapper.findAllComponents({ name: 'ElCheckbox' }).map((item) => item.props('disabled')))
-      .toEqual([false, true, true, true, true])
+      .toEqual([false, true, true, true, true, true])
     expect(wrapper.text()).toContain('所属公司与已选审批不同')
     expect(wrapper.text()).toContain('预算代码与已选审批不同')
     expect(wrapper.text()).toContain('出差类别与已选审批不同')
+    expect(wrapper.text()).toContain('发起部门与已选审批不同')
     expect(wrapper.text()).toContain('出差审批的所属公司缺失')
     wrapper.findAllComponents({ name: 'ElCheckbox' })[1]!.vm.$emit('change', true)
     expect(wrapper.emitted('update:modelValue')).toBeUndefined()

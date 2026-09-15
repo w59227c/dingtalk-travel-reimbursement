@@ -259,7 +259,9 @@ function installServerMocks(): void {
     checks: { database: 'ok', excelTemplate: 'ok', tempStorage: 'ok', ocr: 'disabled' },
   })
   vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
-    id: '100', name: '测试部门',
+    selectedDepartment: { id: '100', name: '测试部门' },
+    selectionRequired: false,
+    departments: [{ id: '100', name: '测试部门' }],
   })
   vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
   vi.mocked(getOaReimbursementOptions).mockResolvedValue(options)
@@ -535,7 +537,12 @@ describe('ReimburseView single-form OA flow', () => {
       ]
     })
     vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
-      id: '200', name: '工业物联二部',
+      selectedDepartment: { id: '200', name: '工业物联二部' },
+      selectionRequired: false,
+      departments: [
+        { id: '100', name: '技术管理中心' },
+        { id: '200', name: '工业物联二部' },
+      ],
     })
 
     expect(wrapper.text()).not.toContain('选择本次报销部门')
@@ -545,7 +552,7 @@ describe('ReimburseView single-form OA flow', () => {
     selector.vm.$emit('update:modelValue', [selection])
     await flushPromises()
 
-    expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(selection)
+    expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(selection, undefined)
     expect(useAuthStore().session?.selectedDepartment).toEqual({
       id: '200', name: '工业物联二部',
     })
@@ -557,6 +564,138 @@ describe('ReimburseView single-form OA flow', () => {
     )
     wrapper.unmount()
   })
+
+  it.each([false, true])(
+    'asks for a filtered current department when the approval department is historical (mobile=%s)',
+    async (mobile) => {
+      const { wrapper } = await mountView((auth) => {
+        auth.status = 'department_required'
+        auth.session!.selectedDepartment = null
+        auth.session!.departments = [
+          { id: 'other', name: '其他临时部门' },
+          { id: '100', name: '技术管理中心' },
+          { id: '300', name: '技术管理中心' },
+          { id: '400', name: '产品开发部' },
+        ]
+      }, false, mobile)
+      vi.mocked(selectDepartmentFromTravelApproval).mockImplementation(
+        async (_selection, selectedDepartmentId) => selectedDepartmentId
+          ? {
+              selectedDepartment: { id: '400', name: '产品开发部' },
+              selectionRequired: false,
+              departments: [
+                { id: '100', name: '技术管理中心' },
+                { id: '400', name: '产品开发部' },
+              ],
+            }
+          : {
+              selectedDepartment: null,
+              selectionRequired: true,
+              departments: [
+                { id: 'other', name: '其他临时部门' },
+                { id: '100', name: '技术管理中心' },
+                { id: '300', name: '技术管理中心' },
+                { id: '400', name: '产品开发部' },
+              ],
+            },
+      )
+
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit(
+        'update:modelValue',
+        [selection],
+      )
+      await flushPromises()
+
+      const dialog = wrapper.findComponent({ name: 'ElDialog' })
+      expect(dialog.props('modelValue')).toBe(true)
+      expect(wrapper.findAllComponents({ name: 'ElOption' }).map(
+        (option) => option.props('label'),
+      )).toEqual(['技术管理中心', '产品开发部'])
+      wrapper.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', '400')
+      await nextTick()
+      await visibleButton(wrapper, '确认部门').trigger('click')
+      await flushPromises()
+
+      expect(selectDepartmentFromTravelApproval).toHaveBeenNthCalledWith(
+        1,
+        selection,
+        undefined,
+      )
+      expect(selectDepartmentFromTravelApproval).toHaveBeenNthCalledWith(
+        2,
+        selection,
+        '400',
+      )
+      expect(useAuthStore().session?.selectedDepartment).toEqual({
+        id: '400',
+        name: '产品开发部',
+      })
+      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledWith(
+        'draft-1',
+        expect.any(Number),
+        [selection],
+        { signal: expect.any(AbortSignal) },
+      )
+      wrapper.unmount()
+    },
+  )
+
+  it.each([false, true])(
+    'switches to another current department before linking its approval (mobile=%s)',
+    async (mobile) => {
+      const { wrapper, drafts } = await mountView((auth) => {
+        auth.session!.departments = [
+          { id: '100', name: '技术管理中心' },
+          { id: '200', name: '产品开发部' },
+        ]
+        auth.session!.selectedDepartment = { id: '100', name: '技术管理中心' }
+      }, false, mobile)
+      drafts.travelApprovals = [{
+        ...linkedApproval,
+        originatorDepartmentId: '200',
+        profileDisplayName: '境内出差',
+        travelTypeOption: { value: 'business', label: '境内出差', key: null },
+        companyOption: options.companyOptions[0]!,
+        budgetCodeOption: options.budgetCodeOptions[0]!,
+        unavailableReason: null,
+        createdAt: '2026-08-30T00:00:00Z',
+        finishedAt: '2026-08-31T00:00:00Z',
+      }]
+      serverDraft = makeDraft({
+        department: { id: '200', name: '产品开发部' },
+      })
+      vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
+        selectedDepartment: { id: '200', name: '产品开发部' },
+        selectionRequired: false,
+        departments: [
+          { id: '100', name: '技术管理中心' },
+          { id: '200', name: '产品开发部' },
+        ],
+      })
+
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit(
+        'update:modelValue',
+        [selection],
+      )
+      await flushPromises()
+
+      expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(
+        selection,
+        undefined,
+      )
+      expect(useAuthStore().session?.selectedDepartment).toEqual({
+        id: '200',
+        name: '产品开发部',
+      })
+      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledWith(
+        'draft-1',
+        expect.any(Number),
+        [selection],
+        { signal: expect.any(AbortSignal) },
+      )
+      wrapper.unmount()
+    },
+  )
 
   it('cancels a pending calculation when authentication ends', async () => {
     vi.useFakeTimers()

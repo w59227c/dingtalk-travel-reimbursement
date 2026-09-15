@@ -228,10 +228,237 @@ def test_multiple_departments_bind_from_verified_travel_approval(
         "id": "20",
         "name": "部门-20",
     }
+    assert selected.json()["data"]["selectionRequired"] is False
+    assert selected.json()["data"]["departments"] == [
+        {"id": "10", "name": "部门-10"},
+        {"id": "20", "name": "部门-20"},
+    ]
     assert client.get("/api/me").json()["data"]["selectedDepartment"] == {
         "id": "20",
         "name": "部门-20",
     }
+
+
+def test_travel_approval_department_resolution_uses_latest_session_departments(
+    client_factory,
+    monkeypatch,
+) -> None:
+    transport, _calls = success_transport([10, 20])
+    client = client_factory(transport=transport)
+    login = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"})
+    session = login.json()["data"]
+    session_hash = token_hash(
+        client.cookies["expense_session"],
+        client.app.state.settings.session_secret,
+    )
+    monkeypatch.setattr(
+        auth,
+        "require_submission_ready_catalog",
+        lambda database: object(),
+        raising=False,
+    )
+
+    async def verified_selection(*args, **kwargs):
+        # Simulate a fresh identity sync completing while DingTalk approval
+        # verification is still in flight.
+        with client.app.state.database_session_factory() as other_database:
+            record = other_database.get(UserSession, session_hash)
+            assert record is not None
+            record.departments_json = json.dumps(
+                [
+                    {"id": "30", "name": "新部门一"},
+                    {"id": "40", "name": "新部门二"},
+                ],
+                ensure_ascii=False,
+            )
+            record.current_department_id = None
+            record.current_department_name = None
+            other_database.commit()
+        return SimpleNamespace(department_id="20")
+
+    monkeypatch.setattr(
+        auth,
+        "reverify_travel_approval_selection",
+        verified_selection,
+        raising=False,
+    )
+
+    response = client.post(
+        "/api/me/department/from-travel-approval",
+        json={
+            "processInstanceId": "travel-instance-20",
+            "profileKey": "domestic",
+            "queryWindow": {"from": "2026-07-01", "to": "2026-07-31"},
+        },
+        headers={"X-CSRF-Token": session["csrfToken"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == {
+        "selectedDepartment": None,
+        "selectionRequired": True,
+        "departments": [
+            {"id": "30", "name": "新部门一"},
+            {"id": "40", "name": "新部门二"},
+        ],
+    }
+
+
+def test_historical_travel_department_requires_a_current_department_choice(
+    client_factory,
+    monkeypatch,
+) -> None:
+    transport, _calls = success_transport(
+        [10, 20, 30, 40],
+        {
+            10: "其他临时部门",
+            20: "技术管理中心",
+            30: "技术管理中心",
+            40: "产品开发部",
+        },
+    )
+    client = client_factory(transport=transport)
+    session = client.post(
+        "/api/auth/dingtalk",
+        json={"authCode": "one-time-code"},
+    ).json()["data"]
+    monkeypatch.setattr(
+        auth,
+        "require_submission_ready_catalog",
+        lambda database: object(),
+        raising=False,
+    )
+
+    async def verified_selection(*args, **kwargs):
+        return SimpleNamespace(department_id="historical-department")
+
+    monkeypatch.setattr(
+        auth,
+        "reverify_travel_approval_selection",
+        verified_selection,
+        raising=False,
+    )
+    body = {
+        "processInstanceId": "historical-travel",
+        "profileKey": "domestic",
+        "queryWindow": {"from": "2026-07-01", "to": "2026-07-31"},
+    }
+
+    unresolved = client.post(
+        "/api/me/department/from-travel-approval",
+        json=body,
+        headers={"X-CSRF-Token": session["csrfToken"]},
+    )
+
+    assert unresolved.status_code == 200, unresolved.text
+    assert unresolved.json()["data"] == {
+        "selectedDepartment": None,
+        "selectionRequired": True,
+        "departments": [
+            {"id": "20", "name": "技术管理中心"},
+            {"id": "40", "name": "产品开发部"},
+        ],
+    }
+    assert client.get("/api/me").json()["data"]["selectedDepartment"] is None
+
+    selected = client.post(
+        "/api/me/department/from-travel-approval",
+        json={**body, "selectedDepartmentId": "40"},
+        headers={"X-CSRF-Token": session["csrfToken"]},
+    )
+
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["data"]["selectedDepartment"] == {
+        "id": "40",
+        "name": "产品开发部",
+    }
+
+
+def test_historical_travel_department_uses_the_only_current_department(
+    client_factory,
+    monkeypatch,
+) -> None:
+    transport, _calls = success_transport([20])
+    client = client_factory(transport=transport)
+    session = client.post(
+        "/api/auth/dingtalk",
+        json={"authCode": "one-time-code"},
+    ).json()["data"]
+    monkeypatch.setattr(
+        auth,
+        "require_submission_ready_catalog",
+        lambda database: object(),
+        raising=False,
+    )
+
+    async def verified_selection(*args, **kwargs):
+        return SimpleNamespace(department_id="historical-department")
+
+    monkeypatch.setattr(
+        auth,
+        "reverify_travel_approval_selection",
+        verified_selection,
+        raising=False,
+    )
+
+    selected = client.post(
+        "/api/me/department/from-travel-approval",
+        json={
+            "processInstanceId": "historical-travel",
+            "profileKey": "domestic",
+            "queryWindow": {"from": "2026-07-01", "to": "2026-07-31"},
+        },
+        headers={"X-CSRF-Token": session["csrfToken"]},
+    )
+
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["data"]["selectedDepartment"] == {
+        "id": "20",
+        "name": "部门-20",
+    }
+    assert selected.json()["data"]["selectionRequired"] is False
+
+
+def test_historical_travel_department_rejects_a_non_current_choice(
+    client_factory,
+    monkeypatch,
+) -> None:
+    transport, _calls = success_transport([10, 20])
+    client = client_factory(transport=transport)
+    session = client.post(
+        "/api/auth/dingtalk",
+        json={"authCode": "one-time-code"},
+    ).json()["data"]
+    monkeypatch.setattr(
+        auth,
+        "require_submission_ready_catalog",
+        lambda database: object(),
+        raising=False,
+    )
+
+    async def verified_selection(*args, **kwargs):
+        return SimpleNamespace(department_id="historical-department")
+
+    monkeypatch.setattr(
+        auth,
+        "reverify_travel_approval_selection",
+        verified_selection,
+        raising=False,
+    )
+
+    rejected = client.post(
+        "/api/me/department/from-travel-approval",
+        json={
+            "processInstanceId": "historical-travel",
+            "profileKey": "domestic",
+            "queryWindow": {"from": "2026-07-01", "to": "2026-07-31"},
+            "selectedDepartmentId": "not-current",
+        },
+        headers={"X-CSRF-Token": session["csrfToken"]},
+    )
+
+    assert rejected.status_code == 422
+    assert rejected.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_INVALID"
 
 
 def test_login_filters_other_departments_and_deduplicates_remaining_names(

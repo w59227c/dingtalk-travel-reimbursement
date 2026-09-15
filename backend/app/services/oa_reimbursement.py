@@ -535,6 +535,16 @@ class SnapshotSubmissionMaterializer:
                     "所选出差审批状态或日期已变化，请重新选择",
                     409,
                 )
+            if (
+                related.originator_department_id is not None
+                and instance.originator_department_id
+                != related.originator_department_id
+            ):
+                raise ApiError(
+                    "TRAVEL_APPROVAL_DEPARTMENT_CHANGED",
+                    "关联出差审批的发起部门已变化，请重新关联后提交",
+                    409,
+                )
             option, source_value, type_reason = travel_instance_type_option(
                 instance,
                 source_schema=schema_by_process_code[profile.process_code],

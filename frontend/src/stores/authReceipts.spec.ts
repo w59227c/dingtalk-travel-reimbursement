@@ -222,16 +222,51 @@ describe('authentication clears scoped client memory', () => {
       queryWindow: { from: '2026-07-01', to: '2026-07-31' },
     }
     vi.mocked(selectDepartmentFromTravelApprovalRequest).mockResolvedValue({
-      id: '200', name: '工业物联二部',
+      selectedDepartment: { id: '200', name: '工业物联二部' },
+      selectionRequired: false,
+      departments: [
+        { id: '100', name: '测试部门' },
+        { id: '200', name: '工业物联二部' },
+      ],
     })
 
     await auth.selectDepartmentFromTravelApproval(selection)
 
-    expect(selectDepartmentFromTravelApprovalRequest).toHaveBeenCalledWith(selection)
+    expect(selectDepartmentFromTravelApprovalRequest).toHaveBeenCalledWith(selection, undefined)
     expect(auth.status).toBe('authenticated')
     expect(auth.session?.selectedDepartment).toEqual({ id: '200', name: '工业物联二部' })
-    expect(auth.session?.departments[0]).toEqual({ id: '200', name: '工业物联二部' })
+    expect(auth.session?.departments).toEqual([
+      { id: '100', name: '测试部门' },
+      { id: '200', name: '工业物联二部' },
+    ])
     expect(drafts.drafts).toEqual([])
+  })
+
+  it('keeps the current scope intact while a historical approval needs a choice', async () => {
+    const auth = useAuthStore()
+    auth.session = { ...session(), selectedDepartment: null }
+    auth.status = 'department_required'
+    const drafts = seedDraftMemory()
+    const selection = {
+      processInstanceId: 'historical-travel',
+      profileKey: 'domestic',
+      queryWindow: { from: '2026-07-01', to: '2026-07-31' },
+    }
+    vi.mocked(selectDepartmentFromTravelApprovalRequest).mockResolvedValue({
+      selectedDepartment: null,
+      selectionRequired: true,
+      departments: [
+        { id: '100', name: '技术管理中心' },
+        { id: '200', name: '产品开发部' },
+      ],
+    })
+
+    const resolution = await auth.selectDepartmentFromTravelApproval(selection)
+
+    expect(resolution.selectionRequired).toBe(true)
+    expect(auth.status).toBe('department_required')
+    expect(auth.session?.selectedDepartment).toBeNull()
+    expect(drafts.drafts).not.toEqual([])
   })
 
   it('clears reimbursement state when refresh discovers a different user', async () => {

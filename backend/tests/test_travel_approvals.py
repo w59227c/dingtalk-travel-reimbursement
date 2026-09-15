@@ -750,23 +750,21 @@ async def test_reverification_rejects_approvals_from_different_departments() -> 
 
 
 @pytest.mark.asyncio
-async def test_reverification_rejects_an_approval_outside_the_draft_department() -> None:
+async def test_reverification_reports_a_historical_department_without_rejecting_it() -> None:
     window = _window()
     workflow = FakeWorkflow(
         {("PROC-A", 0): WorkflowInstanceIdPage(("trip",), None)},
         {"trip": _instance("trip")},
     )
 
-    with pytest.raises(ApiError) as caught:
-        await reverify_travel_approval_selection(
-            workflow,
-            _catalog(_profile("domestic", "PROC-A")),
-            current_user_id="employee-1",
-            selections=(TravelApprovalSelection("domestic", "trip", window),),
-            expected_department_id="200",
-        )
+    result = await reverify_travel_approval_selection(
+        workflow,
+        _catalog(_profile("domestic", "PROC-A")),
+        current_user_id="employee-1",
+        selections=(TravelApprovalSelection("domestic", "trip", window),),
+    )
 
-    assert caught.value.code == "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH"
+    assert result.department_id == "100"
 
 
 @pytest.mark.asyncio

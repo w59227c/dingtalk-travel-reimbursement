@@ -55,6 +55,8 @@ const initializingWorkspace = ref(false)
 const initializationError = ref('')
 const departmentBindingError = ref('')
 const bindingApprovalDepartment = ref(false)
+const pendingDepartmentApproval = ref<ReimbursementRelatedApprovalSelection | null>(null)
+const selectedDepartmentChoiceId = ref('')
 const saving = ref(false)
 const saveError = ref('')
 const submitFlowPending = ref(false)
@@ -73,6 +75,22 @@ let mobileFooterResizeObserver: ResizeObserver | undefined
 
 const companyOptions = computed(() => drafts.reimbursementOptions?.companyOptions ?? [])
 const budgetOptions = computed(() => drafts.reimbursementOptions?.budgetCodeOptions ?? [])
+const selectableDepartments = computed(() => {
+  const names = new Set<string>()
+  return (auth.session?.departments ?? []).flatMap((department) => {
+    const name = department.name.trim()
+    if (!name || name.startsWith('其他') || names.has(name)) return []
+    names.add(name)
+    return [{ id: department.id, name }]
+  })
+})
+const pendingDepartmentApprovalTitle = computed(() => {
+  const pending = pendingDepartmentApproval.value
+  if (!pending) return ''
+  return drafts.travelApprovals.find(
+    (approval) => approval.processInstanceId === pending.processInstanceId,
+  )?.title ?? pending.processInstanceId
+})
 const companyLabel = computed(() => companyOptions.value.find((option) => option.value === companyValue.value)?.label ?? companyValue.value)
 const budgetLabel = computed(() => budgetOptions.value.find((option) => option.value === budgetCodeValue.value)?.label ?? budgetCodeValue.value)
 const selectedTravelTypeLabel = computed(() => {
@@ -498,14 +516,41 @@ async function chooseTravelApprovalForDepartment(
 ): Promise<void> {
   if (bindingApprovalDepartment.value) return
   const selection = selections.at(-1)
-  selectedRelatedApprovals.value = selection ? [selection] : []
-  if (!selection) return
+  if (!selection) {
+    selectedRelatedApprovals.value = []
+    pendingDepartmentApproval.value = null
+    selectedDepartmentChoiceId.value = ''
+    return
+  }
+  await resolveDepartmentForApproval(selection)
+}
+async function resolveDepartmentForApproval(
+  selection: ReimbursementRelatedApprovalSelection,
+  selectedDepartmentId?: string,
+): Promise<void> {
+  if (bindingApprovalDepartment.value) return
   bindingApprovalDepartment.value = true
   departmentBindingError.value = ''
   try {
-    await auth.selectDepartmentFromTravelApproval(selection)
-    initializedScope = ''
-    await initializeWorkspace(true)
+    if (auth.status === 'authenticated' && drafts.currentDraft && formDirty.value) {
+      await flushAutosave()
+    }
+    const previousScope = sessionScope()
+    const resolution = await auth.selectDepartmentFromTravelApproval(
+      selection,
+      selectedDepartmentId,
+    )
+    if (resolution.selectionRequired || !resolution.selectedDepartment) {
+      pendingDepartmentApproval.value = selection
+      selectedDepartmentChoiceId.value = ''
+      return
+    }
+    pendingDepartmentApproval.value = null
+    selectedDepartmentChoiceId.value = ''
+    if (!drafts.currentDraft || sessionScope() !== previousScope) {
+      initializedScope = ''
+      await initializeWorkspace(true)
+    }
     let opened = drafts.currentDraft
     if (!opened) throw new Error(initializationError.value || '报销表单加载失败，请重试')
     const alreadyLinked = opened.relatedApprovals.some(
@@ -532,6 +577,36 @@ async function chooseTravelApprovalForDepartment(
   } finally {
     bindingApprovalDepartment.value = false
   }
+}
+function updateRelatedApprovals(
+  selections: ReimbursementRelatedApprovalSelection[],
+): void {
+  const firstSelection = selections.length === 1 && selectedRelatedApprovals.value.length === 0
+    ? selections[0]
+    : undefined
+  if (!firstSelection || selectableDepartments.value.length <= 1) {
+    selectedRelatedApprovals.value = selections
+    return
+  }
+  const candidate = drafts.travelApprovals.find(
+    (approval) => approval.processInstanceId === firstSelection.processInstanceId,
+  )
+  const currentDepartmentId = auth.session?.selectedDepartment?.id
+  if (candidate?.originatorDepartmentId === currentDepartmentId) {
+    selectedRelatedApprovals.value = selections
+    return
+  }
+  void resolveDepartmentForApproval(firstSelection)
+}
+function confirmDepartmentChoice(): void {
+  const pending = pendingDepartmentApproval.value
+  if (!pending || !selectedDepartmentChoiceId.value) return
+  void resolveDepartmentForApproval(pending, selectedDepartmentChoiceId.value)
+}
+function cancelDepartmentChoice(): void {
+  pendingDepartmentApproval.value = null
+  selectedDepartmentChoiceId.value = ''
+  if (auth.status === 'department_required') selectedRelatedApprovals.value = []
 }
 function selectMobileStep(step: number): void {
   if (!props.mobile || step < 0 || step >= mobileSteps.length) return
@@ -730,7 +805,7 @@ onBeforeUnmount(() => {
         <strong>选择本次出差申请</strong>
       </template>
       <p class="field-help">
-        请选择本次报销对应的已通过出差审批，系统将按审批中的所在部门自动填写，无需再选部门。
+        请选择本次报销对应的已通过出差审批。系统优先匹配审批的发起部门，无法匹配当前部门时再请你确认。
       </p>
       <TravelApprovalSelector
         :model-value="selectedRelatedApprovals"
@@ -832,10 +907,11 @@ onBeforeUnmount(() => {
               </el-descriptions>
 
               <TravelApprovalSelector
-                v-model="selectedRelatedApprovals"
+                :model-value="selectedRelatedApprovals"
                 :mobile="props.mobile"
                 :linked-approvals="drafts.currentDraft.relatedApprovals"
                 :readonly="formReadOnly || drafts.processingFiles"
+                @update:model-value="updateRelatedApprovals"
               />
               <el-alert
                 v-if="drafts.currentDraft.relatedApprovals.length && !drafts.currentDraft.input.accountingSourceVerified && !formReadOnly"
@@ -1200,6 +1276,48 @@ onBeforeUnmount(() => {
         </template>
       </el-result>
     </el-card>
+    <el-dialog
+      :model-value="Boolean(pendingDepartmentApproval)"
+      title="确认本次报销部门"
+      :width="props.mobile ? 'calc(100% - 24px)' : '480px'"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      :show-close="false"
+      data-testid="department-choice-dialog"
+    >
+      <p class="department-choice-copy">
+        “{{ pendingDepartmentApprovalTitle }}”的发起部门已不在你当前可用的部门中，请选择本次报销归属的当前部门。
+      </p>
+      <el-select
+        v-model="selectedDepartmentChoiceId"
+        placeholder="请选择当前部门"
+        class="department-choice-select"
+        data-testid="department-choice-select"
+      >
+        <el-option
+          v-for="department in selectableDepartments"
+          :key="department.id"
+          :label="department.name"
+          :value="department.id"
+        />
+      </el-select>
+      <template #footer>
+        <el-button
+          :disabled="bindingApprovalDepartment"
+          @click="cancelDepartmentChoice"
+        >
+          返回重新选择
+        </el-button>
+        <el-button
+          type="primary"
+          :loading="bindingApprovalDepartment"
+          :disabled="!selectedDepartmentChoiceId"
+          @click="confirmDepartmentChoice"
+        >
+          确认部门
+        </el-button>
+      </template>
+    </el-dialog>
   </main>
 </template>
 
@@ -1214,6 +1332,8 @@ onBeforeUnmount(() => {
   overflow-wrap: anywhere;
 }
 .workspace-alert { margin-bottom: 18px; }
+.department-choice-copy { margin: 0 0 16px; color: var(--el-text-color-regular); line-height: 1.7; }
+.department-choice-select { width: 100%; }
 .identity-grid { margin-bottom: 0; }
 .plain-fieldset, .editor-fieldset { min-width: 0; padding: 0; margin: 0; border: 0; }
 .accounting-verification-alert { margin-top: 18px; }

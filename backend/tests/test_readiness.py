@@ -38,6 +38,76 @@ def test_database_readiness_accepts_actual_migration_head_and_rejects_old_schema
         get_settings.cache_clear()
 
 
+def test_related_approval_department_migration_preserves_old_rows_and_guards_evidence(
+    settings_factory,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    from app.core.config import get_settings
+
+    settings = settings_factory(database_url=f"sqlite:///{tmp_path / 'related-dept.db'}")
+    monkeypatch.setenv("DATABASE_URL", settings.database_url)
+    get_settings.cache_clear()
+    config = Config()
+    config.set_main_option("script_location", str(Path(__file__).parents[1] / "migrations"))
+    engine = create_database_engine(settings.database_url)
+    now = "2026-09-15 08:00:00"
+    try:
+        command.upgrade(config, "20260914_0018")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO reimbursement_drafts "
+                    "(id, corp_id, owner_user_id, status, revision, department_id, "
+                    "department_name, template_process_code, template_config_version, "
+                    "schema_fingerprint, input_json, related_instance_ids_json, "
+                    "expires_at, locked_at, created_at, updated_at) VALUES "
+                    "('draft-1', 'corp', 'user', 'DRAFT', 1, 'current', '当前部门', "
+                    "'PROC', 1, :fingerprint, '{}', '[\"travel-1\"]', :now, NULL, :now, :now)"
+                ),
+                {"fingerprint": "a" * 64, "now": now},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO reimbursement_draft_related_approvals "
+                    "(id, draft_id, corp_id, owner_user_id, sort_order, process_instance_id, "
+                    "travel_profile_key, process_code, catalog_config_version, "
+                    "travel_schema_fingerprint, listed_from_ms, listed_to_ms, "
+                    "travel_start_date, travel_end_date, source_travel_type_value, title, "
+                    "business_id, instance_created_at, verified_at, created_at, updated_at) "
+                    "VALUES ('related-1', 'draft-1', 'corp', 'user', 0, 'travel-1', "
+                    "'domestic', 'TRAVEL', 1, :fingerprint, 1, 2, '2026-09-01', "
+                    "'2026-09-02', NULL, '出差申请', 'BIZ-1', :now, :now, :now, :now)"
+                ),
+                {"fingerprint": "b" * 64, "now": now},
+            )
+
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT process_instance_id, originator_department_id "
+                    "FROM reimbursement_draft_related_approvals WHERE id = 'related-1'"
+                )
+            ).one()
+            assert row == ("travel-1", None)
+            connection.execute(
+                text(
+                    "UPDATE reimbursement_draft_related_approvals "
+                    "SET originator_department_id = 'historical' WHERE id = 'related-1'"
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="department evidence"):
+            command.downgrade(config, "20260914_0018")
+    finally:
+        engine.dispose()
+        get_settings.cache_clear()
+
+
 class _SchemaWithout:
     def __init__(
         self,
@@ -161,7 +231,7 @@ def test_ready_rejects_a_missing_reimbursement_table(
         ("oa_template_profiles", "travel_profiles_json"),
         ("reimbursement_drafts", "owner_user_id"),
         ("reimbursement_draft_files", "file_status"),
-        ("reimbursement_draft_related_approvals", "verified_at"),
+        ("reimbursement_draft_related_approvals", "originator_department_id"),
         ("reimbursement_submissions", "process_instance_id"),
         ("reimbursement_uploads", "file_id"),
     ],

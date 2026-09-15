@@ -74,6 +74,7 @@ export interface ReimbursementRelatedApprovalQueryWindow {
 
 export interface ReimbursementRelatedApproval {
   sourceTravelTypeValue?: string
+  originatorDepartmentId?: string
   processInstanceId: string
   profileKey: string
   sourceProcessCode: string
@@ -143,6 +144,7 @@ export interface OaTravelApproval {
   unavailableReason?: string | null
   title: string
   businessId: string
+  originatorDepartmentId?: string
   startDate: string
   endDate: string
   createdAt: string

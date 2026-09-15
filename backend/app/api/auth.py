@@ -4,14 +4,13 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.database.session import get_db
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
-from app.models.session import UserSession, utc_now
 from app.schemas.common import success
 from app.schemas.reimbursements import RelatedApprovalSelectionInput
 from app.services.application_settings import get_app_title
@@ -29,7 +28,6 @@ from app.services.sessions import (
     get_session_csrf,
     require_csrf,
     selectable_departments,
-    serialize_departments,
     session_payload,
 )
 from app.services.temp_files import delete_session_files
@@ -47,6 +45,20 @@ class DingTalkLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     auth_code: str = Field(alias="authCode", min_length=1, max_length=1024)
+
+
+class DepartmentFromTravelApprovalRequest(RelatedApprovalSelectionInput):
+    selected_department_id: str | None = Field(
+        default=None,
+        alias="selectedDepartmentId",
+        min_length=1,
+        max_length=128,
+    )
+
+    @field_validator("selected_department_id", mode="before")
+    @classmethod
+    def normalize_selected_department_id(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
 
 
 def _set_session_cookie(response: Response, settings: Settings, token: str) -> None:
@@ -169,16 +181,15 @@ def me(
 
 @router.post("/me/department/from-travel-approval")
 async def select_department_from_travel_approval(
-    body: RelatedApprovalSelectionInput,
+    body: DepartmentFromTravelApprovalRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(require_csrf)],
 ) -> dict[str, object]:
-    """Bind reimbursement scope to the department recorded by a verified travel OA."""
+    """Resolve the current reimbursement department from a verified travel OA."""
 
     catalog = require_submission_ready_catalog(database)
     workflow: DingTalkWorkflowClient = request.app.state.dingtalk_workflow
-    service: DingTalkService = request.app.state.dingtalk_service
     selection = TravelApprovalSelection(
         profile_key=body.profile_key,
         process_instance_id=body.process_instance_id,
@@ -188,7 +199,6 @@ async def select_department_from_travel_approval(
         ),
     )
     session_id_hash = current.record.session_id_hash
-    current_departments = current.departments
     current_user_id = current.record.dingtalk_user_id
     database.rollback()
     verified = await reverify_travel_approval_selection(
@@ -197,23 +207,65 @@ async def select_department_from_travel_approval(
         current_user_id=current_user_id,
         selections=(selection,),
     )
-    selected = await service.get_department_identity(verified.department_id)
-    if selected.name.startswith("其他"):
+    # Approval verification is a remote request. The employee may have logged in
+    # again while it was in flight, so do not resolve or persist a department
+    # from the session snapshot captured by the request dependency.
+    database.expire_all()
+    fresh_current = get_current_session(request, database)
+    if fresh_current.record.session_id_hash != session_id_hash:
+        raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
+    departments = selectable_departments(fresh_current.departments)
+    source_department = next(
+        (item for item in departments if item.id == verified.department_id),
+        None,
+    )
+    selected = source_department
+    if source_department is not None and body.selected_department_id not in {
+        None,
+        source_department.id,
+    }:
         raise ApiError(
-            "TRAVEL_APPROVAL_DEPARTMENT_INVALID",
-            "出差审批的所在部门不能用于报销，请重新选择",
+            "REIMBURSEMENT_DEPARTMENT_SELECTION_NOT_ALLOWED",
+            "出差审批属于当前部门，系统将自动使用该部门",
             422,
         )
+    if selected is None and len(departments) == 1:
+        selected = departments[0]
+    if selected is None and body.selected_department_id is not None:
+        selected = next(
+            (item for item in departments if item.id == body.selected_department_id),
+            None,
+        )
+        if selected is None:
+            raise ApiError(
+                "REIMBURSEMENT_DEPARTMENT_INVALID",
+                "所选部门不在当前可用部门中，请重新进入应用",
+                422,
+            )
+    if selected is None:
+        return success(
+            {
+                "selectedDepartment": None,
+                "selectionRequired": True,
+                "departments": [
+                    {"id": item.id, "name": item.name} for item in departments
+                ],
+            }
+        )
 
-    database.expire_all()
-    record = database.get(UserSession, session_id_hash)
-    if record is None or record.expires_at <= utc_now():
-        raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
-    record.departments_json = serialize_departments((selected, *current_departments))
+    record = fresh_current.record
     record.current_department_id = selected.id
     record.current_department_name = selected.name
     database.commit()
-    return success({"selectedDepartment": {"id": selected.id, "name": selected.name}})
+    return success(
+        {
+            "selectedDepartment": {"id": selected.id, "name": selected.name},
+            "selectionRequired": False,
+            "departments": [
+                {"id": item.id, "name": item.name} for item in departments
+            ],
+        }
+    )
 
 
 @router.post("/auth/logout")
