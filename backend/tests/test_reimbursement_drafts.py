@@ -416,6 +416,35 @@ def test_create_list_read_and_update_draft_are_persistent_and_canonical(
         )
 
 
+def test_employee_original_currency_edit_intent_is_persisted(
+    client_factory,
+    monkeypatch,
+) -> None:
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    login = mock_login(client)
+    headers = {"X-CSRF-Token": login["csrfToken"]}
+    value = _input()
+    value["items"][0].update(
+        originalCurrency="USD",
+        originalAmount="123.45",
+        originalDetailsEdited=True,
+    )
+
+    created = client.post(
+        "/api/reimbursements/drafts",
+        json={"expectedRevision": 0, "input": value},
+        headers=headers,
+    )
+
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    assert draft["input"]["items"][0]["originalDetailsEdited"] is True
+    loaded = client.get(f"/api/reimbursements/drafts/{draft['id']}")
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["data"]["input"]["items"][0]["originalDetailsEdited"] is True
+
+
 def test_canonical_draft_input_preserves_multiple_subsidy_trips() -> None:
     raw = _input()
     raw["trip"] = None

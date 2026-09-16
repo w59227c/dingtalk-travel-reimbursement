@@ -19,6 +19,7 @@ const DEFAULT_POLL_AFTER_MS = 1_500
 const MAX_POLL_AFTER_MS = 60_000
 const MAX_PERSISTED_DRAFTS = 100
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+let fallbackUuidCounter = 0
 
 const TERMINAL_STATUSES = new Set<ReimbursementSubmissionStatus>([
   'SUBMITTED',
@@ -159,9 +160,21 @@ function removePersistedSubmission(draftId: string): void {
 }
 
 function newIdempotencyKey(): string {
-  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  const cryptoApi = typeof globalThis.crypto === 'undefined' ? undefined : globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
   const bytes = new Uint8Array(16)
-  crypto.getRandomValues(bytes)
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    cryptoApi.getRandomValues(bytes)
+  } else {
+    const uniquenessSeed = `${Date.now()}-${fallbackUuidCounter += 1}-${Math.random()}`
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+    for (let index = 0; index < uniquenessSeed.length; index += 1) {
+      const byteIndex = index % bytes.length
+      bytes[byteIndex] = bytes[byteIndex]! ^ uniquenessSeed.charCodeAt(index)
+    }
+  }
   bytes[6] = (bytes[6]! & 0x0f) | 0x40
   bytes[8] = (bytes[8]! & 0x3f) | 0x80
   const value = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -176,7 +189,9 @@ function newIdempotencyKey(): string {
 
 function isCancellation(error: unknown): boolean {
   return axios.isCancel(error)
-    || (error instanceof DOMException && error.name === 'AbortError')
+    || (typeof DOMException !== 'undefined'
+      && error instanceof DOMException
+      && error.name === 'AbortError')
 }
 
 function isDefiniteClientRejection(error: unknown): boolean {

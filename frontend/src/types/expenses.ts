@@ -50,6 +50,8 @@ export interface ExpenseItem {
   transportType?: 'ride_hailing' | 'taxi' | 'rail' | 'hotel' | 'other'
   originalCurrency?: string
   originalAmount?: string
+  /** The employee explicitly corrected or cleared OCR-provided original-currency details. */
+  originalDetailsEdited?: boolean
   cnyAmountConfirmed?: boolean
   requiresCnyConfirmation?: boolean
   category: ExpenseCategoryId

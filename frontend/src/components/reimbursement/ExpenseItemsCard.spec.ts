@@ -1377,7 +1377,32 @@ describe('ExpenseItemsCard durable files', () => {
     if (paymentField) expect(paymentField.findAllComponents({ name: 'ElOption' }).map((option) => option.props('value'))).toEqual(['payment-1'])
     const railField = wrapper.findAllComponents({ name: 'ElFormItem' }).find((field) => field.props('label') === '铁路票种')
     expect(Boolean(railField)).toBe(category === 'rail_fare')
-    if (railField) expect(railField.findComponent({ name: 'ElSelect' }).props('disabled')).toBe(railType !== 'unknown')
+    if (railField) expect(railField.findComponent({ name: 'ElSelect' }).props('disabled')).not.toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('allows a recognized high-speed ticket to be corrected to a stricter rail type (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const source = recognizedFile('file-1', '铁路票.pdf', '600.00')
+    Object.assign(source.ocrResult, { categoryId: 'rail_fare', railType: 'high_speed' })
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
+    const railField = wrapper.findAllComponents({ name: 'ElFormItem' })
+      .find((field) => field.props('label') === '铁路票种')!
+    const railSelect = railField.findComponent({ name: 'ElSelect' })
+    expect(railSelect.props('disabled')).not.toBe(true)
+    railSelect.vm.$emit('update:modelValue', 'regular')
+    await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' })
+      .some((field) => field.props('label') === '付款凭证')).toBe(true)
+    await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
+    expect(expense.items[0]?.railType).toBe('regular')
     wrapper.unmount()
   })
 
@@ -2423,12 +2448,16 @@ describe('ExpenseItemsCard durable files', () => {
     const retry = itemList.findAll('button').find((button) =>
       button.text().trim() === '重新识别',
     )!
+    expect(retry.classes()).toContain('recognition-retry-button')
     await retry.trigger('click')
     await vi.waitFor(() => expect(recognizeReimbursementDraftFile).toHaveBeenCalledOnce())
 
-    const status = wrapper.get('[data-testid="material-operation-status"]')
-    expect(status.text()).toContain('正在重新识别“待重试发票.pdf”')
-    expect(status.text()).toContain('保留你的人工修改')
+    expect(wrapper.find('[data-testid="material-operation-status"]').exists()).toBe(false)
+    expect(itemList.text()).toContain('重新识别中')
+    const recognitionStatus = itemList.get('.recognition-status-tag')
+    expect(recognitionStatus.text()).toBe('重新识别中')
+    expect(recognitionStatus.classes()).toContain('recognition-status-tag')
+    expect(wrapper.get('.receipt-operation-status').text()).toBe('正在重新识别“待重试发票.pdf”')
     expect(retry.classes()).toContain('is-loading')
     const upload = wrapper.findAll('button').find((button) =>
       button.text().trim() === '上传报销材料',
@@ -2445,6 +2474,76 @@ describe('ExpenseItemsCard durable files', () => {
 
     expect(wrapper.find('[data-testid="material-operation-status"]').exists()).toBe(false)
     expect(success).toHaveBeenCalledWith('已用新的自动识别结果更新明细')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { presentation: 'desktop', mobile: false },
+    { presentation: 'mobile', mobile: true },
+  ])('does not add transient header help while expense categories load on $presentation', async ({ mobile }) => {
+    const expense = useExpenseStore()
+    expense.categoriesLoading = true
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.action-help').exists()).toBe(false)
+    expect(wrapper.findAll('button').find((button) => button.text().trim() === '手动添加')?.classes())
+      .toContain('is-loading')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { presentation: 'desktop', mobile: false },
+    { presentation: 'mobile', mobile: true },
+  ])('shows a category load failure once with its recovery action on $presentation', ({ mobile }) => {
+    const expense = useExpenseStore()
+    expense.categoryLoadError = '费用类别加载失败，请重试后再添加费用明细'
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+
+    expect(wrapper.find('.action-help').exists()).toBe(false)
+    expect(wrapper.findAll('.category-load-error')).toHaveLength(1)
+    expect(wrapper.get('.category-load-error').text()).toContain('重新加载费用类别')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { presentation: 'desktop', mobile: false },
+    { presentation: 'mobile', mobile: true },
+  ])('does not add a shifting header message for transient readonly state on $presentation', async ({ mobile }) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile, readonly: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.action-help').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([
+    { presentation: 'desktop', mobile: false, note: '自动识别结果可直接编辑，人工修改不会被重新识别覆盖' },
+    { presentation: 'mobile', mobile: true, note: '人工修改不会被重新识别覆盖' },
+  ])('shows stable edit-preservation guidance on $presentation', ({ mobile, note }) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+
+    expect(wrapper.get('.section-note').text()).toBe(note)
     wrapper.unmount()
   })
 
@@ -2925,6 +3024,57 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    { presentation: 'desktop', mobile: false },
+    { presentation: 'mobile', mobile: true },
+  ])('lets an employee correct or clear original-currency details on $presentation', async ({ mobile }) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const source = recognizedFile('file-foreign-edit', '海外发票.pdf')
+    source.ocrResult = {
+      ...source.ocrResult!, type: 'foreign_receipt', amount: null,
+      originalCurrency: 'VND', originalAmount: '97600000.00',
+      warnings: ['FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT'],
+    }
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+    expense.items[0]!.amount = '700.00'
+    expense.items[0]!.cnyAmountConfirmed = true
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const itemList = wrapper.get(mobile ? '.expense-mobile-list' : '.expense-table')
+    await itemList.findAll('button').find((button) => button.text().trim() === '编辑')!.trigger('click')
+    await flushPromises()
+    const currency = wrapper.findAllComponents({ name: 'ElInput' })
+      .find((input) => input.props('placeholder') === '例如 VND、USD、EUR')!
+    currency.vm.$emit('update:modelValue', 'USD')
+    currency.vm.$emit('input', 'USD')
+    await flushPromises()
+    const originalAmount = wrapper.findAllComponents({ name: 'ElInput' })
+      .find((input) => input.props('placeholder') === '例如 97600000')!
+    originalAmount.vm.$emit('update:modelValue', '')
+    originalAmount.vm.$emit('input', '')
+    const confirmation = wrapper.findAllComponents({ name: 'ElCheckbox' })
+      .find((checkbox) => checkbox.text().includes('已核对原币金额'))!
+    confirmation.vm.$emit('update:modelValue', true)
+    await flushPromises()
+    await wrapper.findAll('button').find((button) => button.text().trim() === '保存')!.trigger('click')
+
+    expect(expense.items[0]).toMatchObject({
+      originalCurrency: 'USD',
+      originalDetailsEdited: true,
+      cnyAmountConfirmed: true,
+    })
+    expect(expense.items[0]?.originalAmount).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('shows an unresolved OCR blocker and requires confirmation before ignoring it', async () => {
     const expense = useExpenseStore()
     expense.categories = [
@@ -3126,6 +3276,58 @@ describe('ExpenseItemsCard durable files', () => {
     expect(expense.items[0]).toEqual(expect.objectContaining({ ...changedFields, amount: '10.00' }))
     expect(receiptOcrResult(drafts.files[0])?.amount).toBe('20.00')
     expect(warning).toHaveBeenCalledWith(expect.stringContaining('未自动新增或覆盖'))
+    wrapper.unmount()
+  })
+
+  it.each([
+    { presentation: 'desktop', mobile: false },
+    { presentation: 'mobile', mobile: true },
+  ])('preserves employee edits saved before an OCR retry starts on $presentation', async ({ mobile }) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const source = recognizedFile('file-1', '人工已核对票据.pdf', '10.00')
+    source.ocrStatus = 'FAILED'
+    source.ocrResult = {
+      ...source.ocrResult!,
+      status: 'failed',
+      error: { code: 'OCR_FAILED', message: '识别失败，请重试' },
+    }
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+    expense.upsertManualItem({
+      id: 'ocr-file-1',
+      category: 'rail_fare',
+      date: '2026-09-02',
+      displayDate: '2026-09-02',
+      description: '员工已经核对并修改',
+      amount: '99.00',
+      receiptCount: 1,
+      warnings: [],
+    })
+    vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({
+      draftId: 'draft-1', revision: 9,
+      file: recognizedFile('file-1', '人工已核对票据.pdf', '20.00'),
+    })
+    const warning = vi.spyOn(ElMessage, 'warning')
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const itemList = wrapper.get(mobile ? '.expense-mobile-list' : '.expense-table')
+    await itemList.findAll('button').find((button) => button.text().trim() === '重新识别')!.trigger('click')
+    await flushPromises()
+
+    expect(expense.items[0]).toMatchObject({
+      date: '2026-09-02',
+      description: '员工已经核对并修改',
+      amount: '99.00',
+    })
+    expect(receiptOcrResult(drafts.files[0])?.amount).toBe('20.00')
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('保留'))
     wrapper.unmount()
   })
 

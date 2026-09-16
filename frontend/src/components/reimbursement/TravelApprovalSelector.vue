@@ -288,6 +288,7 @@ function accountingLabel(row: ApprovalRow): string {
           @keyup.enter="search"
         />
         <el-button
+          class="travel-query-button"
           :loading="drafts.loadingTravelApprovals"
           @click="search"
         >
@@ -419,6 +420,10 @@ function accountingLabel(row: ApprovalRow): string {
   gap: 10px;
 }
 
+.travel-query-button {
+  width: 112px;
+}
+
 .travel-query-grid--mobile {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -440,6 +445,7 @@ function accountingLabel(row: ApprovalRow): string {
 
 .travel-query-grid--mobile :deep(.el-button) {
   margin-left: 0;
+  width: 100%;
 }
 
 .travel-query-alert,
@@ -492,6 +498,8 @@ function accountingLabel(row: ApprovalRow): string {
   .travel-query-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .travel-query-button { width: 100%; }
 }
 
 @media (max-width: 480px) {

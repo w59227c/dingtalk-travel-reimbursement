@@ -73,7 +73,14 @@ export function missingExpenseMaterials(
 
 export function evidenceRailType(category: string, selected: RailType | undefined, evidence: OcrReceiptCandidate | null): RailType {
   if (category !== 'rail_fare' || hasKnownNonRailEvidence(evidence)) return 'unknown'
-  return evidence?.railType && evidence.railType !== 'unknown' ? evidence.railType : selected ?? 'unknown'
+  const observed = evidence?.railType
+  if (!observed || observed === 'unknown') return selected ?? 'unknown'
+  if (!selected || selected === 'unknown') return observed
+  // OCR evidence may grant the high-speed payment-proof exemption. Employees
+  // may safely correct it to a stricter non-exempt type, but not upgrade
+  // contrary non-high-speed evidence into an exemption.
+  if (selected === 'high_speed' && observed !== 'high_speed') return observed
+  return selected
 }
 
 export function hasKnownNonRailEvidence(evidence: OcrReceiptCandidate | null): boolean {

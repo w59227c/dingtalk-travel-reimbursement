@@ -86,6 +86,12 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
     original_amount: DecimalString | None = Field(
         default=None, alias="originalAmount", ge=0, le=Decimal("999999999999999.99")
     )
+    original_details_edited: bool = Field(
+        default=False,
+        alias="originalDetailsEdited",
+        strict=True,
+        exclude_if=lambda value: value is False,
+    )
     cny_amount_confirmed: bool = Field(default=False, alias="cnyAmountConfirmed", strict=True)
     requires_cny_confirmation: bool = Field(
         default=False, alias="requiresCnyConfirmation", strict=True
@@ -141,6 +147,13 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
         if not normalized:
             raise ValueError("sourceFileId must not be blank")
         return normalized
+
+    @model_validator(mode="after")
+    def normalize_itinerary_requirement(self) -> ReimbursementDraftExpenseItemInput:
+        if self.transport_type is None and self.requires_itinerary:
+            self.transport_type = "ride_hailing"
+        self.requires_itinerary = self.transport_type == "ride_hailing"
+        return self
 
 
 class ReimbursementDraftInput(ExcelGenerateRequest):

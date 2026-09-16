@@ -69,6 +69,7 @@ describe('TravelApprovalSelector', () => {
     })
 
     expect(wrapper.get('.travel-query-grid').classes()).toContain('travel-query-grid--mobile')
+    expect(wrapper.get('.travel-query-button').classes()).toContain('travel-query-button')
     wrapper.unmount()
   })
 

@@ -84,6 +84,7 @@ describe('reimbursement submission store', () => {
 
   afterEach(() => {
     window.sessionStorage.clear()
+    vi.unstubAllGlobals()
     vi.useRealTimers()
   })
 
@@ -107,6 +108,20 @@ describe('reimbursement submission store', () => {
     expect(store.idempotencyKey).toBe(key)
     expect(store.progressLabel).toBe('本系统已接收，等待后台处理')
     expect(store.polling).toBe(true)
+  })
+
+  it('submits with a UUID idempotency key when Web Crypto is unavailable', async () => {
+    vi.stubGlobal('crypto', undefined)
+    vi.mocked(submitOaReimbursement).mockResolvedValue(task())
+    const store = useReimbursementSubmissionStore()
+
+    await store.submit('draft-1', 7)
+
+    expect(vi.mocked(submitOaReimbursement).mock.calls[0]![2]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
+    expect(store.status).toBe('QUEUED')
+    store.abort()
   })
 
   it('stops automatic polling when OA is disabled, preserves identity and permits a manual refresh', async () => {

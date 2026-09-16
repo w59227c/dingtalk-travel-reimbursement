@@ -431,10 +431,44 @@ describe('expense store', () => {
     store.upsertDraftOcrItem(source)
     expect(store.items[0]).toMatchObject({ amount: '', originalAmount: '97600000.00', originalCurrency: 'VND', cnyAmountConfirmed: false, requiresCnyConfirmation: true })
     store.items[0]!.amount = '27800.00'
+    store.items[0]!.originalCurrency = 'USD'
+    store.items[0]!.originalAmount = undefined
+    store.items[0]!.originalDetailsEdited = true
     store.items[0]!.cnyAmountConfirmed = true
     const input = store.buildDraftExpenseItems()
     store.hydrateFromDraft(durableDraft(input), [source])
-    expect(store.items[0]).toMatchObject({ amount: '27800.00', originalAmount: '97600000.00', cnyAmountConfirmed: true })
+    expect(store.items[0]).toMatchObject({
+      amount: '27800.00',
+      originalCurrency: 'USD',
+      originalDetailsEdited: true,
+      cnyAmountConfirmed: true,
+    })
+    expect(store.items[0]?.originalAmount).toBeUndefined()
+  })
+
+  it('preserves corrected foreign details from a legacy draft without an edit marker', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('legacy-foreign-file')
+    source.ocrResult = {
+      ...source.ocrResult!, type: 'foreign_receipt', amount: '97600000.00',
+      originalAmount: '97600000.00', originalCurrency: 'VND',
+      warnings: ['FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT'],
+    }
+    store.upsertDraftOcrItem(source)
+    const legacyItem = store.buildDraftExpenseItems()[0]!
+    delete legacyItem.originalDetailsEdited
+    legacyItem.originalCurrency = 'USD'
+    legacyItem.originalAmount = '123.45'
+
+    store.hydrateFromDraft(durableDraft([legacyItem]), [source])
+
+    expect(store.items[0]).toMatchObject({
+      originalCurrency: 'USD',
+      originalAmount: '123.45',
+      originalDetailsEdited: true,
+    })
+    expect(store.buildDraftExpenseItems()[0]?.originalDetailsEdited).toBe(true)
   })
 
   it('keeps an unknown foreign currency pending and does not adopt its total as RMB', () => {
@@ -499,6 +533,34 @@ describe('expense store', () => {
     expect(store.items[0]).toMatchObject({
       transportType: 'taxi',
       requiresItinerary: false,
+    })
+  })
+
+  it.each([
+    { transportType: 'other' as const, requiresItinerary: true, expectedType: 'other', expectedRequired: false },
+    { transportType: undefined, requiresItinerary: true, expectedType: 'ride_hailing', expectedRequired: true },
+  ])('normalizes legacy itinerary state at hydration (%j)', ({ transportType, requiresItinerary, expectedType, expectedRequired }) => {
+    const store = useExpenseStore()
+    const current = durableDraft([{
+      category: 'local_transport',
+      date: '2026-09-01',
+      displayDate: '2026-09-01',
+      description: '市内交通费',
+      amount: '20.00',
+      receiptCount: 1,
+      transportType,
+      requiresItinerary,
+    }])
+
+    store.hydrateFromDraft(current, [])
+
+    expect(store.items[0]).toMatchObject({
+      transportType: expectedType,
+      requiresItinerary: expectedRequired,
+    })
+    expect(store.buildDraftExpenseItems()[0]).toMatchObject({
+      transportType: expectedType,
+      requiresItinerary: expectedRequired,
     })
   })
 

@@ -205,7 +205,7 @@ def test_employee_selected_ride_hailing_still_requires_an_itinerary(
             }
         )
         canonical = apply_ocr_evidence(database, draft_id=draft_id, draft_input=value)
-        assert canonical.items[0].requires_itinerary is False
+        assert canonical.items[0].requires_itinerary is True
         assert canonical.items[0].transport_type == "ride_hailing"
         with pytest.raises(ApiError, match="缺少对应行程单"):
             validate_draft_file_references(
@@ -314,6 +314,75 @@ def test_foreign_ocr_cannot_be_submitted_as_unconfirmed_cny(client_factory, monk
         validate_draft_file_references(
             database, draft_id=draft_id, draft_input=normalized, require_submission_proofs=True
         )
+
+
+def test_employee_corrected_foreign_details_are_not_replaced_by_ocr(client_factory, monkeypatch):
+    client, _, draft_id, source, _ = _proof_setup(client_factory, monkeypatch)
+    with client.app.state.database_session_factory() as database:
+        database.get(ReimbursementDraftFile, source).ocr_result_json = json.dumps(
+            {
+                "type": "foreign_receipt",
+                "originalCurrency": "VND",
+                "originalAmount": "97600000.00",
+                "amount": None,
+            }
+        )
+        database.commit()
+        value = ReimbursementDraftInput.model_validate(
+            {
+                **_input(),
+                "items": [
+                    {
+                        **_input()["items"][0],
+                        "sourceFileId": source,
+                        "originalCurrency": "USD",
+                        "originalAmount": "123.45",
+                        "originalDetailsEdited": True,
+                        "cnyAmountConfirmed": True,
+                    }
+                ],
+            }
+        )
+
+        normalized = apply_ocr_evidence(database, draft_id=draft_id, draft_input=value)
+
+        assert normalized.items[0].original_currency == "USD"
+        assert str(normalized.items[0].original_amount) == "123.45"
+        assert normalized.items[0].original_details_edited is True
+
+
+def test_legacy_corrected_foreign_details_are_not_replaced_by_ocr(client_factory, monkeypatch):
+    client, _, draft_id, source, _ = _proof_setup(client_factory, monkeypatch)
+    with client.app.state.database_session_factory() as database:
+        database.get(ReimbursementDraftFile, source).ocr_result_json = json.dumps(
+            {
+                "type": "foreign_receipt",
+                "originalCurrency": "VND",
+                "originalAmount": "97600000.00",
+                "amount": None,
+            }
+        )
+        database.commit()
+        value = ReimbursementDraftInput.model_validate(
+            {
+                **_input(),
+                "items": [
+                    {
+                        **_input()["items"][0],
+                        "sourceFileId": source,
+                        "originalCurrency": "USD",
+                        "originalAmount": "123.45",
+                        "cnyAmountConfirmed": True,
+                    }
+                ],
+            }
+        )
+
+        normalized = apply_ocr_evidence(database, draft_id=draft_id, draft_input=value)
+
+        assert normalized.items[0].original_currency == "USD"
+        assert str(normalized.items[0].original_amount) == "123.45"
+        assert normalized.items[0].original_details_edited is True
 
 
 @pytest.mark.parametrize(

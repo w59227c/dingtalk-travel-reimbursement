@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
@@ -715,7 +716,9 @@ def _authoritative_rail_type(
         return "unknown"
     observed = evidence.get("railType")
     if observed in {"high_speed", "emu", "regular"}:
-        return str(observed)
+        if item.rail_type == "high_speed" and observed != "high_speed":
+            return str(observed)
+        return item.rail_type if item.rail_type != "unknown" else str(observed)
     return item.rail_type
 
 
@@ -727,6 +730,30 @@ def file_ocr_evidence(file: ReimbursementDraftFile | None) -> dict[str, object]:
     except (TypeError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _original_details_were_edited(
+    item: ReimbursementDraftExpenseItemInput,
+    evidence: dict[str, object],
+) -> bool:
+    """Preserve corrected values from drafts written before the edit marker existed."""
+    if "original_details_edited" in item.model_fields_set:
+        return item.original_details_edited
+    if item.original_currency is None and item.original_amount is None:
+        return False
+    evidence_currency = evidence.get("originalCurrency")
+    if item.original_currency != (
+        evidence_currency if isinstance(evidence_currency, str) else None
+    ):
+        return True
+    evidence_amount = evidence.get("originalAmount")
+    try:
+        normalized_evidence_amount = (
+            Decimal(str(evidence_amount)) if evidence_amount is not None else None
+        )
+    except (InvalidOperation, ValueError):
+        return True
+    return item.original_amount != normalized_evidence_amount
 
 
 def apply_ocr_evidence(
@@ -746,6 +773,9 @@ def apply_ocr_evidence(
     for item in draft_input.items:
         evidence = file_ocr_evidence(by_id.get(item.source_file_id or ""))
         values = item.model_dump(mode="json", by_alias=True)
+        original_details_edited = _original_details_were_edited(item, evidence)
+        if original_details_edited:
+            values["originalDetailsEdited"] = True
         if item.source_file_id is not None:
             values["receiptCount"] = 1
         values["railType"] = _authoritative_rail_type(item, evidence)
@@ -754,9 +784,10 @@ def apply_ocr_evidence(
             values["requiresCnyConfirmation"] = True
         if isinstance(currency, str) and currency != "CNY":
             values["requiresCnyConfirmation"] = True
-            values["originalCurrency"] = currency
-            if evidence.get("originalAmount") is not None:
-                values["originalAmount"] = evidence["originalAmount"]
+            if not original_details_edited:
+                values["originalCurrency"] = currency
+                if evidence.get("originalAmount") is not None:
+                    values["originalAmount"] = evidence["originalAmount"]
         items.append(ReimbursementDraftExpenseItemInput.model_validate(values))
     return draft_input.model_copy(update={"items": items})
 

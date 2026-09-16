@@ -140,6 +140,7 @@ def test_payment_proof_uses_strict_confirmed_cny_threshold(
         ("rail_fare", "high_speed", {"categoryId": "local_transport"}, True),
         ("other", "high_speed", {"categoryId": "rail_fare", "railType": "high_speed"}, True),
         ("rail_fare", "high_speed", {"categoryId": "rail_fare", "railType": "regular"}, True),
+        ("rail_fare", "regular", {"categoryId": "rail_fare", "railType": "high_speed"}, True),
     ],
 )
 def test_rail_exemption_uses_category_and_authoritative_subtype(

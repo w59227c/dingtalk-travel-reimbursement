@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
 import ClientPdfPreview from './ClientPdfPreview.vue'
@@ -153,6 +152,7 @@ const editor = reactive({
   railType: 'unknown' as NonNullable<ExpenseItem['railType']>,
   originalCurrency: '',
   originalAmount: '',
+  originalDetailsEdited: false,
   cnyAmountConfirmed: false,
 })
 
@@ -193,7 +193,6 @@ const activeRecognitionStatus = computed(() => {
     return {
       fileId: retrying.fileId,
       title: `正在重新识别“${retrying.fileName}”`,
-      description: '系统正在重新解析票据信息，完成后会更新识别结果；如明细已被人工修改，系统会保留你的人工修改。',
     }
   }
   const running = durableFiles.value.find((file) =>
@@ -202,7 +201,6 @@ const activeRecognitionStatus = computed(() => {
     ? {
         fileId: running.id,
         title: `正在识别“${running.name}”`,
-        description: '票据仍在自动识别中，页面会自动同步最新结果。',
       }
     : null
 })
@@ -308,6 +306,18 @@ const newItemDisabledReason = computed(() => {
   if (expense.categoriesLoading) return '费用类别正在加载'
   if (expense.categoryLoadError) return expense.categoryLoadError
   if (!expense.manualCategories.length) return '暂无可手工选择的费用类别'
+  return ''
+})
+const headerActionHelp = computed(() => {
+  const current = drafts.currentDraft
+  if (current?.status === 'LOCKED') return '当前报销已进入提交处理，不能再修改附件'
+  if (current?.status === 'EXPIRED') return '当前报销已过期，不能再修改附件'
+  if (durableFiles.value.length >= expense.receiptUploadLimits.maxFiles) {
+    return `本次报销已达到 ${expense.receiptUploadLimits.maxFiles} 个附件上限`
+  }
+  if (expense.items.length >= expense.maxExpenseItems) {
+    return `费用明细已达到 ${expense.maxExpenseItems} 条上限`
+  }
   return ''
 })
 
@@ -478,6 +488,7 @@ function openNewItem(): void {
     railType: 'unknown',
     originalCurrency: '',
     originalAmount: '',
+    originalDetailsEdited: false,
     cnyAmountConfirmed: false,
   })
   editorRevision.value += 1
@@ -504,6 +515,7 @@ function openEditItem(item: ExpenseItem): void {
     railType: item.railType ?? 'unknown',
     originalCurrency: item.originalCurrency ?? '',
     originalAmount: item.originalAmount ?? '',
+    originalDetailsEdited: item.originalDetailsEdited ?? false,
     cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
   })
   editorRevision.value += 1
@@ -1267,6 +1279,7 @@ async function retryDurableRecognition(file: ReimbursementDraftFile): Promise<vo
   const linkedItemSnapshot = expenseItemSnapshot(
     expense.items.find((item) => item.sourceFileId === file.id),
   )
+  const linkedItemHadEmployeeEdits = expense.hasEmployeeEditsForOcrFile(file)
   const previouslyDismissed = expense.dismissedOcrFileIds.includes(file.id)
   retryingRecognition.value = {
     fileId: file.id,
@@ -1285,10 +1298,11 @@ async function retryDurableRecognition(file: ReimbursementDraftFile): Promise<vo
     }
     if (
       previouslyDismissed || expense.dismissedOcrFileIds.includes(file.id)
+      || linkedItemHadEmployeeEdits
       || expenseItemSnapshot(expense.items.find((item) => item.sourceFileId === file.id))
         !== linkedItemSnapshot
     ) {
-      ElMessage.warning('自动识别结果已更新；现有费用明细可能已人工修改，未自动新增或覆盖')
+      ElMessage.warning('自动识别结果已更新；已保留现有费用明细，未自动新增或覆盖')
       return
     }
     if (!expense.upsertDraftOcrItem(recognized)) {
@@ -1510,6 +1524,7 @@ function saveItem(): void {
       railType: editorRailType.value,
       originalCurrency: editor.originalCurrency.trim().toUpperCase() || undefined,
       originalAmount: editor.originalAmount.trim() || undefined,
+      originalDetailsEdited: editor.originalDetailsEdited,
       cnyAmountConfirmed: foreignEditor.value && editor.cnyAmountConfirmed,
       requiresCnyConfirmation: Boolean(foreignEditor.value),
       warnings: [],
@@ -1550,7 +1565,11 @@ async function retryItemRecognition(id: string): Promise<void> {
       <div class="card-header">
         <div>
           <strong>费用明细</strong>
-          <span class="section-note">自动识别结果会直接填入，发现不准确时直接编辑</span>
+          <span class="section-note">
+            {{ props.mobile
+              ? '人工修改不会被重新识别覆盖'
+              : '自动识别结果可直接编辑，人工修改不会被重新识别覆盖' }}
+          </span>
         </div>
         <div
           class="receipt-header-actions"
@@ -1639,11 +1658,11 @@ async function retryItemRecognition(id: string): Promise<void> {
           @change="onDurableSelection($event, 'ATTACHMENT_ONLY')"
         >
         <p
-          v-if="receiptUploadConstraintReason || newItemDisabledReason"
+          v-if="headerActionHelp"
           class="field-help action-help"
           role="status"
         >
-          {{ receiptUploadConstraintReason || newItemDisabledReason }}
+          {{ headerActionHelp }}
         </p>
         <span
           class="visually-hidden receipt-operation-status"
@@ -1680,25 +1699,6 @@ async function retryItemRecognition(id: string): Promise<void> {
       show-icon
       class="receipt-alert"
     />
-    <div
-      v-if="activeRecognitionStatus"
-      class="material-operation-status"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      data-testid="material-operation-status"
-    >
-      <el-icon
-        class="is-loading material-operation-status__icon"
-        aria-hidden="true"
-      >
-        <Loading />
-      </el-icon>
-      <div>
-        <strong>{{ activeRecognitionStatus.title }}</strong>
-        <span>{{ activeRecognitionStatus.description }}</span>
-      </div>
-    </div>
     <el-alert
       v-if="unresolvedDurableOcrFiles.length > 0"
       :title="`${unresolvedDurableOcrFiles.length} 张票据的自动识别结果待确认`"
@@ -1914,7 +1914,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           </el-button>
           <el-button
             v-if="canRetryDurableRecognition(file)"
-            class="receipt-action"
+            class="receipt-action recognition-retry-button"
             :link="!props.mobile"
             :plain="props.mobile"
             type="primary"
@@ -1989,18 +1989,17 @@ async function retryItemRecognition(id: string): Promise<void> {
           <div class="expense-category-cell">
             <span>{{ categoryNames[scope.row.category] ?? scope.row.category }}</span>
             <el-tag
-              v-if="scope.row.source === 'ocr'"
+              v-if="scope.row.source === 'ocr'
+                || isDurableRecognitionRunning(durableFileByItemId(scope.row.id))"
+              class="recognition-status-tag"
               size="small"
-              type="info"
+              :type="isDurableRecognitionRunning(durableFileByItemId(scope.row.id))
+                ? 'warning'
+                : 'info'"
             >
-              自动识别
-            </el-tag>
-            <el-tag
-              v-if="isDurableRecognitionRunning(durableFileByItemId(scope.row.id))"
-              size="small"
-              type="warning"
-            >
-              {{ isRetryingDurableRecognition(durableFileByItemId(scope.row.id)) ? '重新识别中' : '识别中' }}
+              {{ isDurableRecognitionRunning(durableFileByItemId(scope.row.id))
+                ? (isRetryingDurableRecognition(durableFileByItemId(scope.row.id)) ? '重新识别中' : '识别中')
+                : '自动识别' }}
             </el-tag>
             <span
               v-if="scope.row.warnings?.length"
@@ -2193,6 +2192,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             <el-button
               v-if="Boolean(durableFileByItemId(scope.row.id)
                 && canRetryDurableRecognition(durableFileByItemId(scope.row.id)))"
+              class="recognition-retry-button"
               type="primary"
               plain
               size="small"
@@ -2235,11 +2235,17 @@ async function retryItemRecognition(id: string): Promise<void> {
           <div class="mobile-expense-title">
             <strong>{{ categoryNames[item.category] ?? item.category }}</strong>
             <el-tag
-              v-if="item.source === 'ocr'"
+              v-if="item.source === 'ocr'
+                || isDurableRecognitionRunning(durableFileByItemId(item.id))"
+              class="recognition-status-tag"
               size="small"
-              type="info"
+              :type="isDurableRecognitionRunning(durableFileByItemId(item.id))
+                ? 'warning'
+                : 'info'"
             >
-              自动识别
+              {{ isDurableRecognitionRunning(durableFileByItemId(item.id))
+                ? (isRetryingDurableRecognition(durableFileByItemId(item.id)) ? '重新识别中' : '识别中')
+                : '自动识别' }}
             </el-tag>
             <el-tag
               v-if="mobileItemNeedsAttention(item)"
@@ -2247,13 +2253,6 @@ async function retryItemRecognition(id: string): Promise<void> {
               type="warning"
             >
               待完善
-            </el-tag>
-            <el-tag
-              v-if="isDurableRecognitionRunning(durableFileByItemId(item.id))"
-              size="small"
-              type="warning"
-            >
-              {{ isRetryingDurableRecognition(durableFileByItemId(item.id)) ? '重新识别中' : '识别中' }}
             </el-tag>
           </div>
           <span class="mobile-expense-amount">{{ item.amount ? `¥${item.amount}` : '金额待补充' }}</span>
@@ -2416,6 +2415,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           </el-button>
           <el-button
             v-if="canRetryDurableRecognition(durableFileByItemId(item.id))"
+            class="recognition-retry-button"
             size="small"
             :loading="isRetryingDurableRecognition(durableFileByItemId(item.id))"
             :disabled="props.readonly || Boolean(durableActionDisabledReason)"
@@ -2660,15 +2660,16 @@ async function retryItemRecognition(id: string): Promise<void> {
           v-model="editor.railType"
           aria-label="铁路票种"
           class="full-width"
-          :disabled="Boolean(sourceRailType && sourceRailType !== 'unknown')"
         >
           <el-option
             value="unknown"
             label="待确认"
+            :disabled="Boolean(sourceRailType && sourceRailType !== 'unknown')"
           />
           <el-option
             value="high_speed"
             label="高铁"
+            :disabled="Boolean(sourceRailType && !['unknown', 'high_speed'].includes(sourceRailType))"
           />
           <el-option
             value="emu"
@@ -2683,7 +2684,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           v-if="sourceRailType && sourceRailType !== 'unknown'"
           class="field-help"
         >
-          票种来自原始票据识别；如有误请核对原件后重新识别。
+          票种来自原始票据识别，可改为更严格的非高铁类型；识别为动车或普通列车时不能直接改成高铁豁免。
         </p>
       </el-form-item>
       <p
@@ -2749,7 +2750,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             v-model="editor.originalCurrency"
             placeholder="例如 VND、USD、EUR"
             maxlength="3"
-            @input="editor.cnyAmountConfirmed = false"
+            @input="editor.originalDetailsEdited = true; editor.cnyAmountConfirmed = false"
           />
         </el-form-item>
         <el-form-item
@@ -2760,7 +2761,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             v-model="editor.originalAmount"
             placeholder="例如 97600000"
             inputmode="decimal"
-            @input="editor.cnyAmountConfirmed = false"
+            @input="editor.originalDetailsEdited = true; editor.cnyAmountConfirmed = false"
           />
         </el-form-item>
       </div>
@@ -2964,6 +2965,9 @@ async function retryItemRecognition(id: string): Promise<void> {
   gap: 2px 12px;
 }
 .expense-desktop-actions :deep(.el-button) { margin-left: 0; }
+.expense-desktop-actions :deep(.recognition-retry-button) { width: 96px; }
+.receipt-actions :deep(.recognition-retry-button) { min-width: 96px; }
+.recognition-status-tag { width: 82px; justify-content: center; }
 .material-workbench__heading {
   margin-top: 18px;
   padding: 14px 14px 0;
@@ -3228,33 +3232,16 @@ async function retryItemRecognition(id: string): Promise<void> {
 .receipt-header-actions--mobile .clear-files-button { grid-area: clear; justify-self: end; width: auto; }
 .reimbursement-card--mobile :deep(.el-card__header) { padding: 16px; }
 .reimbursement-card--mobile :deep(.el-card__body) { padding: 16px; }
-.reimbursement-card--mobile .section-note { display: none; }
+.reimbursement-card--mobile .section-note {
+  display: block;
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
 .upload-guidance--mobile { margin-bottom: 14px; }
 .upload-guidance--mobile :deep(.el-alert__content) { min-width: 0; }
 .upload-guidance--mobile :deep(.el-alert__title) { font-size: 14px; }
 .upload-guidance--mobile :deep(.el-alert__description) { margin-top: 2px; line-height: 1.5; }
-.material-operation-status {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  margin-top: 16px;
-  padding: 14px 16px;
-  border: 1px solid var(--el-color-primary-light-7);
-  border-radius: 8px;
-  background: var(--el-color-primary-light-9);
-  color: var(--el-text-color-regular);
-}
-.material-operation-status__icon {
-  flex: none;
-  margin-top: 2px;
-  color: var(--el-color-primary);
-  font-size: 20px;
-}
-.material-operation-status > div { min-width: 0; }
-.material-operation-status strong,
-.material-operation-status span { display: block; overflow-wrap: anywhere; }
-.material-operation-status strong { color: var(--el-color-primary); }
-.material-operation-status span { margin-top: 4px; color: var(--el-text-color-secondary); line-height: 1.55; }
 .mobile-expense-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 .batch-progress { margin-top: 16px; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .batch-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; padding-top: 12px; }

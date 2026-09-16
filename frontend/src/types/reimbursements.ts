@@ -28,6 +28,7 @@ export interface ReimbursementDraftExpenseItemInput extends Omit<ExcelExpenseIte
   transportType?: ExpenseItem['transportType']
   originalCurrency?: string
   originalAmount?: string
+  originalDetailsEdited?: boolean
   cnyAmountConfirmed?: boolean
   requiresCnyConfirmation?: boolean
 }

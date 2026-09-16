@@ -52,6 +52,43 @@ function calendarDays(startDate: string, endDate: string): number | null {
   return days > 0 ? days : null
 }
 
+function normalizedTransportType(
+  transportType: ExpenseItem['transportType'],
+  requiresItinerary: boolean | undefined,
+): ExpenseItem['transportType'] {
+  return transportType ?? (requiresItinerary ? 'ride_hailing' : undefined)
+}
+
+function employeeEditableRecognitionSignature(item: ExpenseItem): string {
+  return JSON.stringify({
+    category: item.category,
+    date: item.date ?? '',
+    displayDate: item.displayDate,
+    description: item.description,
+    amount: item.amount,
+    transportType: item.transportType,
+    requiresItinerary: item.transportType === 'ride_hailing',
+    railType: item.railType ?? 'unknown',
+    originalCurrency: item.originalCurrency ?? '',
+    originalAmount: item.originalAmount ?? '',
+    originalDetailsEdited: item.originalDetailsEdited ?? false,
+    cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
+    requiresCnyConfirmation: item.requiresCnyConfirmation ?? false,
+  })
+}
+
+function legacyOriginalDetailsEdited(
+  persisted: ReimbursementDraftExpenseItemInput,
+  candidate: ExpenseItem | undefined,
+): boolean {
+  if (persisted.originalDetailsEdited !== undefined) return persisted.originalDetailsEdited
+  if (!candidate || (persisted.originalCurrency === undefined && persisted.originalAmount === undefined)) {
+    return false
+  }
+  return (persisted.originalCurrency ?? '') !== (candidate.originalCurrency ?? '')
+    || (persisted.originalAmount ?? '') !== (candidate.originalAmount ?? '')
+}
+
 export const useExpenseStore = defineStore('expense', () => {
   const manualProjectText = ref('')
   const trip = reactive({
@@ -292,12 +329,15 @@ export const useExpenseStore = defineStore('expense', () => {
     const id = input.id ?? newItemId()
     const existing = items.value.find((item) => item.id === id)
     const source = existing?.source === 'ocr' ? 'ocr' : 'manual'
+    const transportType = normalizedTransportType(input.transportType, input.requiresItinerary)
     const item: ExpenseItem = {
       ...input,
       receiptCount: existing?.source === 'ocr' || existing?.sourceFileId ? 1 : input.receiptCount,
       id,
       source,
       sourceFileId: existing?.sourceFileId,
+      transportType,
+      requiresItinerary: transportType === 'ride_hailing',
       itineraryAutoMatchDisabled: input.itineraryAutoMatchDisabled ?? existing?.itineraryAutoMatchDisabled ?? false,
       amount: centsToMoney(amountCents),
       displayDate: input.displayDate.trim(),
@@ -350,11 +390,12 @@ export const useExpenseStore = defineStore('expense', () => {
     // specific description. Keep it visible and do not require a redundant edit.
     if (!candidate.description?.trim()) warnings.delete('MISSING_DESCRIPTION')
     if (warnings.size || candidate.status === 'failed') warnings.add('MANUAL_REVIEW_REQUIRED')
+    const transportType = normalizedTransportType(candidate.transportType, candidate.requiresItinerary)
     return {
       id: `ocr-${file.id}`,
       sourceFileId: file.id,
-      transportType: candidate.transportType,
-      requiresItinerary: candidate.requiresItinerary || candidate.transportType === 'ride_hailing',
+      transportType,
+      requiresItinerary: transportType === 'ride_hailing',
       itineraryFileIds: [],
       itineraryAutoMatchDisabled: false,
       paymentProofFileIds: [],
@@ -362,6 +403,7 @@ export const useExpenseStore = defineStore('expense', () => {
       railType: evidenceRailType(categoryId, undefined, candidate),
       originalCurrency: candidate.originalCurrency ?? undefined,
       originalAmount: candidate.originalAmount ?? undefined,
+      originalDetailsEdited: false,
       cnyAmountConfirmed: false,
       requiresCnyConfirmation: foreign,
       category: categoryId,
@@ -395,6 +437,17 @@ export const useExpenseStore = defineStore('expense', () => {
     totals.value = null
     calculatedSignature.value = ''
     return true
+  }
+
+  function hasEmployeeEditsForOcrFile(file: ReimbursementDraftFile): boolean {
+    const recognized = draftOcrExpenseItem(file)
+    const existing = items.value.find((item) => item.sourceFileId === file.id)
+    if (!existing) return false
+    // Without an earlier usable candidate there is no safe baseline for
+    // deciding that an existing row is still machine-generated.
+    if (!recognized) return true
+    return employeeEditableRecognitionSignature(existing)
+      !== employeeEditableRecognitionSignature(recognized)
   }
 
   function hydrateFromDraft(
@@ -451,10 +504,15 @@ export const useExpenseStore = defineStore('expense', () => {
       const persistedDescription = typeof persisted.description === 'string'
         ? persisted.description.trim()
         : ''
+      const transportType = normalizedTransportType(
+        persisted.transportType ?? candidate?.transportType,
+        persisted.requiresItinerary ?? candidate?.requiresItinerary,
+      )
+      const originalDetailsEdited = legacyOriginalDetailsEdited(persisted, candidate)
       return {
         id: sourceFileId ? `ocr-${sourceFileId}` : `draft-${draft.id}-item-${index}`,
         ...(sourceFileId ? { sourceFileId } : {}),
-        transportType: persisted.transportType ?? candidate?.transportType,
+        transportType,
         itineraryFileIds: [...(persisted.itineraryFileIds ?? [])],
         itineraryAutoMatchDisabled: persisted.itineraryAutoMatchDisabled ?? false,
         paymentProofFileIds: [...(persisted.paymentProofFileIds ?? [])],
@@ -462,9 +520,14 @@ export const useExpenseStore = defineStore('expense', () => {
         railType: evidenceRailType(persisted.category, persisted.railType, receiptOcrResult(
           draftFiles.find((file) => file.id === sourceFileId),
         )),
-        requiresItinerary: persisted.requiresItinerary ?? candidate?.requiresItinerary ?? false,
-        originalCurrency: persisted.originalCurrency ?? candidate?.originalCurrency,
-        originalAmount: persisted.originalAmount ?? candidate?.originalAmount,
+        requiresItinerary: transportType === 'ride_hailing',
+        originalCurrency: originalDetailsEdited
+          ? persisted.originalCurrency
+          : persisted.originalCurrency ?? candidate?.originalCurrency,
+        originalAmount: originalDetailsEdited
+          ? persisted.originalAmount
+          : persisted.originalAmount ?? candidate?.originalAmount,
+        originalDetailsEdited,
         cnyAmountConfirmed: persisted.cnyAmountConfirmed ?? false,
         requiresCnyConfirmation: persisted.requiresCnyConfirmation ?? candidate?.requiresCnyConfirmation ?? false,
         category: typeof persisted.category === 'string' ? persisted.category : '',
@@ -624,9 +687,10 @@ export const useExpenseStore = defineStore('expense', () => {
       paymentProofFileIds: [...(item.paymentProofFileIds ?? [])],
       hotelBillFileIds: [...(item.hotelBillFileIds ?? [])],
       railType: item.railType ?? 'unknown',
-      requiresItinerary: item.requiresItinerary ?? false,
+      requiresItinerary: item.transportType === 'ride_hailing',
       originalCurrency: item.originalCurrency,
       originalAmount: item.originalAmount,
+      originalDetailsEdited: item.originalDetailsEdited ?? false,
       cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
       requiresCnyConfirmation: item.requiresCnyConfirmation ?? false,
       category: item.category,
@@ -735,6 +799,7 @@ export const useExpenseStore = defineStore('expense', () => {
     loadCategories,
     upsertManualItem,
     upsertDraftOcrItem,
+    hasEmployeeEditsForOcrFile,
     hydrateFromDraft,
     removeItem,
     removeDraftFileAssociation,
