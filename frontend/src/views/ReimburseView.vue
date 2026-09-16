@@ -11,7 +11,7 @@ import { useExpenseStore } from '@/stores/expense'
 import { useHealthStore } from '@/stores/health'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { useReimbursementSubmissionStore } from '@/stores/reimbursementSubmission'
-import { isForeignExpense, type TripType } from '@/types/expenses'
+import { isForeignExpense, type TripInput, type TripType } from '@/types/expenses'
 import type {
   ReimbursementDraft,
   ReimbursementDraftInput,
@@ -222,6 +222,7 @@ const relatedApprovalVerificationPending = computed(() => Boolean(
 const saveLabel = computed(() => trackedSubmission.value && submission.succeeded ? 'OA 已成功发起'
   : trackedSubmission.value && submission.status === 'QUEUED' ? '已排队，内容已锁定'
   : trackedSubmission.value || drafts.currentDraft?.status === 'LOCKED' ? '内容已锁定'
+  : formReadOnlyReason.value ? formReadOnlyReason.value
   : saveError.value ? '保存失败，内容仍保留在本页'
   : saving.value ? '正在保存…' : formDirty.value ? '等待保存…' : '已保存')
 const mobileShellStyle = computed(() => props.mobile && mobileFooterHeight.value > 0
@@ -276,16 +277,56 @@ function sessionScope(): string {
   const department = auth.session?.selectedDepartment?.id
   return auth.status === 'authenticated' && user && department ? `${user}:${department}` : ''
 }
+function tripSignature(trip: TripInput | null | undefined): object | null {
+  if (!trip) return null
+  return {
+    relatedApprovalId: trip.relatedApprovalId,
+    tripType: trip.tripType,
+    startDate: trip.startDate,
+    startTime: trip.startTime,
+    endDate: trip.endDate,
+    endTime: trip.endTime,
+    policyConfirmed: trip.policyConfirmed ?? false,
+    confirmedEffectiveDays: trip.confirmedEffectiveDays ?? '',
+    noSubsidyException: trip.noSubsidyException ?? false,
+  }
+}
 function inputSignature(input: ReimbursementDraftInput): string {
   // Project is server-derived from budget, never a second employee input.
   return JSON.stringify({
     ocrDispositionVersion: input.ocrDispositionVersion,
     companyValue: input.companyValue,
     budgetCodeValue: input.budgetCodeValue,
-    trip: input.trip,
-    trips: input.trips,
-    editingState: input.editingState,
-    items: input.items,
+    trip: tripSignature(input.trip),
+    trips: (input.trips ?? []).map(tripSignature),
+    editingState: input.editingState
+      ? {
+          includeSubsidy: input.editingState.includeSubsidy,
+          trip: tripSignature(input.editingState.trip),
+          trips: (input.editingState.trips ?? []).map(tripSignature),
+        }
+      : undefined,
+    items: input.items.map((item) => ({
+      sourceFileId: item.sourceFileId,
+      transportType: item.transportType,
+      itineraryFileIds: item.itineraryFileIds ?? [],
+      itineraryAutoMatchDisabled: item.itineraryAutoMatchDisabled ?? false,
+      paymentProofFileIds: item.paymentProofFileIds ?? [],
+      hotelBillFileIds: item.hotelBillFileIds ?? [],
+      railType: item.railType ?? 'unknown',
+      requiresItinerary: item.requiresItinerary ?? false,
+      originalCurrency: item.originalCurrency,
+      originalAmount: item.originalAmount,
+      originalDetailsEdited: item.originalDetailsEdited ?? false,
+      cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
+      requiresCnyConfirmation: item.requiresCnyConfirmation ?? false,
+      category: item.category,
+      date: item.date,
+      displayDate: item.displayDate,
+      description: item.description,
+      amount: item.amount,
+      receiptCount: item.receiptCount,
+    })),
     dismissedOcrFileIds: input.dismissedOcrFileIds,
   })
 }
@@ -752,6 +793,13 @@ async function advanceMobileStep(): Promise<void> {
   }
   await confirmAndSubmit()
 }
+async function handleMobilePrimaryAction(): Promise<void> {
+  if (mobileStep.value === mobileSteps.length - 1 && canReplaceOutdatedForm.value) {
+    await replaceOutdatedForm()
+    return
+  }
+  await advanceMobileStep()
+}
 async function focusMobileMaterial(itemId?: string, fileId?: string): Promise<void> {
   if (props.mobile) {
     mobileStep.value = 2
@@ -1071,8 +1119,59 @@ onBeforeUnmount(() => {
                     <p>以所选出差审批为准，无需重复填写。</p>
                   </div>
                 </div>
+                <dl
+                  v-if="props.mobile"
+                  class="derived-accounting-list"
+                  data-testid="derived-accounting-mobile-list"
+                >
+                  <div class="derived-accounting-list__row">
+                    <dt>所属公司</dt>
+                    <dd>{{ displayedCompanyLabel || '选择出差审批后自动填入' }}</dd>
+                  </div>
+                  <div class="derived-accounting-list__row">
+                    <dt>预算代码 / 项目</dt>
+                    <dd>{{ displayedBudgetLabel || '选择出差审批后自动填入' }}</dd>
+                  </div>
+                  <div class="derived-accounting-list__row">
+                    <dt>出差类别</dt>
+                    <dd>{{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}</dd>
+                  </div>
+                  <div class="derived-accounting-list__row">
+                    <dt>出差日期</dt>
+                    <dd>
+                      <div
+                        v-if="selectedTravelPeriods.length"
+                        class="travel-periods travel-periods--mobile"
+                        data-testid="travel-periods"
+                      >
+                        <span
+                          v-if="selectedTravelPeriods.length > 1"
+                          class="travel-periods__count"
+                        >共 {{ selectedTravelPeriods.length }} 个时间段</span>
+                        <span
+                          v-for="period in selectedTravelPeriods"
+                          :key="`${period.startDate}-${period.endDate}`"
+                          class="travel-periods__item"
+                          :aria-label="period.startDate === period.endDate
+                            ? period.startDate
+                            : `${period.startDate} 至 ${period.endDate}`"
+                        >
+                          <time :datetime="period.startDate">{{ period.startDate }}</time>
+                          <template v-if="period.startDate !== period.endDate">
+                            <span aria-hidden="true">至</span>
+                            <time :datetime="period.endDate">{{ period.endDate }}</time>
+                          </template>
+                        </span>
+                      </div>
+                      <template v-else>
+                        选择出差审批后自动填入
+                      </template>
+                    </dd>
+                  </div>
+                </dl>
                 <el-descriptions
-                  :column="props.mobile ? 1 : 2"
+                  v-else
+                  :column="2"
                   border
                   class="derived-accounting-grid"
                 >
@@ -1099,6 +1198,9 @@ onBeforeUnmount(() => {
                         v-for="period in selectedTravelPeriods"
                         :key="`${period.startDate}-${period.endDate}`"
                         class="travel-periods__item"
+                        :aria-label="period.startDate === period.endDate
+                          ? period.startDate
+                          : `${period.startDate} 至 ${period.endDate}`"
                       >
                         <time :datetime="period.startDate">{{ period.startDate }}</time>
                         <template v-if="period.startDate !== period.endDate">
@@ -1245,6 +1347,25 @@ onBeforeUnmount(() => {
                 </div>
                 <p>补齐后可提交 OA；你仍可继续编辑和预览报销单。</p>
               </div>
+              <section
+                v-if="canReplaceOutdatedForm"
+                class="template-recovery-panel"
+                data-testid="template-recovery-panel"
+                role="alert"
+              >
+                <div>
+                  <strong>OA 表单已更新</strong>
+                  <p>当前记录不能继续保存或提交。请按新表单重新填写；原记录和已上传材料仍会保留。</p>
+                </div>
+                <el-button
+                  type="primary"
+                  :loading="replacingTemplate"
+                  :disabled="drafts.busy"
+                  @click="replaceOutdatedForm"
+                >
+                  按新表单重新填写
+                </el-button>
+              </section>
               <div class="submission-actions">
                 <div
                   role="status"
@@ -1381,12 +1502,18 @@ onBeforeUnmount(() => {
                 </el-button>
                 <el-button
                   type="primary"
-                  :loading="mobileStep === 3 && (submitFlowPending || submission.submitting)"
-                  :disabled="mobileStep === 3 && Boolean(submissionButtonReason)"
+                  :loading="mobileStep === 3 && (canReplaceOutdatedForm
+                    ? replacingTemplate
+                    : submitFlowPending || submission.submitting)"
+                  :disabled="mobileStep === 3 && (canReplaceOutdatedForm
+                    ? drafts.busy
+                    : Boolean(submissionButtonReason))"
                   :title="mobileStep === 3 ? submissionButtonReason : ''"
-                  @click="advanceMobileStep"
+                  @click="handleMobilePrimaryAction"
                 >
-                  {{ mobileNextLabel }}
+                  {{ mobileStep === 3 && canReplaceOutdatedForm
+                    ? '按新表单重新填写'
+                    : mobileNextLabel }}
                 </el-button>
               </div>
             </footer>
@@ -1481,6 +1608,29 @@ onBeforeUnmount(() => {
 .derived-accounting-grid { margin-bottom: 12px; }
 .derived-accounting-grid :deep(.el-descriptions__table) { table-layout: fixed; }
 .derived-accounting-grid :deep(.el-descriptions__content) { overflow-wrap: anywhere; }
+.derived-accounting-list {
+  overflow: hidden;
+  margin: 0 0 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  background: var(--el-fill-color-blank);
+}
+.derived-accounting-list__row { padding: 11px 12px; border-bottom: 1px solid var(--el-border-color-lighter); }
+.derived-accounting-list__row:last-child { border-bottom: 0; }
+.derived-accounting-list dt {
+  margin: 0 0 5px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.derived-accounting-list dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--el-text-color-primary);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
 .related-approval-verification-error { margin-bottom: 12px; }
 .travel-periods { display: grid; justify-items: start; gap: 5px; }
 .travel-periods__count { color: var(--el-text-color-secondary); font-size: 12px; }
@@ -1500,7 +1650,29 @@ onBeforeUnmount(() => {
   background: var(--el-color-primary-light-3);
   content: '';
 }
+.travel-periods--mobile { width: 100%; gap: 7px; }
+.travel-periods--mobile .travel-periods__item {
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 13px;
+  white-space: normal;
+}
+.travel-periods--mobile .travel-periods__item time { white-space: nowrap; }
 .submission-actions, .submission-status-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.template-recovery-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+  padding: 16px;
+  border: 1px solid var(--el-color-warning-light-5);
+  border-radius: 10px;
+  background: var(--el-color-warning-light-9);
+}
+.template-recovery-panel strong { color: var(--el-text-color-primary); }
+.template-recovery-panel p { margin: 6px 0 0; color: var(--el-text-color-regular); font-size: 13px; line-height: 1.6; }
+.template-recovery-panel .el-button { flex: none; }
 .primary-submit-area { text-align: right; }
 .primary-submit-area p { color: var(--el-text-color-secondary); font-size: 13px; }
 .submission-status { margin-top: 20px; }
@@ -1575,6 +1747,8 @@ onBeforeUnmount(() => {
 .page-shell--mobile :deep(.el-card__header) { padding: 14px; }
 .page-shell--mobile :deep(.el-card__body) { padding: 14px; }
 .page-shell--mobile :deep(.totals-grid) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.page-shell--mobile .template-recovery-panel { align-items: stretch; flex-direction: column; }
+.page-shell--mobile .template-recovery-panel .el-button { width: 100%; margin: 0; }
 .page-shell--mobile .primary-submit-area .el-button { display: none; }
 .mobile-step-footer-dock {
   position: fixed;

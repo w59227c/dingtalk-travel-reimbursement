@@ -117,7 +117,9 @@ def test_dynamic_config_roundtrip_and_api_contract():
         reimbursement_mapping=source.catalog.reimbursement.mappings,
         allow_empty=False,
     )
-    assert restored == [profile]
+    assert restored == [
+        replace(profile, confirmed_schema_fingerprint=profile.schema.fingerprint)
+    ]
     parsed = TravelCatalogConfirmation.model_validate(
         {
             "profileKey": profile.profile_key,

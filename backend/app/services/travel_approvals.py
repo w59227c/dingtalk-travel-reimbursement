@@ -668,9 +668,18 @@ def travel_accounting_options(
                 {options[0].label} if label == "预算代码" else {options[0].value, options[0].label}
             )
         if label == "预算代码":
-            # Compare the entire label; never infer a budget from its numeric prefix.
+            # Compare an entire stable value or label; never infer a budget from
+            # its numeric prefix.
             tokens = {"".join(token.split()) for token in tokens}
-            matches = [option for option in targets if "".join(option.label.split()) in tokens]
+            matches = [
+                option
+                for option in targets
+                if tokens
+                & {
+                    "".join(option.value.split()),
+                    "".join(option.label.split()),
+                }
+            ]
         else:
             matches = [option for option in targets if tokens & {option.value, option.label}]
         if len(matches) != 1:

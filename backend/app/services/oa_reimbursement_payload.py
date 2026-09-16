@@ -61,9 +61,11 @@ from app.services.excel_generator import (
     build_download_filename,
     sanitize_filename_component,
 )
+from app.services.oa_template_compatibility import schema_contract_fingerprint
 from app.services.oa_template_profiles import (
     REIMBURSEMENT_LOGICAL_FIELD_SPECS,
     OaTemplateCatalogContract,
+    TravelTemplateContract,
     require_submission_ready_catalog,
 )
 from app.services.reimbursement_drafts import (
@@ -145,6 +147,10 @@ class SnapshotTravelProfile(_SnapshotModel):
     display_name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     process_code: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     schema_fingerprint: Sha256Text
+    schema_contract_fingerprint: Sha256Text | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     start_date_component_id: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     end_date_component_id: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     travel_type_option: SnapshotOption
@@ -481,7 +487,6 @@ def collect_snapshot_source(
     if (
         draft.template_process_code != catalog.reimbursement.process_code
         or draft.template_config_version != catalog.config_version
-        or draft.schema_fingerprint != catalog.reimbursement.schema.fingerprint
     ):
         raise _snapshot_error("审批模板已更新，请刷新后重新确认")
     try:
@@ -497,7 +502,13 @@ def collect_snapshot_source(
         draft_input=draft_input,
         max_items=max_items,
     )
-    if calculation.canonical_json != draft.input_json:
+    if (
+        calculation.canonical_json != draft.input_json
+        and not _only_derived_project_changed(
+            draft.input_json,
+            calculation.canonical_json,
+        )
+    ):
         raise _snapshot_error("报销内容已变化，请重新确认后再提交")
 
     related_rows = database.scalars(
@@ -599,6 +610,21 @@ def collect_snapshot_source(
     )
 
 
+def _only_derived_project_changed(stored_json: str, calculated_json: str) -> bool:
+    try:
+        stored = json.loads(stored_json)
+        calculated = json.loads(calculated_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(stored, dict) or not isinstance(calculated, dict):
+        return False
+    stored_without_project = dict(stored)
+    calculated_without_project = dict(calculated)
+    stored_without_project.pop("project", None)
+    calculated_without_project.pop("project", None)
+    return stored_without_project == calculated_without_project
+
+
 def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
     """Build the versioned immutable payload persisted with a submission."""
 
@@ -692,7 +718,10 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
 
 def serialize_snapshot(snapshot: ReimbursementSnapshot) -> str:
     snapshot = _require_snapshot(snapshot)
-    return _canonical_json(snapshot.model_dump(mode="json", by_alias=True))
+    canonical = _canonical_json(snapshot.model_dump(mode="json", by_alias=True))
+    if len(canonical.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
+        raise _snapshot_error("报销内容过多，无法生成提交快照，请减少本次报销材料后重试")
+    return canonical
 
 
 def snapshot_sha256(snapshot: ReimbursementSnapshot) -> str:
@@ -741,7 +770,6 @@ def parse_locked_submission_snapshot(
         or snapshot.identity.department_name != draft.department_name
         or snapshot.template.process_code != draft.template_process_code
         or snapshot.template.config_version != draft.template_config_version
-        or snapshot.template.schema_fingerprint != draft.schema_fingerprint
     ):
         raise _snapshot_error("报销提交快照与锁定记录不一致，请联系管理员")
     return snapshot
@@ -981,7 +1009,6 @@ def _validate_related_sources(
             profile is None
             or item.process_code != profile.process_code
             or item.catalog_config_version != catalog.config_version
-            or item.schema_fingerprint != profile.schema.fingerprint
             or item.end_date < item.start_date
             or item.listed_to_ms < item.listed_from_ms
         ):
@@ -1046,8 +1073,6 @@ def _validate_related_sources(
 
 
 def _snapshot_template(catalog: OaTemplateCatalogContract) -> SnapshotTemplate:
-    from app.services.travel_approvals import travel_source_component_id
-
     reimbursement = catalog.reimbursement
     components = {item.component_id: item for item in reimbursement.schema.components}
     fields: list[SnapshotTemplateField] = []
@@ -1073,28 +1098,50 @@ def _snapshot_template(catalog: OaTemplateCatalogContract) -> SnapshotTemplate:
         schema_fingerprint=reimbursement.schema.fingerprint,
         schema_canonical_json=schema_json,
         fields=tuple(fields),
-        travel_profiles=tuple(
-            SnapshotTravelProfile(
-                profile_key=item.profile_key,
-                display_name=item.display_name,
-                process_code=item.process_code,
-                schema_fingerprint=item.schema.fingerprint,
-                start_date_component_id=item.start_date_component_id,
-                end_date_component_id=item.end_date_component_id,
-                travel_type_option=_snapshot_option(item.travel_type_option),
-                company_component_id=travel_source_component_id(item, "company"),
-                budget_code_component_id=travel_source_component_id(item, "budgetCode"),
-                travel_type_component_id=item.travel_type_component_id,
-                travel_type_mappings=(
-                    {
-                        key: _snapshot_option(option)
-                        for key, option in item.travel_type_mappings.items()
-                    }
-                    if item.travel_type_mappings is not None
-                    else None
-                ),
+        travel_profiles=tuple(_snapshot_travel_profile(item) for item in catalog.travel_profiles),
+    )
+
+
+def _snapshot_travel_profile(item: TravelTemplateContract) -> SnapshotTravelProfile:
+    from app.services.travel_approvals import travel_source_component_id
+
+    company_component_id = travel_source_component_id(item, "company")
+    budget_code_component_id = travel_source_component_id(item, "budgetCode")
+    mapped_component_ids = {
+        item.start_date_component_id,
+        item.end_date_component_id,
+        *(
+            component_id
+            for component_id in (
+                company_component_id,
+                budget_code_component_id,
+                item.travel_type_component_id,
             )
-            for item in catalog.travel_profiles
+            if component_id is not None
+        ),
+    }
+    return SnapshotTravelProfile(
+        profile_key=item.profile_key,
+        display_name=item.display_name,
+        process_code=item.process_code,
+        schema_fingerprint=item.schema.fingerprint,
+        schema_contract_fingerprint=schema_contract_fingerprint(
+            item.schema,
+            mapped_component_ids=mapped_component_ids,
+        ),
+        start_date_component_id=item.start_date_component_id,
+        end_date_component_id=item.end_date_component_id,
+        travel_type_option=_snapshot_option(item.travel_type_option),
+        company_component_id=company_component_id,
+        budget_code_component_id=budget_code_component_id,
+        travel_type_component_id=item.travel_type_component_id,
+        travel_type_mappings=(
+            {
+                key: _snapshot_option(option)
+                for key, option in item.travel_type_mappings.items()
+            }
+            if item.travel_type_mappings is not None
+            else None
         ),
     )
 
@@ -1562,7 +1609,6 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         if (
             profile is None
             or profile.process_code != related.process_code
-            or profile.schema_fingerprint != related.schema_fingerprint
             or related.catalog_config_version != snapshot.template.config_version
             or related.end_date < related.start_date
             or related.listed_to_ms < related.listed_from_ms

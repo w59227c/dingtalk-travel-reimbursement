@@ -892,6 +892,22 @@ def test_catalog_drift_blocks_mutation_without_hiding_or_changing_existing_draft
     assert readable.json()["data"]["template"]["configVersion"] == 12
 
 
+def test_removed_current_budget_option_is_rejected_without_invalidating_catalog() -> None:
+    catalog = _catalog()
+    catalog.reimbursement.schema.components = tuple(
+        SimpleNamespace(component_id=item.component_id, options=())
+        if item.component_id == "budget-id"
+        else item
+        for item in catalog.reimbursement.schema.components
+    )
+
+    with pytest.raises(ApiError) as caught:
+        reimbursement_drafts._require_exact_option(catalog, "budgetCode", "26007")
+
+    assert caught.value.code == "REIMBURSEMENT_BUDGET_OPTION_INVALID"
+    assert caught.value.status_code == 422
+
+
 def test_draft_can_be_read_after_application_restart(client_factory, monkeypatch) -> None:
     _install_catalog(monkeypatch)
     first = client_factory(auth_mock_enabled=True, auth_mock_user_id="restart-user")
@@ -1651,7 +1667,7 @@ def test_review_rejects_running_file_work_and_catalog_relation_drift_atomically(
         assert file is not None
         file.ocr_status = ReimbursementOcrStatus.COMPLETE.value
         file.ocr_result_json = "{}"
-        relation.travel_schema_fingerprint = "e" * 64
+        relation.catalog_config_version += 1
         database.commit()
 
     drifted = client.post(

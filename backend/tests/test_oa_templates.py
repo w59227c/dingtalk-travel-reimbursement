@@ -746,7 +746,7 @@ def test_inspection_never_returns_a_new_catalog_version_with_stale_mappings(
     assert confirm(client, headers, fingerprint).status_code == 200
     monkeypatch.setattr(
         oa_template_profiles,
-        "_record_catalog_status",
+        "_replace_compatible_catalog",
         lambda *_args, **_kwargs: False,
     )
 
@@ -1535,7 +1535,7 @@ def test_fresh_submission_contract_allows_only_configured_travel_templates(
     assert rejected.value.code == "TRAVEL_APPROVAL_TEMPLATE_NOT_ALLOWED"
 
 
-def test_fresh_submission_contract_persists_remote_schema_drift(client_factory) -> None:
+def test_fresh_submission_contract_auto_syncs_modified_timestamp(client_factory) -> None:
     original = schema_payload()
     changed = schema_payload(modified_at="2026-09-04T09:30:00+08:00")
     transport, _calls = transport_for_schema(
@@ -1556,15 +1556,15 @@ def test_fresh_submission_contract_persists_remote_schema_drift(client_factory) 
             client.app.state.dingtalk_workflow,
         )
 
-    with pytest.raises(ApiError) as drifted:
-        asyncio.run(load_contract())
+    contract = asyncio.run(load_contract())
 
-    assert drifted.value.code == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
+    assert contract.config_version == 1
+    assert contract.reimbursement.schema.modified_at == "2026-09-04T09:30:00+08:00"
     with client.app.state.database_session_factory() as database:
         profile = database.get(OaTemplateProfile, "reimbursement")
         assert profile is not None
-        assert profile.compatibility_status == "DRIFTED"
-        assert profile.schema_fingerprint == profile.confirmed_schema_fingerprint
+        assert profile.compatibility_status == "COMPATIBLE"
+        assert profile.schema_fingerprint != profile.confirmed_schema_fingerprint
 
 
 def test_fresh_submission_contract_retries_after_concurrent_admin_reconfirmation(
@@ -1767,7 +1767,7 @@ def test_stale_existing_confirmation_cannot_overwrite_newer_admin_mapping(
     assert current["reimbursement"]["mappings"] == version_two_mapping
 
 
-def test_schema_drift_is_durable_and_blocks_readiness_until_reconfirmed(client_factory) -> None:
+def test_option_catalog_drift_auto_syncs_without_new_config_version(client_factory) -> None:
     original = schema_payload()
     changed = schema_payload(
         modified_at="2026-09-04T09:30:00+08:00",
@@ -1783,39 +1783,121 @@ def test_schema_drift_is_durable_and_blocks_readiness_until_reconfirmed(client_f
         "schemaFingerprint"
     ]
     assert confirm(client, headers, original_fingerprint).status_code == 200
+    # A deployment can inherit the old implementation's blanket drift marker.
+    # The first live compatibility check must recover it without another admin save.
+    with client.app.state.database_session_factory() as database:
+        profile = database.get(OaTemplateProfile, "reimbursement")
+        assert profile is not None
+        profile.compatibility_status = "DRIFTED"
+        database.commit()
 
+    options = client.get("/api/oa/reimbursements/options")
     drift = inspect(client, headers)
     current = client.get("/api/admin/oa/templates/catalog")
 
+    assert options.status_code == 200
+    assert options.json()["data"]["companyOptions"] == [
+        {"value": "苏州", "label": "苏州", "key": "option_2"}
+    ]
     assert drift.status_code == 200
     drift_data = drift.json()["data"]
-    assert drift_data["compatibilityStatus"] == "DRIFTED"
-    assert drift_data["requiresConfirmation"] is True
-    assert drift_data["isSubmissionReady"] is False
+    assert drift_data["compatibilityStatus"] == "COMPATIBLE"
+    assert drift_data["requiresConfirmation"] is False
+    assert drift_data["isSubmissionReady"] is True
     changed_fingerprint = drift_data["reimbursement"]["schema"]["schemaFingerprint"]
     assert changed_fingerprint != original_fingerprint
-    assert current.json()["data"]["compatibilityStatus"] == "DRIFTED"
-    assert current.json()["data"]["isSubmissionReady"] is False
+    assert current.json()["data"]["compatibilityStatus"] == "COMPATIBLE"
+    assert current.json()["data"]["isSubmissionReady"] is True
     assert current.json()["data"]["catalog"]["confirmedSchemaFingerprint"] == (original_fingerprint)
     assert current.json()["data"]["catalog"]["configVersion"] == 1
 
-    stale_confirmation = confirm(client, headers, original_fingerprint)
-    assert stale_confirmation.status_code == 409
-    assert stale_confirmation.json()["error"]["code"] == "OA_TEMPLATE_SCHEMA_CHANGED"
+    assert changed_fingerprint != original_fingerprint
+    assert current.json()["data"]["catalog"]["schemaFingerprint"] == changed_fingerprint
 
-    reconfirmed = confirm(
-        client,
-        headers,
-        changed_fingerprint,
-        expected_config_version=1,
+
+def test_stale_compatible_refresh_cannot_clear_a_newer_drift_marker(client_factory) -> None:
+    transport, _calls = transport_for_schema(
+        lambda _number, _request: httpx.Response(200, json=schema_payload())
     )
-    assert reconfirmed.status_code == 200
-    assert reconfirmed.json()["data"]["compatibilityStatus"] == "COMPATIBLE"
-    assert reconfirmed.json()["data"]["isSubmissionReady"] is True
-    assert reconfirmed.json()["data"]["configVersion"] == 2
+    client, headers = admin_client(client_factory, transport)
+    fingerprint = inspect(client, headers).json()["data"]["reimbursement"]["schema"][
+        "schemaFingerprint"
+    ]
+    assert confirm(client, headers, fingerprint).status_code == 200
+    with client.app.state.database_session_factory() as database:
+        profile = database.get(OaTemplateProfile, "reimbursement")
+        assert profile is not None
+        expected_state = oa_template_profiles._catalog_cas_state(profile)
+        stale_refresh = oa_template_profiles._validated_persisted_catalog(profile)
+        profile.compatibility_status = "DRIFTED"
+        database.commit()
+
+    with client.app.state.database_session_factory() as database:
+        assert (
+            oa_template_profiles._replace_compatible_catalog(
+                database,
+                expected_state=expected_state,
+                refreshed=stale_refresh,
+            )
+            is False
+        )
+        current = database.get(OaTemplateProfile, "reimbursement")
+        assert current is not None
+        assert current.compatibility_status == "DRIFTED"
 
 
-def test_travel_schema_drift_marks_the_whole_catalog_not_ready(client_factory) -> None:
+def test_mapped_field_structure_drift_still_requires_admin_confirmation(
+    client_factory,
+) -> None:
+    original = schema_payload()
+    changed = schema_payload(modified_at="2026-09-04T09:30:00+08:00")
+    changed["result"]["schemaContent"]["items"][0]["props"]["hidden"] = True
+
+    def response_factory(number: int, _request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=original if number <= 2 else changed)
+
+    transport, _calls = transport_for_schema(response_factory)
+    client, headers = admin_client(client_factory, transport)
+    fingerprint = inspect(client, headers).json()["data"]["reimbursement"]["schema"][
+        "schemaFingerprint"
+    ]
+    assert confirm(client, headers, fingerprint).status_code == 200
+
+    blocked = client.get("/api/oa/reimbursements/options")
+    current = client.get("/api/admin/oa/templates/catalog").json()["data"]
+
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
+    assert current["compatibilityStatus"] == "DRIFTED"
+    assert current["isSubmissionReady"] is False
+    assert current["configVersion"] == 1
+
+
+def test_mapped_field_label_drift_requires_admin_confirmation(client_factory) -> None:
+    original = schema_payload()
+    changed = schema_payload(modified_at="2026-09-04T09:30:00+08:00")
+    changed["result"]["schemaContent"]["items"][0]["props"]["label"] = "当前所属公司"
+
+    def response_factory(number: int, _request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=original if number <= 2 else changed)
+
+    transport, _calls = transport_for_schema(response_factory)
+    client, headers = admin_client(client_factory, transport)
+    fingerprint = inspect(client, headers).json()["data"]["reimbursement"]["schema"][
+        "schemaFingerprint"
+    ]
+    assert confirm(client, headers, fingerprint).status_code == 200
+
+    blocked = client.get("/api/oa/reimbursements/options")
+    current = client.get("/api/admin/oa/templates/catalog").json()["data"]
+
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
+    assert current["compatibilityStatus"] == "DRIFTED"
+    assert current["isSubmissionReady"] is False
+
+
+def test_travel_modified_timestamp_auto_syncs_without_blocking_catalog(client_factory) -> None:
     travel_calls: dict[str, int] = {}
 
     def travel_response(process_code: str, _request: httpx.Request) -> httpx.Response:
@@ -1851,22 +1933,20 @@ def test_travel_schema_drift_marks_the_whole_catalog_not_ready(client_factory) -
             client.app.state.dingtalk_workflow,
         )
 
-    with pytest.raises(ApiError) as caught:
-        asyncio.run(load_contract())
+    contract = asyncio.run(load_contract())
 
     drift = inspect(client, headers)
     current = client.get("/api/admin/oa/templates/catalog")
     blocked = client.get("/api/oa/reimbursements/options")
 
     assert drift.status_code == 200
-    assert caught.value.code == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
-    assert drift.json()["data"]["compatibilityStatus"] == "DRIFTED"
-    assert drift.json()["data"]["isSubmissionReady"] is False
-    assert current.json()["data"]["compatibilityStatus"] == "DRIFTED"
-    assert current.json()["data"]["isSubmissionReady"] is False
+    assert contract.config_version == 1
+    assert drift.json()["data"]["compatibilityStatus"] == "COMPATIBLE"
+    assert drift.json()["data"]["isSubmissionReady"] is True
+    assert current.json()["data"]["compatibilityStatus"] == "COMPATIBLE"
+    assert current.json()["data"]["isSubmissionReady"] is True
     assert current.json()["data"]["catalog"]["configVersion"] == 1
-    assert blocked.status_code == 409
-    assert blocked.json()["error"]["code"] == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
+    assert blocked.status_code == 200
 
 
 def test_fingerprint_is_stable_across_json_key_and_component_order(client_factory) -> None:

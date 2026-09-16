@@ -377,6 +377,7 @@ def _persist_submission_for_mock_user(client) -> tuple[str, str]:
             originator_name="测试员工",
             idempotency_key="submission-recovery-test",
             snapshot_version=6,
+            schema_fingerprint="a" * 64,
             form_snapshot_json="{}",
             snapshot_sha256=hashlib.sha256(b"{}").hexdigest(),
         )

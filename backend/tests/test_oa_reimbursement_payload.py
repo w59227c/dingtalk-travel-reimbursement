@@ -306,6 +306,9 @@ def test_snapshot_is_versioned_canonical_immutable_and_hash_verified() -> None:
     assert parse_snapshot(serialized, expected_sha256=snapshot_sha256(first)) == first
     assert len(first.template.fields) == 10
     assert first.template.schema_fingerprint in first.template.schema_canonical_json
+    travel_profile = json.loads(serialized)["template"]["travelProfiles"][0]
+    assert "schemaContractFingerprint" in travel_profile
+    assert "schemaCanonicalJson" not in travel_profile
     assert [item.draft_file_id for item in first.original_files] == [
         "source-file-0",
         "source-file-1",
@@ -316,6 +319,15 @@ def test_snapshot_is_versioned_canonical_immutable_and_hash_verified() -> None:
     assert json.loads(serialized)["input"]["dismissedOcrFileIds"] == []
     with pytest.raises(ValidationError):
         first.identity.name = "篡改"
+
+
+def test_snapshot_serializer_rejects_an_oversized_aggregate(monkeypatch) -> None:
+    snapshot = build_snapshot(_source())
+    serialized = serialize_snapshot(snapshot)
+    monkeypatch.setattr(payloads, "_MAX_SNAPSHOT_BYTES", len(serialized.encode("utf-8")) - 1)
+
+    with pytest.raises(ApiError, match="内容过多"):
+        serialize_snapshot(snapshot)
 
 
 def test_snapshot_parser_rejects_noncanonical_unknown_version_and_wrong_hash() -> None:

@@ -155,6 +155,7 @@ async def submit_reimbursement(
         originator_name=current.record.name,
         idempotency_key=normalized_key,
         snapshot_version=SNAPSHOT_VERSION,
+        schema_fingerprint=snapshot.template.schema_fingerprint,
         form_snapshot_json=snapshot_json,
         snapshot_sha256=snapshot_sha256(snapshot),
     )

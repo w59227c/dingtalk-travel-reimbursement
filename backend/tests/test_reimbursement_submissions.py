@@ -131,6 +131,7 @@ def _create(
         originator_name="测试员工",
         idempotency_key=key,
         snapshot_version=6,
+        schema_fingerprint=_HASH_A,
         form_snapshot_json=snapshot,
         snapshot_sha256=hashlib.sha256(snapshot.encode()).hexdigest(),
         now=now,
@@ -290,6 +291,7 @@ def test_existing_submission_is_reused_even_when_browser_has_a_new_key(
         originator_name="",
         idempotency_key="refreshed-browser-key",
         snapshot_version=0,
+        schema_fingerprint="invalid",
         form_snapshot_json="snapshot no longer available",
         snapshot_sha256="invalid",
     )

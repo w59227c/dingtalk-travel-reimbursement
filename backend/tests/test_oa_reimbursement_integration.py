@@ -40,6 +40,7 @@ from app.integrations.dingtalk.workflow import (
     schema_fingerprint,
 )
 from app.main import create_app
+from app.models.oa_template_profile import OaTemplateProfile
 from app.models.reimbursement import (
     ReimbursementDraft,
     ReimbursementDraftFile,
@@ -64,6 +65,7 @@ from app.services.oa_reimbursement import (
     OAReimbursementProcessor,
     SnapshotSubmissionMaterializer,
 )
+from app.services.oa_reimbursement_payload import parse_snapshot
 from app.services.oa_template_profiles import (
     TravelProfileConfirmation,
     confirm_template_catalog,
@@ -783,6 +785,194 @@ def test_submit_detects_live_template_drift_before_locking_draft(
         with pytest.raises(ApiError) as caught:
             require_submission_ready_catalog(database)
         assert caught.value.code == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
+
+
+def test_submit_auto_syncs_budget_option_label_without_reconfirming_catalog(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement_schema, travel_schema)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    changed_components = tuple(
+        replace(
+            component,
+            options=tuple(
+                replace(option, label="26007 新项目名称")
+                for option in component.options
+            ),
+        )
+        if component.component_id == "budget-id"
+        else component
+        for component in reimbursement_schema.components
+    )
+    workflow.schemas[REIMBURSEMENT_PROCESS_CODE] = _schema(
+        REIMBURSEMENT_PROCESS_CODE,
+        changed_components,
+    )
+
+    response = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 4},
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "96969696-9696-4969-8969-969696969696",
+        },
+    )
+
+    assert response.status_code == 202, response.text
+    with client.app.state.database_session_factory() as database:
+        profile = database.get(OaTemplateProfile, "reimbursement")
+        assert profile is not None
+        assert profile.config_version == 1
+        assert profile.schema_fingerprint != profile.confirmed_schema_fingerprint
+        submission = database.scalar(select(ReimbursementSubmission))
+        assert submission is not None
+        snapshot = parse_snapshot(submission.form_snapshot_json)
+        draft = database.get(ReimbursementDraft, draft_id)
+        assert draft is not None
+        assert submission.schema_fingerprint == snapshot.template.schema_fingerprint
+        assert submission.schema_fingerprint != draft.schema_fingerprint
+        assert snapshot.selections.budget_code.label == "26007 新项目名称"
+        assert snapshot.input.project.display_text == "26007 新项目名称"
+    assert asyncio.run(_worker(client, workflow, LocalStorageBoundary()).run_once()) is True
+    polled = client.get(
+        f"/api/oa/reimbursements/submissions/{response.json()['data']['submissionId']}"
+    )
+    assert (
+        polled.json()["data"]["status"]
+        == ReimbursementSubmissionStatus.SUBMITTED.value
+    ), polled.json()
+
+
+def test_locked_submission_allows_unused_option_addition(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement_schema, travel_schema)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    submitted = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 4},
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "97979797-9797-4979-8979-979797979797",
+        },
+    )
+    assert submitted.status_code == 202, submitted.text
+    changed_components = tuple(
+        replace(
+            component,
+            options=(
+                *component.options,
+                FormOption("99001 新项目", "99001 新项目", "budget-99001"),
+            ),
+        )
+        if component.component_id == "budget-id"
+        else component
+        for component in reimbursement_schema.components
+    )
+    workflow.schemas[REIMBURSEMENT_PROCESS_CODE] = _schema(
+        REIMBURSEMENT_PROCESS_CODE,
+        changed_components,
+    )
+
+    assert asyncio.run(_worker(client, workflow, LocalStorageBoundary()).run_once()) is True
+
+    polled = client.get(
+        f"/api/oa/reimbursements/submissions/{submitted.json()['data']['submissionId']}"
+    )
+    assert polled.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value
+    assert workflow.create_calls == 1
+
+
+def test_locked_submission_allows_selected_option_display_changes(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement_schema, travel_schema)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    submitted = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 4},
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "97979797-9797-4979-8979-979797979798",
+        },
+    )
+    assert submitted.status_code == 202, submitted.text
+    changed_components = tuple(
+        replace(
+            component,
+            options=tuple(
+                replace(
+                    option,
+                    label=f"{option.label}（新名称）",
+                    key=f"{option.key}-renamed" if option.key else None,
+                )
+                for option in component.options
+            ),
+        )
+        if component.component_id in {"company-id", "budget-id", "travel-type-id"}
+        else component
+        for component in reimbursement_schema.components
+    )
+    workflow.schemas[REIMBURSEMENT_PROCESS_CODE] = _schema(
+        REIMBURSEMENT_PROCESS_CODE,
+        changed_components,
+    )
+
+    assert asyncio.run(_worker(client, workflow, LocalStorageBoundary()).run_once()) is True
+
+    polled = client.get(
+        f"/api/oa/reimbursements/submissions/{submitted.json()['data']['submissionId']}"
+    )
+    assert polled.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value
+    assert workflow.create_calls == 1
+
+
+def test_submit_auto_syncs_travel_template_timestamp_for_existing_relation(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement_schema, travel_schema)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    modified_at = "2026-09-05T00:00:00Z"
+    workflow.schemas[TRAVEL_PROCESS_CODE] = replace(
+        travel_schema,
+        modified_at=modified_at,
+        fingerprint=schema_fingerprint(
+            travel_schema.process_code,
+            travel_schema.form_code,
+            travel_schema.form_uuid,
+            modified_at,
+            travel_schema.status,
+            travel_schema.components,
+        ),
+    )
+
+    submitted = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 4},
+        headers={
+            "X-CSRF-Token": csrf,
+            "Idempotency-Key": "98989898-9898-4989-8989-989898989898",
+        },
+    )
+    assert submitted.status_code == 202, submitted.text
+    assert asyncio.run(_worker(client, workflow, LocalStorageBoundary()).run_once()) is True
+
+    polled = client.get(
+        f"/api/oa/reimbursements/submissions/{submitted.json()['data']['submissionId']}"
+    )
+    assert polled.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value
 
 
 @pytest.fixture

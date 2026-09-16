@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 from app.api import oa_reimbursements
 from app.core.errors import ApiError, install_error_handlers
-from app.database.session import get_db
 from app.integrations.dingtalk.workflow import (
     FormOption,
     WorkflowFormValue,
@@ -108,8 +107,6 @@ class FakeWorkflow:
         self.database = None
 
     async def list_process_instance_ids(self, **kwargs):
-        assert self.database is not None
-        assert self.database.rollback_calls == 1
         self.list_calls.append(kwargs)
         return WorkflowInstanceIdPage(
             ("instance-1",) if len(self.list_calls) == 1 else (),
@@ -127,31 +124,20 @@ def _client(monkeypatch, *, catalog=None, workflow=None) -> TestClient:
     application.include_router(oa_reimbursements.router, prefix="/api")
     selected_workflow = workflow or FakeWorkflow()
     application.state.dingtalk_workflow = selected_workflow
-
-    class FakeDatabase:
-        rollback_calls = 0
-
-        def rollback(self) -> None:
-            self.rollback_calls += 1
-
-    database = FakeDatabase()
-    selected_workflow.database = database
-
-    def database_dependency():
-        yield database
-
-    application.dependency_overrides[get_db] = database_dependency
+    database_session_factory = object()
+    application.state.database_session_factory = database_session_factory
     application.dependency_overrides[get_current_session] = lambda: SimpleNamespace(
         record=SimpleNamespace(dingtalk_user_id="employee-1")
     )
 
-    def ready_catalog(received_database):
-        assert received_database is database
+    async def ready_catalog(received_factory, received_workflow):
+        assert received_factory is database_session_factory
+        assert received_workflow is selected_workflow
         return catalog or _catalog()
 
     monkeypatch.setattr(
         oa_reimbursements,
-        "require_submission_ready_catalog",
+        "load_fresh_submission_catalog",
         ready_catalog,
     )
     return TestClient(application)
@@ -278,7 +264,7 @@ def test_catalog_readiness_failure_prevents_workflow_calls(monkeypatch) -> None:
     workflow = FakeWorkflow()
     client = _client(monkeypatch, workflow=workflow)
 
-    def not_ready(_database):
+    async def not_ready(_factory, _workflow):
         raise ApiError(
             "OA_TEMPLATE_CONFIRMATION_REQUIRED",
             "审批模板配置需要重新确认",
@@ -287,7 +273,7 @@ def test_catalog_readiness_failure_prevents_workflow_calls(monkeypatch) -> None:
 
     monkeypatch.setattr(
         oa_reimbursements,
-        "require_submission_ready_catalog",
+        "load_fresh_submission_catalog",
         not_ready,
     )
     with client:

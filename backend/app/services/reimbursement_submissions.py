@@ -454,6 +454,7 @@ def create_submission(
     originator_name: str,
     idempotency_key: str,
     snapshot_version: int,
+    schema_fingerprint: str,
     form_snapshot_json: str,
     snapshot_sha256: str,
     now: datetime | None = None,
@@ -484,6 +485,7 @@ def create_submission(
     # expected draft revision.
     _require_positive_integer(expected_revision, name="expected_revision")
     _require_positive_integer(snapshot_version, name="snapshot_version")
+    _require_sha256(schema_fingerprint)
     normalized_union_id = _required_text(originator_union_id, maximum=128)
     normalized_name = _required_text(originator_name, maximum=128)
     canonical_snapshot = _validated_json_snapshot(
@@ -590,7 +592,7 @@ def create_submission(
             department_name=draft.department_name,
             template_process_code=draft.template_process_code,
             template_config_version=draft.template_config_version,
-            schema_fingerprint=draft.schema_fingerprint,
+            schema_fingerprint=schema_fingerprint,
             snapshot_version=snapshot_version,
             form_snapshot_json=canonical_snapshot,
             related_instance_ids_json=draft.related_instance_ids_json,

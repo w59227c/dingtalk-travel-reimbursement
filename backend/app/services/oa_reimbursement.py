@@ -35,6 +35,7 @@ from app.integrations.dingtalk.workflow import (
     FormOption,
     WorkflowFormValue,
     WorkflowProcessInstance,
+    form_schema_from_dict,
 )
 from app.models.reimbursement import (
     ReimbursementDraftFile,
@@ -56,6 +57,15 @@ from app.services.oa_reimbursement_payload import (
     serialize_create_command,
     snapshot_excel_input,
     verify_excel_template,
+)
+from app.services.oa_template_compatibility import (
+    SchemaChangeKind,
+    classify_schema_change,
+    schema_contract_fingerprint,
+)
+from app.services.oa_template_profiles import (
+    validate_template_mapping,
+    validate_travel_template_mapping,
 )
 from app.services.receipt_bundle import (
     RECEIPT_BUNDLE_FILENAME,
@@ -443,12 +453,32 @@ class SnapshotSubmissionMaterializer:
             heartbeat,
             lambda: self._workflow.get_form_schema(snapshot.template.process_code),
         )
-        if schema.fingerprint != snapshot.template.schema_fingerprint:
+        stored_schema = form_schema_from_dict(
+            json.loads(snapshot.template.schema_canonical_json)
+        )
+        fields = {field.logical_key: field.component_id for field in snapshot.template.fields}
+        if (
+            classify_schema_change(
+                stored_schema,
+                schema,
+                mapped_component_ids=set(fields.values()),
+            )
+            is SchemaChangeKind.INCOMPATIBLE
+        ):
             raise ApiError(
                 "OA_TEMPLATE_CHANGED",
                 "审批模板已更新，请重新确认后提交",
                 409,
             )
+        try:
+            validate_template_mapping(schema, fields)
+        except ApiError:
+            raise ApiError(
+                "OA_TEMPLATE_CHANGED",
+                "审批模板已更新，请重新确认后提交",
+                409,
+            ) from None
+        components = {component.component_id: component for component in schema.components}
 
         profile_by_key = {item.profile_key: item for item in snapshot.template.travel_profiles}
         schema_by_process_code = {}
@@ -470,12 +500,56 @@ class SnapshotSubmissionMaterializer:
                     ),
                 )
                 schema_by_process_code[profile.process_code] = travel_schema
-            if travel_schema.fingerprint != profile.schema_fingerprint:
+            travel_mapping = {
+                "startDate": profile.start_date_component_id,
+                "endDate": profile.end_date_component_id,
+                **(
+                    {"company": profile.company_component_id}
+                    if profile.company_component_id is not None
+                    else {}
+                ),
+                **(
+                    {"budgetCode": profile.budget_code_component_id}
+                    if profile.budget_code_component_id is not None
+                    else {}
+                ),
+                **(
+                    {"travelType": profile.travel_type_component_id}
+                    if profile.travel_type_component_id is not None
+                    else {}
+                ),
+            }
+            try:
+                if profile.schema_contract_fingerprint is not None:
+                    if schema_contract_fingerprint(
+                        travel_schema,
+                        mapped_component_ids=set(travel_mapping.values()),
+                    ) != profile.schema_contract_fingerprint:
+                        raise ValueError
+                elif travel_schema.fingerprint != profile.schema_fingerprint:
+                    # Snapshots created before structural compatibility metadata
+                    # existed retain the original fail-closed behavior.
+                    raise ValueError
+                validate_travel_template_mapping(travel_schema, travel_mapping)
+                if profile.travel_type_mappings is not None:
+                    source_component = next(
+                        (
+                            item
+                            for item in travel_schema.components
+                            if item.component_id == profile.travel_type_component_id
+                        ),
+                        None,
+                    )
+                    if source_component is None or {
+                        item.value for item in source_component.options
+                    } != set(profile.travel_type_mappings):
+                        raise ValueError
+            except (ApiError, ValueError):
                 raise ApiError(
                     "TRAVEL_APPROVAL_TEMPLATE_CHANGED",
                     "关联出差审批模板已更新，请重新选择",
                     409,
-                )
+                ) from None
             related_with_profiles.append((related, profile))
 
         membership_groups = {}
@@ -559,19 +633,23 @@ class SnapshotSubmissionMaterializer:
                 ),
                 fixed_option=FormOption(**profile.travel_type_option.model_dump()),
             )
+            live_travel_type_options = [
+                item
+                for item in components[fields["travelType"]].options
+                if item.value == snapshot.selections.travel_type.value
+            ]
             if (
                 type_reason
                 or source_value != related.source_travel_type_value
                 or option is None
-                or option.as_dict() != snapshot.selections.travel_type.model_dump()
+                or option.value != snapshot.selections.travel_type.value
+                or len(live_travel_type_options) != 1
             ):
                 raise ApiError(
                     "TRAVEL_APPROVAL_TYPE_CHANGED",
                     type_reason or "出差审批类别已变化，请重新关联后提交",
                     409,
                 )
-            fields = {field.logical_key: field.component_id for field in snapshot.template.fields}
-            components = {component.component_id: component for component in schema.components}
             company, budget, reason = travel_accounting_options(
                 instance,
                 source_schema=schema_by_process_code[profile.process_code],
@@ -584,8 +662,8 @@ class SnapshotSubmissionMaterializer:
                 reason
                 or company is None
                 or budget is None
-                or company.as_dict() != snapshot.selections.company.model_dump()
-                or budget.as_dict() != snapshot.selections.budget_code.model_dump()
+                or company.value != snapshot.selections.company.value
+                or budget.value != snapshot.selections.budget_code.value
             ):
                 raise ApiError(
                     "TRAVEL_APPROVAL_ACCOUNTING_CHANGED",

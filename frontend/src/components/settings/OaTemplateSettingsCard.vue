@@ -711,6 +711,11 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
             <strong>{{ reimbursement.schema.templateName || reimbursement.schema.title }}</strong>
             <span>当前指纹：<code>{{ displayFingerprint(reimbursement.schema.schemaFingerprint) }}</code></span>
             <span>已确认指纹：<code>{{ displayFingerprint(reimbursement.confirmedSchemaFingerprint) }}</code></span>
+            <small
+              v-if="compatibilityStatus === 'COMPATIBLE' && reimbursement.confirmedSchemaFingerprint !== reimbursement.schema.schemaFingerprint"
+            >
+              仅发布时间或选项发生兼容更新，已自动同步，无需重新确认字段映射。
+            </small>
           </div>
 
           <div
@@ -847,6 +852,11 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
               <strong>{{ profile.schema.templateName || profile.schema.title }}</strong>
               <span>当前指纹：<code>{{ displayFingerprint(profile.schema.schemaFingerprint) }}</code></span>
               <span>已确认指纹：<code>{{ displayFingerprint(profile.confirmedSchemaFingerprint) }}</code></span>
+              <small
+                v-if="compatibilityStatus === 'COMPATIBLE' && profile.confirmedSchemaFingerprint !== profile.schema.schemaFingerprint"
+              >
+                兼容更新已自动同步。
+              </small>
             </div>
 
             <div

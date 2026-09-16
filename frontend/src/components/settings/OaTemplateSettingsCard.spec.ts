@@ -232,6 +232,31 @@ describe('OaTemplateSettingsCard', () => {
     vi.mocked(confirmOaTemplateCatalog).mockResolvedValue(catalog(4))
   })
 
+  it('explains compatible full-fingerprint changes without requesting remapping', async () => {
+    const saved = catalog()
+    saved.schemaFingerprint = 'c'.repeat(64)
+    saved.reimbursement.schema.schemaFingerprint = saved.schemaFingerprint
+    saved.travelProfiles[0]!.schemaFingerprint = 'd'.repeat(64)
+    saved.travelProfiles[0]!.schema.schemaFingerprint = 'd'.repeat(64)
+    vi.mocked(getOaTemplateCatalog).mockResolvedValue({
+      configured: true,
+      configVersion: 3,
+      compatibilityStatus: 'COMPATIBLE',
+      isSubmissionReady: true,
+      requiresConfirmation: false,
+      catalog: saved,
+    })
+
+    const wrapper = mount(OaTemplateSettingsCard, {
+      global: { plugins: [ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('仅发布时间或选项发生兼容更新')
+    expect(wrapper.text()).toContain('兼容更新已自动同步')
+    wrapper.unmount()
+  })
+
   it('inspects all template headers and saves one version-checked catalog', async () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     const wrapper = mount(OaTemplateSettingsCard, {

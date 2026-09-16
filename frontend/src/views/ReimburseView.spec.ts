@@ -103,6 +103,37 @@ const baseInput: ReimbursementDraftInput = {
   }],
 }
 
+function canonicalNoSubsidyInput(): ReimbursementDraftInput {
+  return {
+    ...structuredClone(baseInput),
+    editingState: {
+      includeSubsidy: false,
+      trip: {
+        tripType: 'business',
+        startDate: '',
+        startTime: '09:00',
+        endDate: '',
+        endTime: '18:00',
+        policyConfirmed: false,
+        confirmedEffectiveDays: '',
+        noSubsidyException: false,
+      },
+      trips: [],
+    },
+    items: baseInput.items.map((item) => ({
+      ...structuredClone(item),
+      itineraryFileIds: [],
+      itineraryAutoMatchDisabled: false,
+      paymentProofFileIds: [],
+      hotelBillFileIds: [],
+      railType: 'unknown',
+      requiresItinerary: false,
+      cnyAmountConfirmed: false,
+      requiresCnyConfirmation: false,
+    })),
+  }
+}
+
 const linkedApproval: ReimbursementRelatedApproval = {
   processInstanceId: 'travel-instance-1',
   profileKey: 'business',
@@ -1237,6 +1268,47 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])(
+    'treats omitted and explicit input defaults as the same saved form (mobile=%s)',
+    async (mobile) => {
+      vi.useFakeTimers()
+      serverDraft.input = canonicalNoSubsidyInput()
+      const { wrapper } = await mountView(undefined, false, mobile)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushPromises()
+
+      expect(updateReimbursementDraft).not.toHaveBeenCalled()
+      expect(wrapper.get('[data-testid="autosave-status"]').text()).toBe('已保存')
+      wrapper.unmount()
+    },
+  )
+
+  it.each([false, true])(
+    'shows template replacement beside submission instead of an endless save wait (mobile=%s)',
+    async (mobile) => {
+      vi.useFakeTimers()
+      serverDraft.input = canonicalNoSubsidyInput()
+      serverDraft.template.configVersion = 11
+      const { wrapper } = await mountView(undefined, false, mobile)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushPromises()
+
+      const status = wrapper.get('[data-testid="autosave-status"]')
+      expect(status.text()).toContain('OA 表单已更新')
+      expect(status.text()).not.toContain('等待保存')
+      const recovery = wrapper.get('[data-testid="template-recovery-panel"]')
+      expect(recovery.text()).toContain('当前记录不能继续保存或提交')
+      expect(recovery.find('button').text()).toBe('按新表单重新填写')
+
+      if (mobile) {
+        await wrapper.findAll('.mobile-step-nav button')[3]!.trigger('click')
+        expect(wrapper.get('.mobile-step-footer .el-button--primary').text())
+          .toBe('按新表单重新填写')
+      }
+      wrapper.unmount()
+    },
+  )
+
   it.each(['locked', 'tracked'] as const)('cancels template replacement if the old form becomes %s during confirmation', async (state) => {
     serverDraft.template.configVersion = 11
     const confirmation = deferred<Awaited<ReturnType<typeof ElMessageBox.confirm>>>()
@@ -1474,27 +1546,35 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
-  it('renders multiple travel periods as separate non-breaking rows', async () => {
-    const { wrapper, expense } = await mountView()
-    expense.subsidyTrips = [
-      {
-        relatedApprovalId: 'travel-instance-1', tripType: 'business',
-        startDate: '2026-06-30', startTime: '09:00', endDate: '2026-07-03', endTime: '18:00',
-      },
-      {
-        relatedApprovalId: 'travel-instance-2', tripType: 'business',
-        startDate: '2026-07-04', startTime: '09:00', endDate: '2026-07-07', endTime: '18:00',
-      },
-    ]
-    await nextTick()
+  it.each([false, true])(
+    'renders multiple travel periods as separate responsive rows (mobile=%s)',
+    async (mobile) => {
+      const { wrapper, expense } = await mountView(undefined, false, mobile)
+      expense.subsidyTrips = [
+        {
+          relatedApprovalId: 'travel-instance-1', tripType: 'business',
+          startDate: '2026-06-30', startTime: '09:00', endDate: '2026-07-03', endTime: '18:00',
+        },
+        {
+          relatedApprovalId: 'travel-instance-2', tripType: 'business',
+          startDate: '2026-07-04', startTime: '09:00', endDate: '2026-07-07', endTime: '18:00',
+        },
+      ]
+      await nextTick()
 
-    const periods = wrapper.get('[data-testid="travel-periods"]')
-    expect(periods.text()).toContain('共 2 个时间段')
-    expect(periods.findAll('.travel-periods__item')).toHaveLength(2)
-    expect(periods.findAll('.travel-periods__item')[0]?.text()).toBe('2026-06-30—2026-07-03')
-    expect(periods.findAll('.travel-periods__item')[1]?.text()).toBe('2026-07-04—2026-07-07')
-    wrapper.unmount()
-  })
+      const periods = wrapper.get('[data-testid="travel-periods"]')
+      expect(periods.text()).toContain('共 2 个时间段')
+      expect(periods.findAll('.travel-periods__item')).toHaveLength(2)
+      expect(periods.findAll('.travel-periods__item')[0]?.text())
+        .toBe(mobile ? '2026-06-30至2026-07-03' : '2026-06-30—2026-07-03')
+      expect(periods.findAll('.travel-periods__item')[1]?.text())
+        .toBe(mobile ? '2026-07-04至2026-07-07' : '2026-07-04—2026-07-07')
+      expect(periods.findAll('.travel-periods__item')[1]?.attributes('aria-label'))
+        .toBe('2026-07-04 至 2026-07-07')
+      expect(wrapper.find('[data-testid="derived-accounting-mobile-list"]').exists()).toBe(mobile)
+      wrapper.unmount()
+    },
+  )
 
   it('recalculates restored per-approval subsidies after workspace initialization', async () => {
     vi.useFakeTimers()

@@ -1163,7 +1163,6 @@ def _require_catalog_binding(
     if (
         draft.template_process_code != binding.process_code
         or draft.template_config_version != binding.config_version
-        or draft.schema_fingerprint != binding.schema_fingerprint
     ):
         raise _template_changed_error()
 
@@ -1195,7 +1194,6 @@ def _validate_related_snapshot(
             profile is None
             or item.process_code != profile.process_code
             or item.catalog_config_version != catalog.config_version
-            or item.travel_schema_fingerprint != profile.schema.fingerprint
         ):
             raise _template_changed_error()
         if getattr(profile, "travel_type_mappings", None) is not None:
