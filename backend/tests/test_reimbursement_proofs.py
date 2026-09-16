@@ -387,6 +387,8 @@ def test_itinerary_ocr_failure_keeps_itinerary_kind_and_can_be_read_back(client_
     assert payload["ocrStatus"] == "FAILED"
     assert payload["ocrResult"]["kind"] == "itinerary"
     assert payload["ocrResult"]["error"]["code"] == "OCR_DISABLED"
+    assert "OCR" not in payload["ocrResult"]["error"]["message"]
+    assert "自动识别" in payload["ocrResult"]["error"]["message"]
     assert payload["ocrResult"]["summary"]["amount"] is None
     assert payload["ocrResult"]["trips"] == []
     restored = client.get(f"/api/reimbursements/drafts/{draft_id}/files").json()["data"]["items"][0]

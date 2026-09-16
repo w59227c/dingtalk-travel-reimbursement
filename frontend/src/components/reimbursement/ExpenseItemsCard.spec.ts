@@ -1172,7 +1172,7 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
-  it('does not let an OCR-confirmed ride-hailing invoice cancel its required itinerary', async () => {
+  it.each([false, true])('lets the employee correct an automatically recognized ride-hailing invoice on both presentations (mobile=%s)', async (mobile) => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
     const drafts = useReimbursementDraftStore()
@@ -1180,13 +1180,54 @@ describe('ExpenseItemsCard durable files', () => {
     const invoice = taxiInvoice()
     drafts.files = [invoice]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
-    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((field) => field.props('label') === '市内交通类型')).toBe(false)
+    const transportField = wrapper.findAllComponents({ name: 'ElFormItem' })
+      .find((field) => field.props('label') === '市内交通类型')
+    expect(transportField).toBeDefined()
     expect(wrapper.text()).toContain('网约车费用必须有对应行程单')
+    transportField!.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'taxi')
+    await flushPromises()
+    expect(wrapper.text()).toContain('出租车费用可按需关联行程单')
     await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
     await flushPromises()
-    expect(expense.buildDraftExpenseItems()[0]).toMatchObject({ transportType: 'ride_hailing', requiresItinerary: true })
+    expect(expense.buildDraftExpenseItems()[0]).toMatchObject({ transportType: 'taxi', requiresItinerary: false })
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('clears city-transport-only state when an automatically recognized item changes category (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [
+      { id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true },
+      { id: 'rail_fare', name: '火车票', order: 2, manualSelectable: true },
+    ]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const invoice = taxiInvoice()
+    const itinerary = recognizedItinerary()
+    drafts.files = [invoice, itinerary]
+    expense.upsertDraftOcrItem(invoice)
+    expense.items[0]!.itineraryFileIds = [itinerary.id]
+
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
+    const categoryField = wrapper.findAllComponents({ name: 'ElFormItem' })
+      .find((field) => field.props('label') === '费用类别')!
+    categoryField.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'rail_fare')
+    await flushPromises()
+
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' })
+      .some((field) => field.props('label') === '市内交通类型')).toBe(false)
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' })
+      .some((field) => field.props('label') === '对应行程单')).toBe(false)
+    await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
+    await flushPromises()
+    expect(expense.buildDraftExpenseItems()[0]).toMatchObject({
+      category: 'rail_fare',
+      transportType: 'other',
+      requiresItinerary: false,
+      itineraryFileIds: [],
+    })
     wrapper.unmount()
   })
 
@@ -1723,6 +1764,33 @@ describe('ExpenseItemsCard durable files', () => {
     await selectFiles(wrapper, 'durable-expense-input', [])
     expect(uploadReimbursementDraftFile).not.toHaveBeenCalled()
     expect(wrapper.find('[data-testid="batch-progress"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('normalizes legacy recognition errors without exposing OCR terminology (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const failed = recognizedFile('legacy-error', '待处理票据.pdf', '10.00')
+    failed.ocrStatus = 'FAILED'
+    failed.ocrResult = {
+      ...failed.ocrResult,
+      status: 'failed',
+      error: { code: 'OCR_DISABLED', message: '本地 OCR 尚未配置，请手工填写' },
+    }
+    drafts.files = [failed]
+    expense.upsertDraftOcrItem(failed)
+
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('自动识别')
+    expect(wrapper.text()).toContain('尚未配置，请手工填写')
+    expect(wrapper.text()).not.toContain('本地 OCR')
     wrapper.unmount()
   })
 
@@ -2376,7 +2444,7 @@ describe('ExpenseItemsCard durable files', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="material-operation-status"]').exists()).toBe(false)
-    expect(success).toHaveBeenCalledWith('已用新的 OCR 结果更新明细')
+    expect(success).toHaveBeenCalledWith('已用新的自动识别结果更新明细')
     wrapper.unmount()
   })
 
@@ -2660,6 +2728,38 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    { presentation: 'desktop', mobile: false, selector: '.el-table__row' },
+    { presentation: 'mobile', mobile: true, selector: '.expense-mobile-card' },
+  ])('shows the category fallback when OCR has no more specific description on $presentation', async ({ mobile, selector }) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    const source = taxiInvoice()
+    source.ocrResult.description = null
+    source.ocrResult.categoryName = '市内交通费'
+    drafts.files = [source]
+    expense.upsertDraftOcrItem(source)
+
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+
+    const item = wrapper.get(selector)
+    expect(item.get('.expense-item-card__description').text()).toBe('市内交通费')
+    expect(item.find('.expense-item-card__description--empty').exists()).toBe(false)
+    expect(item.text()).not.toContain('缺少说明')
+    await item.findAll('button').find((button) => button.text().trim() === '编辑')!.trigger('click')
+    const description = wrapper.findAllComponents({ name: 'ElFormItem' })
+      .find((field) => field.props('label') === '说明')!
+      .findComponent({ name: 'ElInput' })
+    expect(description.props('modelValue')).toBe('市内交通费')
+    wrapper.unmount()
+  })
+
   it('groups the mobile expense summary, description, materials and actions into distinct regions', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
@@ -2759,13 +2859,19 @@ describe('ExpenseItemsCard durable files', () => {
 
   it('allows explicit reuse of a multi-trip itinerary for another expense', async () => {
     const expense = useExpenseStore()
-    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft(8)
     const first = recognizedFile('file-1', '发票一.pdf')
     const second = recognizedFile('file-2', '发票二.pdf')
     for (const source of [first, second]) {
-      source.ocrResult = { ...source.ocrResult!, transportType: 'ride_hailing', requiresItinerary: true }
+      source.ocrResult = {
+        ...source.ocrResult!,
+        categoryId: 'local_transport',
+        categoryName: '市内交通费',
+        transportType: 'ride_hailing',
+        requiresItinerary: true,
+      }
     }
     const itinerary = serverFile('file-3', '多次行程.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'itinerary' })
     drafts.files = [first, second, itinerary]
@@ -2832,7 +2938,7 @@ describe('ExpenseItemsCard durable files', () => {
       global: { plugins: [pinia, ElementPlus] },
     })
 
-    expect(wrapper.text()).toContain('1 张票据的 OCR 结果待确认')
+    expect(wrapper.text()).toContain('1 张票据的自动识别结果待确认')
     expect(wrapper.text()).toContain('添加到费用明细')
     const ignore = wrapper.findAll('button').find((button) =>
       button.text().trim() === '仅作为材料保留',
@@ -2849,7 +2955,7 @@ describe('ExpenseItemsCard durable files', () => {
     )
     expect(expense.items).toEqual([])
     expect(expense.dismissedOcrFileIds).toEqual(['file-1'])
-    expect(wrapper.text()).not.toContain('OCR 结果待确认')
+    expect(wrapper.text()).not.toContain('自动识别结果待确认')
 
     wrapper.unmount()
   })

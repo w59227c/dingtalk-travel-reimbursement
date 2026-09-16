@@ -149,10 +149,10 @@ def _proof_setup(client_factory, monkeypatch):
     return client, headers, draft_id, source, support
 
 
-def test_authoritative_ride_hailing_evidence_cannot_be_cleared_by_client(
+def test_employee_can_correct_ride_hailing_ocr_evidence(
     client_factory, monkeypatch
 ):
-    client, headers, draft_id, source, support = _proof_setup(client_factory, monkeypatch)
+    client, headers, draft_id, source, _ = _proof_setup(client_factory, monkeypatch)
     with client.app.state.database_session_factory() as database:
         file = database.get(ReimbursementDraftFile, source)
         file.ocr_result_json = json.dumps(
@@ -166,6 +166,7 @@ def test_authoritative_ride_hailing_evidence_cannot_be_cleared_by_client(
                     {
                         **_input()["items"][0],
                         "sourceFileId": source,
+                        "category": "local_transport",
                         "requiresItinerary": False,
                         "transportType": "taxi",
                     }
@@ -173,10 +174,46 @@ def test_authoritative_ride_hailing_evidence_cannot_be_cleared_by_client(
             }
         )
         canonical = apply_ocr_evidence(database, draft_id=draft_id, draft_input=value)
-        assert canonical.items[0].requires_itinerary is True
+        assert canonical.items[0].requires_itinerary is False
+        assert canonical.items[0].transport_type == "taxi"
+        validate_draft_file_references(
+            database,
+            draft_id=draft_id,
+            draft_input=canonical,
+            require_terminal_disposition=True,
+            require_submission_proofs=True,
+        )
+
+
+def test_employee_selected_ride_hailing_still_requires_an_itinerary(
+    client_factory, monkeypatch
+):
+    client, headers, draft_id, source, support = _proof_setup(client_factory, monkeypatch)
+    with client.app.state.database_session_factory() as database:
+        value = ReimbursementDraftInput.model_validate(
+            {
+                **_input(),
+                "items": [
+                    {
+                        **_input()["items"][0],
+                        "sourceFileId": source,
+                        "category": "local_transport",
+                        "requiresItinerary": False,
+                        "transportType": "ride_hailing",
+                    }
+                ],
+            }
+        )
+        canonical = apply_ocr_evidence(database, draft_id=draft_id, draft_input=value)
+        assert canonical.items[0].requires_itinerary is False
+        assert canonical.items[0].transport_type == "ride_hailing"
         with pytest.raises(ApiError, match="缺少对应行程单"):
             validate_draft_file_references(
-                database, draft_id=draft_id, draft_input=value, require_submission_proofs=True
+                database,
+                draft_id=draft_id,
+                draft_input=canonical,
+                require_terminal_disposition=True,
+                require_submission_proofs=True,
             )
         canonical.items[0].itinerary_file_ids = [support]
         validate_draft_file_references(

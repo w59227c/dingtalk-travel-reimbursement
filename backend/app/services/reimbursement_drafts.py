@@ -684,8 +684,6 @@ def validate_submission_evidence(
         requires_itinerary = (
             item.requires_itinerary
             or item.transport_type == "ride_hailing"
-            or evidence.get("requiresItinerary") is True
-            or evidence.get("transportType") == "ride_hailing"
         )
         if requires_itinerary and not item.itinerary_file_ids:
             raise _not_ready_error("网约车费用缺少对应行程单，请上传并关联后提交")
@@ -751,11 +749,6 @@ def apply_ocr_evidence(
         if item.source_file_id is not None:
             values["receiptCount"] = 1
         values["railType"] = _authoritative_rail_type(item, evidence)
-        if (
-            evidence.get("requiresItinerary") is True
-            or evidence.get("transportType") == "ride_hailing"
-        ):
-            values.update(requiresItinerary=True, transportType="ride_hailing")
         currency = evidence.get("originalCurrency")
         if _evidence_requires_cny_confirmation(evidence):
             values["requiresCnyConfirmation"] = True

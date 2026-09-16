@@ -219,11 +219,6 @@ const displayedBudgetLabel = computed(() => relatedDirty.value
 const relatedApprovalVerificationPending = computed(() => Boolean(
   verifyingRelatedApprovals.value || (selectedRelatedApprovals.value.length && relatedDirty.value),
 ))
-const relatedApprovalVerified = computed(() => Boolean(
-  selectedRelatedApprovals.value.length
-  && !relatedApprovalVerificationPending.value
-  && drafts.currentDraft?.input.accountingSourceVerified,
-))
 const saveLabel = computed(() => trackedSubmission.value && submission.succeeded ? 'OA 已成功发起'
   : trackedSubmission.value && submission.status === 'QUEUED' ? '已排队，内容已锁定'
   : trackedSubmission.value || drafts.currentDraft?.status === 'LOCKED' ? '内容已锁定'
@@ -944,7 +939,7 @@ onBeforeUnmount(() => {
       <TravelApprovalSelector
         :model-value="selectedRelatedApprovals"
         :mobile="props.mobile"
-        :readonly="bindingApprovalDepartment"
+        :busy="bindingApprovalDepartment"
         single
         @update:model-value="chooseTravelApprovalForDepartment"
       />
@@ -1044,7 +1039,8 @@ onBeforeUnmount(() => {
                 :model-value="selectedRelatedApprovals"
                 :mobile="props.mobile"
                 :linked-approvals="drafts.currentDraft.relatedApprovals"
-                :readonly="formReadOnly || drafts.processingFiles || verifyingRelatedApprovals || bindingApprovalDepartment"
+                :readonly="formReadOnly"
+                :busy="drafts.processingFiles || verifyingRelatedApprovals || bindingApprovalDepartment"
                 @update:model-value="updateRelatedApprovals"
               />
               <el-alert
@@ -1074,22 +1070,6 @@ onBeforeUnmount(() => {
                     </h2>
                     <p>以所选出差审批为准，无需重复填写。</p>
                   </div>
-                  <el-tag
-                    v-if="relatedApprovalVerificationPending"
-                    type="info"
-                    effect="plain"
-                    data-testid="related-approval-verification-status"
-                  >
-                    正在核验
-                  </el-tag>
-                  <el-tag
-                    v-else-if="relatedApprovalVerified"
-                    type="success"
-                    effect="plain"
-                    data-testid="related-approval-verification-status"
-                  >
-                    已核验
-                  </el-tag>
                 </div>
                 <el-descriptions
                   :column="props.mobile ? 1 : 2"
@@ -1496,7 +1476,6 @@ onBeforeUnmount(() => {
 .plain-fieldset, .editor-fieldset { min-width: 0; padding: 0; margin: 0; border: 0; }
 .accounting-verification-alert { margin-top: 18px; }
 .derived-accounting-section { margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--el-border-color-lighter); }
-.derived-accounting-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .derived-accounting-heading h2 { margin: 0; color: var(--el-text-color-primary); font-size: 16px; }
 .derived-accounting-heading p { margin: 6px 0 14px; color: var(--el-text-color-secondary); font-size: 13px; }
 .derived-accounting-grid { margin-bottom: 12px; }

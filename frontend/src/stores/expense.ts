@@ -346,7 +346,9 @@ export const useExpenseStore = defineStore('expense', () => {
     if (amountCents === null) warnings.add('MISSING_AMOUNT')
     const description = candidate.description?.trim()
       || (candidate.status === 'failed' ? file.name : candidate.categoryName.trim())
-    if (!candidate.description?.trim()) warnings.add('MISSING_DESCRIPTION')
+    // A category label is the accepted fallback when OCR cannot recover a more
+    // specific description. Keep it visible and do not require a redundant edit.
+    if (!candidate.description?.trim()) warnings.delete('MISSING_DESCRIPTION')
     if (warnings.size || candidate.status === 'failed') warnings.add('MANUAL_REVIEW_REQUIRED')
     return {
       id: `ocr-${file.id}`,
@@ -446,6 +448,9 @@ export const useExpenseStore = defineStore('expense', () => {
         : ''
       if (sourceFileId) linkedFileIds.add(sourceFileId)
       const candidate = sourceFileId ? candidateByFileId.get(sourceFileId)?.item : undefined
+      const persistedDescription = typeof persisted.description === 'string'
+        ? persisted.description.trim()
+        : ''
       return {
         id: sourceFileId ? `ocr-${sourceFileId}` : `draft-${draft.id}-item-${index}`,
         ...(sourceFileId ? { sourceFileId } : {}),
@@ -457,7 +462,7 @@ export const useExpenseStore = defineStore('expense', () => {
         railType: evidenceRailType(persisted.category, persisted.railType, receiptOcrResult(
           draftFiles.find((file) => file.id === sourceFileId),
         )),
-        requiresItinerary: persisted.requiresItinerary || candidate?.requiresItinerary || false,
+        requiresItinerary: persisted.requiresItinerary ?? candidate?.requiresItinerary ?? false,
         originalCurrency: persisted.originalCurrency ?? candidate?.originalCurrency,
         originalAmount: persisted.originalAmount ?? candidate?.originalAmount,
         cnyAmountConfirmed: persisted.cnyAmountConfirmed ?? false,
@@ -467,9 +472,7 @@ export const useExpenseStore = defineStore('expense', () => {
         displayDate: typeof persisted.displayDate === 'string'
           ? persisted.displayDate.trim()
           : '',
-        description: typeof persisted.description === 'string'
-          ? persisted.description.trim()
-          : '',
+        description: persistedDescription || candidate?.description || '',
         amount: amountCents === null ? '' : centsToMoney(amountCents),
         receiptCount: !(sourceFileId && ['DRAFT', 'REVIEW_READY'].includes(draft.status))
           && Number.isSafeInteger(persisted.receiptCount)

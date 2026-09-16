@@ -189,7 +189,7 @@ class OcrService:
     ) -> dict[str, object]:
         """Classify and parse from the same bounded extraction, never from a filename."""
         if not self._settings.ocr_enabled:
-            raise ApiError("OCR_DISABLED", "本地 OCR 尚未配置，请确认材料用途", 503)
+            raise ApiError("OCR_DISABLED", "自动识别尚未配置，请确认材料用途", 503)
         detection = self._settings.ocr_detection_model_dir
         recognition = self._settings.ocr_recognition_model_dir
         try:
@@ -246,7 +246,7 @@ class OcrService:
         reference_year: int | None,
     ) -> dict[str, object]:
         if not self._settings.ocr_enabled:
-            raise ApiError("OCR_DISABLED", "本地 OCR 尚未配置，请人工关联行程单", 503)
+            raise ApiError("OCR_DISABLED", "自动识别尚未配置，请人工关联行程单", 503)
         detection = self._settings.ocr_detection_model_dir
         recognition = self._settings.ocr_recognition_model_dir
         try:
@@ -321,13 +321,13 @@ class OcrService:
         prefer_pdf_text: bool = True,
     ) -> tuple[list[OcrLine], str, InvoiceQrEvidence | None]:
         if not self._settings.ocr_enabled:
-            raise ApiError("OCR_DISABLED", "本地 OCR 尚未配置，可手工填写票据信息", 503)
+            raise ApiError("OCR_DISABLED", "自动识别尚未配置，可手工填写票据信息", 503)
         if self._engine is not None and self._engine.is_fake:
             return await self._fake_lines(stored), "fake", None
         detection = self._settings.ocr_detection_model_dir
         recognition = self._settings.ocr_recognition_model_dir
         if detection is None or recognition is None:
-            raise ApiError("OCR_FAILED", "本地 OCR 模型未配置，请手工填写", 503)
+            raise ApiError("OCR_FAILED", "自动识别模型未配置，请手工填写", 503)
         try:
             result = await self._process_runner.run(
                 recognize_document_worker,

@@ -447,6 +447,91 @@ describe('expense store', () => {
     expect(store.items[0]?.warnings).toContain('FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT')
   })
 
+  it('uses the category name as a valid description when OCR has no description', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('local-transport-fallback')
+    source.ocrResult = {
+      ...source.ocrResult!,
+      type: 'taxi',
+      categoryId: 'local_transport',
+      categoryName: '市内交通费',
+      description: null,
+      transportType: 'taxi',
+      requiresItinerary: false,
+    }
+
+    store.upsertDraftOcrItem(source)
+
+    expect(store.items[0]).toMatchObject({
+      category: 'local_transport',
+      description: '市内交通费',
+    })
+    expect(store.items[0]?.warnings).not.toContain('MISSING_DESCRIPTION')
+  })
+
+  it('preserves an employee transport-type correction when OCR evidence is hydrated', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('corrected-transport')
+    source.ocrResult = {
+      ...source.ocrResult!,
+      type: 'taxi',
+      categoryId: 'local_transport',
+      categoryName: '市内交通费',
+      transportType: 'ride_hailing',
+      requiresItinerary: true,
+    }
+    const draft = durableDraft([{
+      sourceFileId: source.id,
+      category: 'local_transport',
+      date: '2026-09-01',
+      displayDate: '2026-09-01',
+      description: '市内交通费',
+      amount: '44.89',
+      receiptCount: 1,
+      transportType: 'taxi',
+      requiresItinerary: false,
+    }])
+
+    store.hydrateFromDraft(draft, [source])
+
+    expect(store.items[0]).toMatchObject({
+      transportType: 'taxi',
+      requiresItinerary: false,
+    })
+  })
+
+  it('repairs a blank persisted description from the recognized category fallback', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('blank-persisted-description')
+    source.ocrResult = {
+      ...source.ocrResult!,
+      categoryId: 'local_transport',
+      categoryName: '市内交通费',
+      description: null,
+      transportType: 'taxi',
+      requiresItinerary: false,
+    }
+    const draft = durableDraft([{
+      sourceFileId: source.id,
+      category: 'local_transport',
+      date: '2026-09-01',
+      displayDate: '2026-09-01',
+      description: '   ',
+      amount: '44.89',
+      receiptCount: 1,
+      transportType: 'taxi',
+      requiresItinerary: false,
+    }])
+
+    store.hydrateFromDraft(draft, [source])
+
+    expect(store.items[0]).toMatchObject({ description: '市内交通费' })
+    expect(store.items[0]?.warnings).not.toContain('MISSING_DESCRIPTION')
+  })
+
   it('preserves proof links through OCR retry and clears them when the proof file is deleted', () => {
     const store = useExpenseStore()
     store.categories = MANUAL_CATEGORIES

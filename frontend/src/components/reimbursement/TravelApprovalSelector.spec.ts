@@ -72,6 +72,21 @@ describe('TravelApprovalSelector', () => {
     wrapper.unmount()
   })
 
+  it('disables approval interactions while busy without claiming the reimbursement is being submitted', () => {
+    const drafts = useReimbursementDraftStore()
+    drafts.travelApprovals = [candidate]
+    const wrapper = mount(TravelApprovalSelector, {
+      props: { modelValue: [selection], busy: true },
+      global: { plugins: [ElementPlus] },
+    })
+
+    expect(wrapper.findComponent({ name: 'ElCheckbox' }).props('disabled')).toBe(true)
+    expect(wrapper.text()).not.toContain('当前报销已进入提交阶段')
+    expect(wrapper.text()).not.toContain('正在核验')
+    expect(wrapper.text()).toContain('已选 1 张')
+    wrapper.unmount()
+  })
+
   it('emits the server profile and exact query window for a selected candidate', async () => {
     const drafts = useReimbursementDraftStore()
     drafts.travelApprovals = [candidate]
@@ -130,7 +145,7 @@ describe('TravelApprovalSelector', () => {
     expect(wrapper.text()).toContain('合肥出差申请')
     expect(wrapper.text()).toContain('出差类别：出差类别待重新核验')
     expect(wrapper.text()).toContain('已关联')
-    expect(wrapper.text()).toContain('当前报销已进入提交阶段')
+    expect(wrapper.text()).not.toContain('当前报销已进入提交阶段')
     expect(wrapper.findComponent({ name: 'ElCheckbox' }).props('disabled')).toBe(true)
     wrapper.unmount()
   })

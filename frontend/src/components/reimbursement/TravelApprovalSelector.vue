@@ -14,6 +14,7 @@ const props = withDefaults(defineProps<{
   linkedApprovals?: ReimbursementRelatedApproval[]
   mobile?: boolean
   readonly?: boolean
+  busy?: boolean
   single?: boolean
   requiredStartDate?: string
   requiredEndDate?: string
@@ -21,6 +22,7 @@ const props = withDefaults(defineProps<{
   linkedApprovals: () => [],
   mobile: false,
   readonly: false,
+  busy: false,
   single: false,
   requiredStartDate: '',
   requiredEndDate: '',
@@ -154,7 +156,7 @@ function selectionForRow(row: ApprovalRow): ReimbursementRelatedApprovalSelectio
 }
 
 function toggle(row: ApprovalRow, checked: boolean): void {
-  if (props.readonly) return
+  if (props.readonly || props.busy) return
   localError.value = ''
   if (!checked) {
     emit(
@@ -231,6 +233,7 @@ function accountingLabel(row: ApprovalRow): string {
     class="travel-approval-section"
     data-testid="travel-approval-section"
     aria-labelledby="travel-approval-heading"
+    :aria-busy="busy"
   >
     <div class="card-header travel-approval-heading">
       <div>
@@ -294,14 +297,7 @@ function accountingLabel(row: ApprovalRow): string {
     </fieldset>
 
     <el-alert
-      v-if="readonly"
-      title="当前报销已进入提交阶段，关联审批不可再修改"
-      type="info"
-      :closable="false"
-      class="travel-query-alert"
-    />
-    <el-alert
-      v-else-if="localError || drafts.travelApprovalsError"
+      v-if="!readonly && (localError || drafts.travelApprovalsError)"
       :title="localError || drafts.travelApprovalsError"
       type="error"
       :closable="false"
@@ -353,7 +349,7 @@ function accountingLabel(row: ApprovalRow): string {
       >
         <el-checkbox
           :model-value="selectedIds.has(row.processInstanceId)"
-          :disabled="readonly || Boolean(unavailableReason(row))"
+          :disabled="readonly || busy || Boolean(unavailableReason(row))"
           :aria-label="`选择出差审批 ${row.title}`"
           @change="(checked: boolean) => toggle(row, checked)"
         />

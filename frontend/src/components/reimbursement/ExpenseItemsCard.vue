@@ -146,7 +146,6 @@ const editor = reactive({
   amount: '',
   receiptCount: 1,
   transportType: 'other' as NonNullable<ExpenseItem['transportType']>,
-  requiresItinerary: false,
   itineraryFileIds: [] as string[],
   itineraryAutoMatchDisabled: false,
   paymentProofFileIds: [] as string[],
@@ -194,7 +193,7 @@ const activeRecognitionStatus = computed(() => {
     return {
       fileId: retrying.fileId,
       title: `正在重新识别“${retrying.fileName}”`,
-      description: 'OCR 正在重新解析票据信息，完成后会更新识别结果；如明细已被人工修改，系统会保留你的人工修改。',
+      description: '系统正在重新解析票据信息，完成后会更新识别结果；如明细已被人工修改，系统会保留你的人工修改。',
     }
   }
   const running = durableFiles.value.find((file) =>
@@ -203,7 +202,7 @@ const activeRecognitionStatus = computed(() => {
     ? {
         fileId: running.id,
         title: `正在识别“${running.name}”`,
-        description: 'OCR 任务仍在处理中，页面会自动同步最新结果。',
+        description: '票据仍在自动识别中，页面会自动同步最新结果。',
       }
     : null
 })
@@ -253,13 +252,11 @@ const editorSource = computed(() => durableFiles.value.find((file) =>
   file.id === expense.items.find((item) => item.id === editor.id)?.sourceFileId,
 ))
 const editorEvidence = computed(() => receiptOcrResult(editorSource.value))
-const sourceRequiresItinerary = computed(() => editorEvidence.value?.requiresItinerary
-  || editorEvidence.value?.transportType === 'ride_hailing')
 const editorSourceInvoice = computed(() => {
   const item = expense.items.find((entry) => entry.id === editor.id)
   return Boolean(item?.sourceFileId || item?.source === 'ocr')
 })
-const editorIsTaxi = computed(() => isTaxiExpense(editor) || Boolean(sourceRequiresItinerary.value))
+const editorIsTaxi = computed(() => isTaxiExpense(editor))
 const editorCanSelectRailType = computed(() => editor.category === 'rail_fare'
   && !hasKnownNonRailEvidence(editorEvidence.value))
 const sourceRailType = computed(() => editorEvidence.value?.railType)
@@ -399,7 +396,7 @@ watch(
 )
 
 watch(() => editor.category, (category) => {
-  if (!editorSourceInvoice.value && category !== 'local_transport') editor.transportType = 'other'
+  if (category !== 'local_transport') editor.transportType = 'other'
 })
 
 const itineraryEvidenceSignature = computed(() => JSON.stringify([
@@ -474,7 +471,6 @@ function openNewItem(): void {
     amount: '',
     receiptCount: 1,
     transportType: 'other',
-    requiresItinerary: false,
     itineraryFileIds: [],
     itineraryAutoMatchDisabled: false,
     paymentProofFileIds: [],
@@ -501,7 +497,6 @@ function openEditItem(item: ExpenseItem): void {
     amount: item.amount,
     receiptCount: item.sourceFileId || item.source === 'ocr' ? 1 : item.receiptCount,
     transportType: item.transportType ?? (item.requiresItinerary ? 'ride_hailing' : 'other'),
-    requiresItinerary: item.requiresItinerary || item.transportType === 'ride_hailing' || false,
     itineraryFileIds: [...(item.itineraryFileIds ?? [])],
     itineraryAutoMatchDisabled: item.itineraryAutoMatchDisabled ?? false,
     paymentProofFileIds: [...(item.paymentProofFileIds ?? [])],
@@ -650,9 +645,15 @@ async function saveMaterialKind(): Promise<void> {
 function durableFileError(file: ReimbursementDraftFile | undefined): string {
   if (!file) return ''
   if (isRetryingDurableRecognition(file)) return ''
-  return durableErrors[file.id]
+  return userFacingRecognitionMessage(durableErrors[file.id]
     ?? file.ocrResult?.error?.message
-    ?? (file.ocrStale ? '材料识别因服务中断未完成，请重新识别或修改用途' : '')
+    ?? (file.ocrStale ? '材料识别因服务中断未完成，请重新识别或修改用途' : ''))
+}
+
+function userFacingRecognitionMessage(message: string | undefined): string {
+  return (message ?? '')
+    .replace(/本地\s*OCR/gi, '自动识别')
+    .replace(/OCR/gi, '自动识别')
 }
 
 function durableOcrSummary(file: ReimbursementDraftFile): string {
@@ -720,9 +721,7 @@ function mobileItemNeedsAttention(item: ExpenseItem): boolean {
 }
 
 function meaningfulMobileDescription(item: ExpenseItem): string {
-  const description = item.description.trim()
-  const category = categoryNames.value[item.category] ?? item.category
-  return description && description !== category ? description : ''
+  return item.description.trim()
 }
 
 function itemHasMaterialSection(item: ExpenseItem): boolean {
@@ -1003,10 +1002,10 @@ function skipDuplicateBatchFile(entry: BatchFile, error: unknown): boolean {
 
 function recognitionFailure(file: ReimbursementDraftFile): string | null {
   if (file.ocrStatus !== 'FAILED' && file.ocrResult?.status !== 'failed') return null
-  return file.ocrResult?.error?.message
+  return userFacingRecognitionMessage(file.ocrResult?.error?.message
     ?? file.materialClassification?.error?.message
     ?? file.materialClassification?.reason
-    ?? '识别未完成，请重新识别或手动处理'
+    ?? '识别未完成，请重新识别或手动处理')
 }
 
 async function recognizeDurableFile(
@@ -1289,7 +1288,7 @@ async function retryDurableRecognition(file: ReimbursementDraftFile): Promise<vo
       || expenseItemSnapshot(expense.items.find((item) => item.sourceFileId === file.id))
         !== linkedItemSnapshot
     ) {
-      ElMessage.warning('OCR 结果已更新；现有费用明细可能已人工修改，未自动新增或覆盖')
+      ElMessage.warning('自动识别结果已更新；现有费用明细可能已人工修改，未自动新增或覆盖')
       return
     }
     if (!expense.upsertDraftOcrItem(recognized)) {
@@ -1298,7 +1297,7 @@ async function retryDurableRecognition(file: ReimbursementDraftFile): Promise<vo
     }
     void expense.refreshCalculations()
     if (!recognitionFailure(recognized) && !durableErrors[recognized.id]) {
-      ElMessage.success('已用新的 OCR 结果更新明细')
+      ElMessage.success('已用新的自动识别结果更新明细')
     }
   } catch (error) {
     if (!acceptsDurableOperation(scope)) return
@@ -1502,8 +1501,8 @@ function saveItem(): void {
       description: editor.description,
       amount: editor.amount,
       receiptCount: editorSourceInvoice.value ? 1 : editor.receiptCount,
-      requiresItinerary: editor.transportType === 'ride_hailing' || Boolean(sourceRequiresItinerary.value),
-      transportType: sourceRequiresItinerary.value ? 'ride_hailing' : editor.transportType,
+      requiresItinerary: editor.transportType === 'ride_hailing',
+      transportType: editor.transportType,
       itineraryFileIds: editorIsTaxi.value ? [...editor.itineraryFileIds] : [],
       itineraryAutoMatchDisabled: editor.itineraryAutoMatchDisabled,
       paymentProofFileIds: [...editor.paymentProofFileIds],
@@ -1551,7 +1550,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       <div class="card-header">
         <div>
           <strong>费用明细</strong>
-          <span class="section-note">OCR 结果会直接填入，发现不准确时直接编辑</span>
+          <span class="section-note">自动识别结果会直接填入，发现不准确时直接编辑</span>
         </div>
         <div
           class="receipt-header-actions"
@@ -1666,8 +1665,8 @@ async function retryItemRecognition(id: string): Promise<void> {
     />
     <el-alert
       v-if="expense.ocrUnavailable"
-      title="本地 OCR 当前不可用"
-      description="对应条目已经保留，请直接编辑补充票据信息。系统不会转用付费或云端 OCR。"
+      title="自动识别当前不可用"
+      description="对应条目已经保留，请直接编辑补充票据信息。系统不会转用付费或云端识别服务。"
       type="warning"
       :closable="false"
       show-icon
@@ -1702,7 +1701,7 @@ async function retryItemRecognition(id: string): Promise<void> {
     </div>
     <el-alert
       v-if="unresolvedDurableOcrFiles.length > 0"
-      :title="`${unresolvedDurableOcrFiles.length} 张票据的 OCR 结果待确认`"
+      :title="`${unresolvedDurableOcrFiles.length} 张票据的自动识别结果待确认`"
       description="请逐张选择“添加到费用明细”或“仅作为材料保留”，处理完成后即可提交。"
       type="warning"
       :closable="false"
@@ -1846,7 +1845,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             v-if="durableOcrSummary(file)"
             class="receipt-meta"
           >
-            OCR：{{ durableOcrSummary(file) }}
+            自动识别：{{ durableOcrSummary(file) }}
           </p>
           <p
             v-if="durableFileError(file)"
@@ -1994,7 +1993,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               size="small"
               type="info"
             >
-              OCR
+              自动识别
             </el-tag>
             <el-tag
               v-if="isDurableRecognitionRunning(durableFileByItemId(scope.row.id))"
@@ -2240,7 +2239,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               size="small"
               type="info"
             >
-              OCR
+              自动识别
             </el-tag>
             <el-tag
               v-if="mobileItemNeedsAttention(item)"
@@ -2774,7 +2773,7 @@ async function retryItemRecognition(id: string): Promise<void> {
         </p>
       </el-form-item>
       <el-form-item
-        v-if="!sourceRequiresItinerary && editor.category === 'local_transport'"
+        v-if="editor.category === 'local_transport'"
         label="市内交通类型"
       >
         <el-select
@@ -2798,7 +2797,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       </el-form-item>
       <template v-if="editorIsTaxi">
         <p class="field-help">
-          {{ editor.transportType === 'ride_hailing' || sourceRequiresItinerary ? '网约车费用必须有对应行程单。' : '出租车费用可按需关联行程单。' }}
+          {{ editor.transportType === 'ride_hailing' ? '网约车费用必须有对应行程单。' : '出租车费用可按需关联行程单。' }}
         </p>
         <el-form-item label="对应行程单">
           <el-select

@@ -237,6 +237,7 @@ const TravelApprovalSelectorStub = defineComponent({
     modelValue: { type: Array, required: true },
     linkedApprovals: { type: Array, default: () => [] },
     readonly: { type: Boolean, default: false },
+    busy: { type: Boolean, default: false },
     requiredStartDate: { type: String, default: '' },
     requiredEndDate: { type: String, default: '' },
     single: { type: Boolean, default: false },
@@ -527,7 +528,9 @@ describe('ReimburseView single-form OA flow', () => {
     },
   )
 
-  it('derives a multi-department user scope from the selected travel approval', async () => {
+  it.each([false, true])(
+    'derives a multi-department user scope from the selected travel approval without showing a submission-stage state (mobile=%s)',
+    async (mobile) => {
     const { wrapper } = await mountView((auth) => {
       auth.status = 'department_required'
       auth.session!.selectedDepartment = null
@@ -535,21 +538,30 @@ describe('ReimburseView single-form OA flow', () => {
         { id: '100', name: '技术管理中心' },
         { id: '200', name: '工业物联二部' },
       ]
-    })
-    vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
+    }, false, mobile)
+    const departmentResolution = deferred<Awaited<ReturnType<typeof selectDepartmentFromTravelApproval>>>()
+    vi.mocked(selectDepartmentFromTravelApproval).mockReturnValue(departmentResolution.promise)
+    const resolvedDepartment = {
       selectedDepartment: { id: '200', name: '工业物联二部' },
       selectionRequired: false,
       departments: [
         { id: '100', name: '技术管理中心' },
         { id: '200', name: '工业物联二部' },
       ],
-    })
+    }
 
     expect(wrapper.text()).not.toContain('选择本次报销部门')
     expect(wrapper.text()).not.toContain('确认部门')
     const selector = wrapper.findComponent(TravelApprovalSelectorStub)
     expect(selector.props('single')).toBe(true)
     selector.vm.$emit('update:modelValue', [selection])
+    await nextTick()
+    await vi.waitFor(() => expect(selectDepartmentFromTravelApproval).toHaveBeenCalledOnce())
+
+    expect(selector.props('busy')).toBe(true)
+    expect(selector.props('readonly')).toBe(false)
+
+    departmentResolution.resolve(resolvedDepartment)
     await flushPromises()
 
     expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(selection, undefined)
@@ -563,7 +575,8 @@ describe('ReimburseView single-form OA flow', () => {
       { signal: expect.any(AbortSignal) },
     )
     wrapper.unmount()
-  })
+    },
+  )
 
   it.each([false, true])(
     'asks for a filtered current department when the approval department is historical (mobile=%s)',
@@ -688,7 +701,8 @@ describe('ReimburseView single-form OA flow', () => {
       expect(summary.text()).toContain('境内出差')
       expect(summary.text()).toContain('2026-08-31')
       expect(summary.text()).toContain('2026-09-02')
-      expect(summary.text()).toContain('正在核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(true)
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('readonly')).toBe(false)
       expect(replaceReimbursementRelatedApprovals).not.toHaveBeenCalled()
 
       departmentResolution.resolve(resolvedDepartment)
@@ -920,7 +934,8 @@ describe('ReimburseView single-form OA flow', () => {
       expect(summary.text()).toContain('境内出差')
       expect(summary.text()).toContain('2026-08-31')
       expect(summary.text()).toContain('2026-09-02')
-      expect(summary.text()).toContain('正在核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(true)
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('readonly')).toBe(false)
       expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce()
 
       serverDraft = makeDraft({
@@ -942,8 +957,8 @@ describe('ReimburseView single-form OA flow', () => {
       pendingSave.resolve(serverDraft)
       await flushPromises()
 
-      expect(summary.text()).not.toContain('正在核验')
-      expect(summary.text()).toContain('已核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
+      expect(summary.find('[data-testid="related-approval-verification-status"]').exists()).toBe(false)
       wrapper.unmount()
     },
   )
@@ -978,7 +993,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(summary.text()).not.toContain('北京分公司')
       expect(summary.text()).not.toContain('26007 · MES 项目')
       expect(summary.text()).toContain('网络中断')
-      expect(summary.text()).not.toContain('正在核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
       wrapper.unmount()
     },
   )
@@ -1022,7 +1037,8 @@ describe('ReimburseView single-form OA flow', () => {
       expect(summary.text()).toContain('查询时的出差类别')
       expect(summary.text()).toContain('2026-08-31')
       expect(summary.text()).toContain('2026-09-02')
-      expect(summary.text()).toContain('正在核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(true)
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('readonly')).toBe(false)
 
       const authoritativeApproval: ReimbursementRelatedApproval = {
         ...linkedApproval,
@@ -1054,7 +1070,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(summary.text()).toContain('2026-09-06')
       expect(summary.text()).not.toContain('查询时的出差类别')
       expect(summary.text()).not.toContain('2026-08-31')
-      expect(summary.text()).toContain('已核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
       wrapper.unmount()
     },
   )
@@ -1102,7 +1118,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(wrapper.findComponent(TravelApprovalSelectorStub).props('modelValue')).toEqual([selection])
       expect(summary.text()).toContain('北京分公司')
       expect(summary.text()).toContain('26007 · MES 项目')
-      expect(summary.text()).toContain('已核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
       expect(summary.text()).not.toContain('响应丢失')
       expect(wrapper.get('[data-testid="autosave-status"]').text()).not.toContain('保存失败')
       expect(drafts.mutationError).toBe('')
@@ -1143,7 +1159,7 @@ describe('ReimburseView single-form OA flow', () => {
       await flushPromises()
 
       expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce()
-      expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('已核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
       expect(wrapper.text()).not.toContain('重新核验响应丢失')
       expect(drafts.mutationError).toBe('')
       wrapper.unmount()
@@ -1177,7 +1193,7 @@ describe('ReimburseView single-form OA flow', () => {
 
       expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledOnce()
       expect(updateReimbursementDraft).not.toHaveBeenCalled()
-      expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('已核验')
+      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
 
       await vi.advanceTimersByTimeAsync(650)
       await flushPromises()
