@@ -3,6 +3,7 @@ name: dingtalk-travel-reimbursement
 services:
   backend:
     platform: ${TARGET_PLATFORM:-linux/amd64}
+    image: ${BACKEND_IMAGE:-ghcr.io/beardrinkbeer/dingtalk-travel-reimbursement/backend:latest}
     build:
       context: ./backend
       args:
@@ -116,6 +117,7 @@ services:
 
   web:
     platform: ${TARGET_PLATFORM:-linux/amd64}
+    image: ${WEB_IMAGE:-ghcr.io/beardrinkbeer/dingtalk-travel-reimbursement/frontend:latest}
     build:
       context: .
       dockerfile: frontend/Dockerfile

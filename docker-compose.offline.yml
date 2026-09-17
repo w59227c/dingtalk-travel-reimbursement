@@ -1,0 +1,85 @@
+name: dingtalk-travel-reimbursement
+
+services:
+  backend:
+    platform: ${TARGET_PLATFORM:-linux/amd64}
+    image: ${BACKEND_IMAGE:-ghcr.io/beardrinkbeer/dingtalk-travel-reimbursement/backend:latest}
+    env_file:
+      - .env
+    environment:
+      # These files and directories are already included or created in the image/volumes.
+      EXCEL_TEMPLATE_PATH: /app/app/templates/expense_template.xlsx
+      REIMBURSEMENT_STAGING_DIR: /app/staging
+      OCR_MODE: local
+      OCR_ENGINE: paddle_static
+      OCR_DETECTION_MODEL_DIR: ${OCR_DETECTION_MODEL_DIR:-/opt/expense/models/PP-OCRv6_small_det}
+      OCR_RECOGNITION_MODEL_DIR: ${OCR_RECOGNITION_MODEL_DIR:-/opt/expense/models/PP-OCRv6_small_rec}
+    volumes:
+      - sqlite_data:/app/data
+      - reimbursement_staging:/app/staging
+      - ${OCR_MODEL_HOST_DIR:-./backend/models}:/opt/expense/models:ro
+    read_only: true
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-3g}
+    pids_limit: ${BACKEND_PIDS_LIMIT:-128}
+    tmpfs:
+      - /tmp/expense:uid=10001,gid=10001,mode=0700,size=1073741824
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/ready', timeout=5).read()
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${BACKEND_LOG_MAX_SIZE:-10m}
+        max-file: ${BACKEND_LOG_MAX_FILES:-3}
+    restart: unless-stopped
+
+  web:
+    platform: ${TARGET_PLATFORM:-linux/amd64}
+    image: ${WEB_IMAGE:-ghcr.io/beardrinkbeer/dingtalk-travel-reimbursement/frontend:latest}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8080}:8080"
+    # Older Docker Compose versions support file-backed configs only.
+    # These files already exist in the repository's nginx/ directory.
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/expense-proxy.conf:/etc/nginx/conf.d/expense-proxy.inc:ro
+    user: "101:101"
+    read_only: true
+    mem_limit: ${WEB_MEMORY_LIMIT:-128m}
+    pids_limit: ${WEB_PIDS_LIMIT:-64}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:uid=101,gid=101,mode=0700,size=8m
+      - /var/cache/nginx:uid=101,gid=101,mode=0700,size=32m
+      - /var/run:uid=101,gid=101,mode=0700,size=1m
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: ${WEB_LOG_MAX_SIZE:-5m}
+        max-file: ${WEB_LOG_MAX_FILES:-3}
+    restart: unless-stopped
+
+volumes:
+  sqlite_data:
+  reimbursement_staging:
