@@ -1,4 +1,28 @@
 import type { ExcludedPeriodInput, TripInput } from '@/types/expenses'
+import { tripPeriodFromTime } from '@/utils/tripPeriod'
+
+export function overlappingExcludedPeriods(
+  periods: readonly ExcludedPeriodInput[],
+): [number, number] | null {
+  const ordered = periods.flatMap((period, index) => {
+    const startPeriod = tripPeriodFromTime(period.startTime)
+    const endPeriod = tripPeriodFromTime(period.endTime)
+    if (!period.startDate || !period.endDate || !startPeriod || !endPeriod) return []
+    return [{
+      start: `${period.startDate} ${startPeriod === 'morning' ? 0 : 1}`,
+      end: `${period.endDate} ${endPeriod === 'morning' ? 0 : 1}`,
+      index,
+    }]
+  }).sort((left, right) => left.start.localeCompare(right.start) || left.end.localeCompare(right.end))
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1]!
+    const current = ordered[index]!
+    if (current.start <= previous.end) {
+      return [Math.min(previous.index, current.index), Math.max(previous.index, current.index)]
+    }
+  }
+  return null
+}
 
 export interface SubsidyTripGroup {
   key: string

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.domain.subsidy import SubsidyCalculation, calculate_subsidy
+from app.domain.subsidy import (
+    SubsidyCalculation,
+    calculate_subsidy,
+    validate_non_overlapping_exclusions,
+)
 from app.schemas.expenses import TripInput, TripPurpose
 from app.services.application_settings import get_expense_settings
 
@@ -51,6 +55,11 @@ def calculate_trip_subsidies(
     results: list[SubsidyCalculation] = []
     for trip in merge_overlapping_subsidy_trips(trips):
         trip_type = trip.subsidy_trip_type()
+        excluded_periods = [item.as_period() for item in trip.excluded_periods]
+        # Validate after merging approvals: exclusions on different source rows
+        # still belong to the same displayed subsidy period. Historical locked
+        # snapshots retain their original union calculation in the domain layer.
+        validate_non_overlapping_exclusions(excluded_periods)
         results.append(
             calculate_subsidy(
                 trip_type=trip_type,
@@ -61,7 +70,7 @@ def calculate_trip_subsidies(
                 no_subsidy_exception=trip.no_subsidy_exception,
                 manual_subsidy_amount=trip.manual_subsidy_amount,
                 related_approval_id=trip.related_approval_id,
-                excluded_periods=[item.as_period() for item in trip.excluded_periods],
+                excluded_periods=excluded_periods,
             )
         )
     return results

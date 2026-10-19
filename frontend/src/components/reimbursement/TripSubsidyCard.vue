@@ -234,7 +234,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
               </el-button>
             </div>
             <p class="excluded-periods__hint">
-              回家探亲：上午出发给半天补助，下午出发给全天；返回出差：上午出发给全天，下午出发给半天。中间完整日期不补助，重叠时段只扣一次。
+              回家探亲：上午出发给半天补助，下午出发给全天；返回出差：上午出发给全天，下午出发给半天。中间完整日期不补助，各段不能占用同一个上午或下午。
             </p>
             <div
               v-for="(excluded, excludedIndex) in group.excludedPeriods"
@@ -318,7 +318,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           </div>
 
           <div
-            v-if="subsidyFor(group, index)"
+            v-if="subsidyFor(group, index) && (props.readonly || !expense.policyInputError)"
             class="subsidy-preview"
             role="status"
             aria-live="polite"
@@ -335,7 +335,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
         </article>
 
         <p
-          v-if="expense.policyInputError"
+          v-if="!props.readonly && expense.policyInputError"
           class="field-error"
         >
           {{ expense.policyInputError }}

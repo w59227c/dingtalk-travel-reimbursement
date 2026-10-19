@@ -23,7 +23,7 @@ import { itineraryConfirmationWarnings, matchItineraries } from '@/utils/itinera
 import { centsToMoney, moneyToCents } from '@/utils/money'
 import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime } from '@/utils/tripPeriod'
-import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
+import { groupOverlappingSubsidyTrips, overlappingExcludedPeriods } from '@/utils/subsidyTripGroups'
 
 const SPECIAL_TRIP_TYPES = new Set<TripType>([
   'same_city_project',
@@ -136,7 +136,7 @@ export const useExpenseStore = defineStore('expense', () => {
     const groups = subsidyTrips.value.length
       ? groupOverlappingSubsidyTrips(subsidyTrips.value)
       : [{ ...trip, excludedPeriods: trip.excludedPeriods }]
-    for (const group of groups) {
+    for (const [groupIndex, group] of groups.entries()) {
       for (const excluded of group.excludedPeriods) {
         if (!isCalendarDate(excluded.startDate) || !isCalendarDate(excluded.endDate)
           || !tripPeriodFromTime(excluded.startTime) || !tripPeriodFromTime(excluded.endTime)) {
@@ -149,6 +149,10 @@ export const useExpenseStore = defineStore('expense', () => {
           || end > `${group.endDate} ${group.endTime}`) {
           return '非补助时段必须在本项出差时段内'
         }
+      }
+      const overlap = overlappingExcludedPeriods(group.excludedPeriods)
+      if (overlap) {
+        return `补助 ${groupIndex + 1} 的非补助时段 ${overlap[0] + 1} 与时段 ${overlap[1] + 1} 重叠，请调整日期或出发时段`
       }
     }
     return ''

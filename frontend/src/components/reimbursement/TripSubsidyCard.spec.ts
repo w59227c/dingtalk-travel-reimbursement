@@ -264,7 +264,7 @@ describe('TripSubsidyCard', () => {
     expect(first.startDate).toBe('2026-09-02')
     await add.trigger('click')
     Object.assign(expense.subsidyTrips[0]!.excludedPeriods![1]!, {
-      startDate: '2026-09-02', endDate: '2026-09-03', endTime: '18:00',
+      startDate: '2026-09-03', endDate: '2026-09-03', endTime: '18:00',
     })
     expect(expense.tripPayloads()[0]?.excludedPeriods).toHaveLength(2)
     expect(expense.subsidyTrips[1]?.excludedPeriods).toBeUndefined()
@@ -276,6 +276,56 @@ describe('TripSubsidyCard', () => {
     expect(readonlyWrapper.findComponent({ name: 'ElForm' }).props('disabled')).toBe(true)
     await readonlyWrapper.get('[aria-label="补助 1 添加非补助时段"]').trigger('click')
     expect(expense.subsidyTrips[0]?.excludedPeriods).toHaveLength(1)
+  })
+
+  it.each([false, true])('blocks overlapping absences across merged approvals until repaired, mobile=%s', async (mobile) => {
+    const selected = [approvals[0]!, { ...approvals[1]!, startDate: '2026-09-02' }]
+    const expense = useExpenseStore()
+    const wrapper = mountCard('business', selected, false, mobile)
+    expense.subsidyTrips[0]!.excludedPeriods = [{
+      startDate: '2026-09-01', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00',
+    }]
+    expense.subsidyTrips[1]!.excludedPeriods = [{
+      startDate: '2026-09-02', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00',
+    }]
+    await nextTick()
+    expect(wrapper.get('.field-error').text()).toContain('非补助时段 1 与时段 2 重叠')
+    expect(expense.tripPayloads()).toEqual([])
+    await expense.refreshCalculations()
+    expect(calculateTotals).not.toHaveBeenCalled()
+    expect(wrapper.find('.subsidy-preview').exists()).toBe(false)
+    const second = expense.subsidyTrips[1]!.excludedPeriods![0]!
+    second.startDate = '2026-09-03'
+    second.endDate = '2026-09-05'
+    await nextTick()
+    expect(expense.policyInputError).toBe('')
+    expect(expense.tripPayloads()).toHaveLength(2)
+    expect(wrapper.find('.field-error').exists()).toBe(false)
+    second.startTime = '09:00'
+    await nextTick()
+    expect(wrapper.get('.field-error').text()).toContain('非补助时段 1 与时段 2 重叠')
+    second.startTime = '18:00'
+    await nextTick()
+    expect(expense.policyInputError).toBe('')
+  })
+
+  it.each([false, true])('preserves the frozen result for readonly historical overlapping absences, mobile=%s', async (mobile) => {
+    const expense = useExpenseStore()
+    const wrapper = mountCard('business', approvals, true, mobile)
+    const excluded = { startDate: '2026-09-01', startTime: '09:00', endDate: '2026-09-03', endTime: '18:00' }
+    expense.subsidyTrips[0]!.excludedPeriods = [{ ...excluded }, { ...excluded }]
+    expense.totals = {
+      expenseTotal: '0.00', subsidyTotal: '100.00', totalAmount: '100.00',
+      receiptCount: 0, uppercaseAmount: '壹佰元整', subsidy: null,
+      subsidies: [{
+        relatedApprovalId: 'approval-1', tripType: 'business', calendarDays: 3,
+        effectiveDays: '1.0', excludedDays: '2.0', dailyRate: '100.00', total: '100.00',
+      }],
+    }
+    await nextTick()
+    expect(wrapper.get('.subsidy-preview').text()).toContain('补助 ¥100.00')
+    expect(wrapper.find('.field-error').exists()).toBe(false)
+    expect(calculateTotals).not.toHaveBeenCalled()
   })
 
   it('allows a restored subsidy to be turned off when its category can no longer be resolved', async () => {

@@ -760,6 +760,57 @@ def test_disabled_worker_rejects_new_submission_without_locking_draft(
     assert edited.json()["data"]["revision"] == 5
 
 
+def test_overlapping_absences_in_an_existing_draft_block_preview_review_and_submission(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement_schema, travel_schema)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    periods = [
+        {
+            "startDate": "2026-09-01", "startTime": "18:00",
+            "endDate": "2026-09-03", "endTime": "09:00",
+        },
+        {
+            "startDate": "2026-09-02", "startTime": "18:00",
+            "endDate": "2026-09-03", "endTime": "09:00",
+        },
+    ]
+    # Simulate a previously saved draft from the version that permitted overlaps.
+    with client.app.state.database_session_factory() as database:
+        draft = database.get(ReimbursementDraft, draft_id)
+        raw = json.loads(draft.input_json)
+        raw["trip"]["excludedPeriods"] = periods
+        draft.input_json = json.dumps(raw, ensure_ascii=False)
+        database.commit()
+    restored = client.get(f"/api/reimbursements/drafts/{draft_id}")
+    assert restored.status_code == 200
+    assert restored.json()["data"]["input"]["trip"]["excludedPeriods"] == periods
+    for path in (
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+        f"/api/reimbursements/drafts/{draft_id}/review",
+        f"/api/oa/reimbursements/{draft_id}/submit",
+    ):
+        response = client.post(
+            path,
+            json={"expectedRevision": 4},
+            headers={
+                "X-CSRF-Token": csrf,
+                "Idempotency-Key": "99999999-9999-4999-8999-999999999999",
+            },
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "OVERLAPPING_EXCLUDED_PERIODS"
+    with client.app.state.database_session_factory() as database:
+        draft = database.get(ReimbursementDraft, draft_id)
+        assert draft.locked_at is None
+        assert draft.revision == 4
+        assert database.scalar(select(ReimbursementSubmission.id)) is None
+    assert workflow.create_calls == 0
+
+
 def test_submit_detects_live_template_drift_before_locking_draft(
     enabled_manual_worker_client,
 ) -> None:
@@ -1249,12 +1300,12 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
             {
                 "startDate": "2026-09-01",
                 "startTime": "09:00",
-                "endDate": "2026-09-03",
-                "endTime": "18:00",
+                "endDate": "2026-09-02",
+                "endTime": "09:00",
             },
             {
                 "startDate": "2026-09-02",
-                "startTime": "09:00",
+                "startTime": "18:00",
                 "endDate": "2026-09-03",
                 "endTime": "18:00",
             },
@@ -1325,11 +1376,11 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     workbook = load_workbook(io.BytesIO(storage.put_files[-1].content))
     subsidy_rows = [row for row in workbook.active.iter_rows() if row[1].value == "出差补助"]
     assert len(subsidy_rows) == 1
-    assert subsidy_rows[0][6].value == (100 if with_exclusions else 300)
+    assert subsidy_rows[0][6].value == (200 if with_exclusions else 300)
     if with_exclusions:
-        assert "扣除2天非补助时段" in subsidy_rows[0][3].value
+        assert "扣除1天非补助时段" in subsidy_rows[0][3].value
         assert any(
-            "已扣除2.0天非补助时段" in item.value for item in workflow.created_command.form_values
+            "已扣除1.0天非补助时段" in item.value for item in workflow.created_command.form_values
         )
 
     with client.app.state.database_session_factory() as database:
@@ -1343,7 +1394,7 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
         assert submission.snapshot_version == 7
         frozen = json.loads(submission.form_snapshot_json)
         if with_exclusions:
-            assert frozen["subsidy"]["excludedDays"] == "2.0"
+            assert frozen["subsidy"]["excludedDays"] == "1.0"
             assert frozen["input"]["trip"]["excludedPeriods"] == periods
         assert submission.status == ReimbursementSubmissionStatus.SUBMITTED.value
         assert submission.approval_url.startswith("dingtalk://dingtalkclient/action/openapp?")

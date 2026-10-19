@@ -362,7 +362,7 @@ function installServerMocks(): void {
   vi.mocked(submitOaReimbursement).mockResolvedValue(submissionResult())
 }
 
-async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void, realMaterials = false, mobile = false): Promise<{
+async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void, realMaterials = false, mobile = false, realSummary = false): Promise<{
   wrapper: VueWrapper
   expense: ReturnType<typeof useExpenseStore>
   drafts: ReturnType<typeof useReimbursementDraftStore>
@@ -402,7 +402,7 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
       plugins: [pinia, ElementPlus, router],
       stubs: {
         ExpenseItemsCard: realMaterials ? false : ExpenseItemsCardStub,
-        ExpenseSummaryCard: ExpenseSummaryCardStub,
+        ExpenseSummaryCard: realSummary ? false : ExpenseSummaryCardStub,
         RouterLink: {
           props: ['to'],
           template: '<a :data-to="to"><slot /></a>',
@@ -1525,6 +1525,65 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('previews frozen locked subsidies with historical overlaps without saving, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const trip = {
+      relatedApprovalId: linkedApproval.processInstanceId, tripType: 'business' as const,
+      startDate: '2026-09-01', startTime: '09:00', endDate: '2026-09-03', endTime: '18:00',
+      excludedPeriods: [
+        { startDate: '2026-09-01', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00' },
+        { startDate: '2026-09-02', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00' },
+      ],
+    }
+    serverDraft = makeDraft({
+      status: 'LOCKED', lockedAt: '2026-09-04T00:01:00Z', relatedApprovalCount: 1,
+      relatedApprovals: [{ ...linkedApproval, startDate: trip.startDate, endDate: trip.endDate }],
+      input: {
+        ...baseInput, trips: [trip],
+        editingState: { includeSubsidy: true, trip, trips: [trip] },
+      },
+      totals: { ...makeDraft().totals, subsidyTotal: '200.00', totalAmount: '244.89' },
+    })
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile, true)
+    const preview = vi.spyOn(drafts, mobile ? 'openExcelPreviewInDingTalk' : 'downloadExcelPreview')
+      .mockResolvedValue()
+    await vi.advanceTimersByTimeAsync(650)
+    expect(expense.tripPayloads()).toEqual([])
+    expect(wrapper.findComponent({ name: 'ExpenseSummaryCard' }).props('previewDisabledReason')).toBe('')
+    expect(wrapper.findComponent({ name: 'ExpenseSummaryCard' }).props('beforePreview')).toBeUndefined()
+    await visibleButton(wrapper, mobile ? '打开 Excel' : '预览 Excel').trigger('click')
+    await flushPromises()
+    expect(preview).toHaveBeenCalledOnce()
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    expect(calculateTotals).not.toHaveBeenCalled()
+    expect(expense.displaySubsidyTotal).toBe('200.00')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('autosaves and restores overlapping exclusion input for correction, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    expense.includeSubsidy = true
+    Object.assign(expense.trip, {
+      startDate: '2026-09-01', endDate: '2026-09-03', excludedPeriods: [
+        { startDate: '2026-09-01', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00' },
+        { startDate: '2026-09-02', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00' },
+      ],
+    })
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    const sent = vi.mocked(updateReimbursementDraft).mock.calls.at(-1)![2]
+    expect(sent.trip).toBeNull()
+    expect(sent.editingState?.trip.excludedPeriods).toHaveLength(2)
+    wrapper.unmount()
+    const restored = await mountView(undefined, false, mobile)
+    expect(restored.expense.trip.excludedPeriods).toHaveLength(2)
+    expect(restored.expense.policyInputError).toContain('非补助时段 1 与时段 2 重叠')
+    restored.expense.trip.excludedPeriods.pop()
+    expect(restored.expense.policyInputError).toBe('')
+    restored.wrapper.unmount()
+  })
+
   it.each([false, true])('explains invalid subsidy ranges beside Excel preview until repaired, mobile=%s', async (mobile) => {
     const { wrapper, expense } = await mountView(undefined, false, mobile)
     expense.includeSubsidy = true
@@ -1543,6 +1602,15 @@ describe('ReimburseView single-form OA flow', () => {
     await nextTick()
     expect(summary.props('previewDisabledReason')).not.toContain('非补助时段')
     expect(expense.tripPayload()?.excludedPeriods).toHaveLength(1)
+    expense.trip.excludedPeriods.push({
+      startDate: '2026-09-02', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00',
+    })
+    await nextTick()
+    expect(summary.props('previewDisabledReason')).toContain('非补助时段 1 与时段 2 重叠')
+    expect(expense.tripPayloads()).toEqual([])
+    expense.trip.excludedPeriods.pop()
+    await nextTick()
+    expect(summary.props('previewDisabledReason')).not.toContain('重叠')
     wrapper.unmount()
   })
 

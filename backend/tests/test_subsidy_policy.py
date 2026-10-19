@@ -64,9 +64,7 @@ def test_excluded_period_departure_rules(start_time, end_time, paid_days, exclud
     assert result.total == Decimal(paid_days) * 150
 
 
-def test_multiple_overlapping_exclusions_and_single_day_boundaries(client_factory):
-    client = client_factory(auth_mock_enabled=True)
-    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+def test_legacy_calculation_unions_overlapping_exclusions_and_single_day_boundaries():
     periods = [
         excluded(),
         excluded(),
@@ -74,16 +72,60 @@ def test_multiple_overlapping_exclusions_and_single_day_boundaries(client_factor
         excluded("2026-10-20", "2026-10-22", "18:00", "09:00"),
         excluded("2026-10-25", "2026-10-25"),
     ]
+    value = TripInput.model_validate(trip(excludedPeriods=periods))
+    result = calculate_subsidy(
+        trip_type=value.subsidy_trip_type(),
+        period=value.as_period(),
+        configured_daily_rate=Decimal("150"),
+        excluded_periods=[item.as_period() for item in value.excluded_periods],
+    )
+    assert result.excluded_days == Decimal("4.0")
+    assert result.effective_days == Decimal("27.0")
+    assert result.total == Decimal("4050.00")
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        excluded(),
+        excluded("2026-10-11", "2026-10-12"),
+        excluded("2026-10-09", "2026-10-14"),
+        excluded("2026-10-12", "2026-10-15"),
+        excluded("2026-10-13", "2026-10-15", "18:00", "09:00"),
+        excluded("2026-10-13", "2026-10-13", "18:00", "18:00"),
+    ],
+)
+def test_overlapping_personal_absences_are_rejected_even_without_overlapping_deductions(
+    client_factory, other
+):
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
     response = client.post(
         "/api/calculate/totals",
         headers=headers,
-        json={"trip": trip(excludedPeriods=periods), "items": []},
+        json={"trip": trip(excludedPeriods=[excluded(), other]), "items": []},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "OVERLAPPING_EXCLUDED_PERIODS"
+    assert "时段 1 与时段 2 重叠" in response.json()["error"]["message"]
+
+
+def test_morning_return_and_afternoon_departure_on_same_day_are_separate(client_factory):
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    response = client.post(
+        "/api/calculate/totals",
+        headers=headers,
+        json={
+            "trip": trip(excludedPeriods=[
+                excluded("2026-10-13", "2026-10-15", "18:00", "09:00"),
+                excluded("2026-10-10", "2026-10-13", "09:00", "09:00"),
+            ]),
+            "items": [],
+        },
     )
     assert response.status_code == 200, response.text
-    result = response.json()["data"]["subsidy"]
-    assert result["excludedDays"] == "4.0"
-    assert result["effectiveDays"] == "27.0"
-    assert result["total"] == "4050.00"
+    assert response.json()["data"]["subsidy"]["excludedDays"] == "3.5"
 
 
 @pytest.mark.parametrize(
@@ -170,7 +212,8 @@ def test_eight_settings_preserve_legacy_rate_and_allow_independent_zero_and_over
         assert client.put("/api/admin/settings", headers=headers, json=body).status_code == 422
 
 
-def test_overlapping_approvals_share_exclusions_without_double_payment_or_deduction(client_factory):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_merged_approvals_validate_exclusions_across_original_rows(client_factory, overlap):
     client = client_factory(auth_mock_enabled=True)
     headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
     response = client.post(
@@ -186,17 +229,24 @@ def test_overlapping_approvals_share_exclusions_without_double_payment_or_deduct
                 trip(
                     relatedApprovalId="b",
                     startDate="2026-10-15",
-                    excludedPeriods=[excluded("2026-10-15", "2026-10-20")],
+                    excludedPeriods=[
+                        excluded("2026-10-15", "2026-10-20")
+                        if overlap else excluded("2026-10-25", "2026-10-27")
+                    ],
                 ),
             ],
             "items": [],
         },
     )
+    if overlap:
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "OVERLAPPING_EXCLUDED_PERIODS"
+        return
     assert response.status_code == 200, response.text
     result = response.json()["data"]["subsidies"]
     assert len(result) == 1
-    assert result[0]["excludedDays"] == "10.0"
-    assert result[0]["total"] == "3150.00"
+    assert result[0]["excludedDays"] == "12.0"
+    assert result[0]["total"] == "2850.00"
 
 
 def test_exclusions_persist_in_drafts_and_unfinished_edits_block_preview(
@@ -228,11 +278,13 @@ def test_exclusions_persist_in_drafts_and_unfinished_edits_block_preview(
     assert conflict.status_code == 409
 
 
-def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable():
+@pytest.mark.parametrize("historical_overlap", [False, True])
+def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(historical_overlap):
     source = _source()
     period = excluded("2026-09-01", "2026-09-03")
     trip_input = TripInput.model_validate(
-        source.draft_input.trip.model_dump(by_alias=True) | {"excludedPeriods": [period]}
+        source.draft_input.trip.model_dump(by_alias=True)
+        | {"excludedPeriods": [period, period] if historical_overlap else [period]}
     )
     result = calculate_subsidy(
         trip_type=trip_input.subsidy_trip_type(),

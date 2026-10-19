@@ -26,7 +26,7 @@ const payload = buildCalculateTotalsPayload({
   excludedPeriods: [{
     startDate: '2026-09-10', startTime: '09:00', endDate: '2026-09-13', endTime: '18:00',
   }, {
-    startDate: '2026-09-11', startTime: '09:00', endDate: '2026-09-12', endTime: '18:00',
+    startDate: '2026-09-20', startTime: '09:00', endDate: '2026-09-22', endTime: '18:00',
   }],
 }, [{
   id: 'ocr-test-file', source: 'ocr', category: 'local_transport',
@@ -53,10 +53,16 @@ process.stdout.write(JSON.stringify(payload));
     result = response.json()["data"]
     assert result["expenseTotal"] == "44.89"
     assert result["subsidy"]["calendarDays"] == 30
-    assert result["subsidy"]["effectiveDays"] == "27.0"
-    assert result["subsidy"]["excludedDays"] == "3.0"
-    assert result["subsidyTotal"] == "2700.00"
+    assert result["subsidy"]["effectiveDays"] == "25.0"
+    assert result["subsidy"]["excludedDays"] == "5.0"
+    assert result["subsidyTotal"] == "2500.00"
     assert "sourceFileId" not in payload["items"][0]
+
+    overlapping = json.loads(json.dumps(payload))
+    overlapping["trip"]["excludedPeriods"][1] = overlapping["trip"]["excludedPeriods"][0]
+    rejected = client.post("/api/calculate/totals", json=overlapping, headers=headers)
+    assert rejected.status_code == 422
+    assert rejected.json()["error"]["code"] == "OVERLAPPING_EXCLUDED_PERIODS"
 
     # The exact previous payload explains the user's 422, independently of OCR.
     payload["items"][0].pop("id")

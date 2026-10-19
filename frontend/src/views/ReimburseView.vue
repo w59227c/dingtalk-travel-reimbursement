@@ -266,7 +266,7 @@ const previewDisabledReason = computed(() => expense.itemReadinessError
   || subsidyInputError.value
   || (!budgetCodeValue.value ? '请先选择预算代码' : '')
   || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
-  || (props.mobile && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
+  || (props.mobile && !formReadOnly.value && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
   || (submitFlowPending.value ? '正在提交，请稍候' : ''))
 const submissionProgress: ReimbursementSubmissionStatus[] = [
   'QUEUED', 'VALIDATING', 'GENERATING_EXCEL', 'UPLOADING', 'OA_CREATING', 'VERIFYING', 'SUBMITTED',
@@ -1336,7 +1336,7 @@ onBeforeUnmount(() => {
             <ExpenseSummaryCard
               :mobile="props.mobile"
               :preview-disabled-reason="previewDisabledReason"
-              :before-preview="props.mobile ? undefined : flushAutosave"
+              :before-preview="props.mobile || formReadOnly ? undefined : flushAutosave"
             />
             <el-card
               shadow="never"
