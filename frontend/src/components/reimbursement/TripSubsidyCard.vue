@@ -262,6 +262,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                   <el-date-picker
                     :model-value="excluded.startDate"
                     type="date"
+                    :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
                     value-format="YYYY-MM-DD"
                     format="YYYY-MM-DD"
                     :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 出发日期`"
@@ -286,6 +287,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                   <el-date-picker
                     :model-value="excluded.endDate"
                     type="date"
+                    :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
                     value-format="YYYY-MM-DD"
                     format="YYYY-MM-DD"
                     :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回日期`"
@@ -444,8 +446,33 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
 .excluded-period { margin-top: 12px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .excluded-period .trip-grid { margin-top: 12px; }
 .excluded-period :deep(.el-date-editor.el-input) { width: 100%; min-width: 0; }
-.excluded-periods--mobile .trip-grid { grid-template-columns: minmax(0, 1fr); }
+.excluded-periods--mobile .trip-grid {
+  grid-template-columns: minmax(0, 1fr) max-content;
+  column-gap: 8px;
+}
+
+.excluded-periods--mobile .el-form-item {
+  min-width: 0;
+}
+
+.excluded-periods--mobile :deep(.el-radio-button__inner) {
+  padding-inline: 8px;
+}
+
+.excluded-periods--mobile :deep(.el-input__wrapper) {
+  padding-inline: 8px;
+}
+
 .excluded-periods--mobile .excluded-periods__heading { flex-wrap: wrap; }
+
+:global(.excluded-period-picker--mobile .el-date-picker) {
+  width: min(322px, calc(100vw - 24px));
+}
+
+:global(.excluded-period-picker--mobile .el-date-picker .el-picker-panel__content) {
+  width: calc(100% - 24px);
+  margin: 12px;
+}
 
 .policy-confirmation {
   margin-top: 14px;
@@ -488,6 +515,12 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
   .subsidy-preview strong {
     width: 100%;
     margin-left: 0;
+  }
+}
+
+@media (max-width: 359px) {
+  .excluded-periods--mobile .trip-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>
