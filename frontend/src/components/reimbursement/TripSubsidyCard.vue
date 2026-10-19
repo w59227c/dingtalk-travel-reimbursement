@@ -212,10 +212,11 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           </div>
 
           <el-alert
-            title="自动计算规则"
-            description="出发日上午计 1 天、下午计 0.5 天；返回日上午计 0.5 天、下午计 1 天。同一天最多计 1 天。"
+            title="出差时段计算规则"
+            description="出发日：上午计 1 天，下午计 0.5 天；返回日：上午计 0.5 天，下午计 1 天。中间完整日期每天计 1 天，同一天最多计 1 天。"
             type="info"
             :closable="false"
+            class="subsidy-rule"
           />
 
           <section
@@ -233,9 +234,13 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                 添加非补助时段
               </el-button>
             </div>
-            <p class="excluded-periods__hint">
-              出发日：上午出发给半天补助，下午出发给全天；返回日：上午出发给全天，下午出发给半天。中间完整日期不补助，各段不能占用同一个上午或下午。
-            </p>
+            <el-alert
+              title="非补助时段计算规则"
+              description="出发日：上午计 0.5 天，下午计 1 天；返回日：上午计 1 天，下午计 0.5 天。中间完整日期不计补助，各段不能占用同一个上午或下午。"
+              type="info"
+              :closable="false"
+              class="subsidy-rule"
+            />
             <div
               v-for="(excluded, excludedIndex) in group.excludedPeriods"
               :key="excludedIndex"
@@ -417,7 +422,25 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
 
 .excluded-periods { margin-top: 16px; }
 .excluded-periods__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.excluded-periods__hint { color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
+.subsidy-rule {
+  padding: 12px 14px;
+}
+
+.subsidy-rule :deep(.el-alert__title) {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.subsidy-rule :deep(.el-alert__description) {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.excluded-periods > .subsidy-rule {
+  margin-top: 12px;
+}
 .excluded-period { margin-top: 12px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .excluded-period .trip-grid { margin-top: 12px; }
 .excluded-period :deep(.el-date-editor.el-input) { width: 100%; min-width: 0; }
