@@ -345,11 +345,45 @@ describe('TripSubsidyCard', () => {
     expect(expense.includeSubsidy).toBe(false)
   })
 
-  it('locks all subsidy controls after submission', async () => {
+  it.each([false, true])('toggles from the card header without losing subsidy periods, mobile=%s', async (mobile) => {
     const expense = useExpenseStore()
-    const wrapper = mountCard('business', approvals, true)
+    const wrapper = mountCard('business', approvals, false, mobile)
+    expense.subsidyTrips[0]!.startTime = '18:00'
+    expense.subsidyTrips[0]!.excludedPeriods = [{
+      startDate: '2026-09-02', startTime: '09:00', endDate: '2026-09-03', endTime: '09:00',
+    }]
+    expense.subsidyTrips[1]!.endTime = '09:00'
+    await nextTick()
+    const saved = JSON.parse(JSON.stringify(expense.subsidyTrips))
+    const header = wrapper.get('.el-card__header')
+    const toggle = header.get('[role="switch"]')
+    expect(header.text()).toBe('出差补助（可选）')
+    expect(toggle.attributes('aria-label')).toBe('申请出差补助')
+    expect(wrapper.find('.el-form [role="switch"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('是否申请出差补助')
+
+    await toggle.trigger('click')
+    expect(expense.includeSubsidy).toBe(false)
+    expect(wrapper.find('.subsidy-item').exists()).toBe(false)
+    expect(expense.subsidyTrips).toEqual(saved)
+    expect(expense.tripPayloads()).toEqual([])
+
+    await toggle.trigger('click')
+    expect(expense.includeSubsidy).toBe(true)
+    expect(wrapper.findAll('.subsidy-item')).toHaveLength(2)
+    expect(expense.subsidyTrips).toEqual(saved)
+    expect(wrapper.get('[aria-label="补助 1 非补助时段 1 出发日期"]').element)
+      .toHaveProperty('value', '2026-09-02')
+    expect(expense.tripPayloads()).toHaveLength(2)
+  })
+
+  it.each([false, true])('locks all subsidy controls after submission, mobile=%s', async (mobile) => {
+    const expense = useExpenseStore()
+    const wrapper = mountCard('business', approvals, true, mobile)
     expect(wrapper.findComponent({ name: 'ElForm' }).props('disabled')).toBe(true)
-    await wrapper.get('[role="switch"]').trigger('click')
+    const toggle = wrapper.get('.el-card__header [role="switch"]')
+    expect(toggle.attributes('aria-disabled')).toBe('true')
+    await toggle.trigger('click')
     expect(expense.includeSubsidy).toBe(true)
   })
 })

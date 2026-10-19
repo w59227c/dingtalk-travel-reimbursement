@@ -1402,7 +1402,7 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
-  it.each([false, true])('autosaves exclusion-only changes and restores unfinished ranges, mobile=%s', async (mobile) => {
+  it.each([false, true])('autosaves exclusions and retains unfinished ranges across reload and subsidy toggles, mobile=%s', async (mobile) => {
     vi.useFakeTimers()
     const { wrapper, expense } = await mountView(undefined, false, mobile)
     expense.includeSubsidy = true
@@ -1432,7 +1432,21 @@ describe('ReimburseView single-form OA flow', () => {
     expect(restored.expense.includeSubsidy).toBe(true)
     expect(restored.expense.trip.excludedPeriods[0]?.endDate).toBe('')
     expect(restored.expense.policyInputError).toContain('请补齐每个非补助时段')
+    restored.expense.setSubsidyIncluded(false)
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    const disabled = vi.mocked(updateReimbursementDraft).mock.calls.at(-1)![2]
+    expect(disabled.trip).toBeNull()
+    expect(disabled.editingState?.includeSubsidy).toBe(false)
+    expect(disabled.editingState?.trip.excludedPeriods?.[0]?.endDate).toBe('')
     restored.wrapper.unmount()
+    const reopened = await mountView(undefined, false, mobile)
+    expect(reopened.expense.includeSubsidy).toBe(false)
+    expect(reopened.expense.trip.excludedPeriods[0]?.startDate).toBe('2026-09-01')
+    expect(reopened.expense.trip.excludedPeriods[0]?.endDate).toBe('')
+    reopened.expense.setSubsidyIncluded(true)
+    expect(reopened.expense.policyInputError).toContain('请补齐每个非补助时段')
+    reopened.wrapper.unmount()
   })
 
   it.each([false, true])('persists matching half-day times for restored per-approval subsidies, mobile=%s', async (mobile) => {

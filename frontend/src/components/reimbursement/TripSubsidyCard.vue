@@ -114,23 +114,21 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
     class="content-card reimbursement-card"
   >
     <template #header>
-      <strong>出差补助（可选）</strong>
+      <div class="subsidy-card-header">
+        <strong>出差补助（可选）</strong>
+        <el-switch
+          :model-value="expense.includeSubsidy"
+          :disabled="props.readonly || (!expense.includeSubsidy
+            && (!props.approvals.length || !props.approvalTripType))"
+          aria-label="申请出差补助"
+          @update:model-value="expense.setSubsidyIncluded"
+        />
+      </div>
     </template>
     <el-form
       label-position="top"
       :disabled="props.readonly"
     >
-      <el-form-item label="是否申请出差补助">
-        <el-switch
-          :model-value="expense.includeSubsidy"
-          :disabled="props.readonly || (!expense.includeSubsidy
-            && (!props.approvals.length || !props.approvalTripType))"
-          active-text="申请出差补助"
-          inactive-text="不申请"
-          @update:model-value="expense.setSubsidyIncluded"
-        />
-      </el-form-item>
-
       <el-alert
         v-if="!props.approvals.length"
         title="请先关联已通过的出差审批"
@@ -360,6 +358,17 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
 </template>
 
 <style scoped>
+.subsidy-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.subsidy-card-header :deep(.el-switch) {
+  flex-shrink: 0;
+}
+
 .subsidy-item {
   margin-top: 16px;
   padding: 18px;
