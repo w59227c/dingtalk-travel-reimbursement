@@ -251,8 +251,8 @@ describe('TripSubsidyCard', () => {
     const first = expense.subsidyTrips[0]!.excludedPeriods![0]!
     Object.assign(first, { startDate: '2026-09-01', endDate: '2026-09-02' })
     await nextTick()
-    await wrapper.get('[aria-label="补助 1 非补助时段 1 回家出发时段"] input[value="afternoon"]').setValue()
-    await wrapper.get('[aria-label="补助 1 非补助时段 1 返回出发时段"] input[value="afternoon"]').setValue()
+    await wrapper.get('[aria-label="补助 1 非补助时段 1 出发时段"] input[value="afternoon"]').setValue()
+    await wrapper.get('[aria-label="补助 1 非补助时段 1 返回时段"] input[value="afternoon"]').setValue()
     expect(first.startTime).toBe('18:00')
     expect(first.endTime).toBe('18:00')
     const dates = wrapper.findAllComponents({ name: 'ElDatePicker' })

@@ -234,7 +234,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
               </el-button>
             </div>
             <p class="excluded-periods__hint">
-              回家探亲：上午出发给半天补助，下午出发给全天；返回出差：上午出发给全天，下午出发给半天。中间完整日期不补助，各段不能占用同一个上午或下午。
+              出发日：上午出发给半天补助，下午出发给全天；返回日：上午出发给全天，下午出发给半天。中间完整日期不补助，各段不能占用同一个上午或下午。
             </p>
             <div
               v-for="(excluded, excludedIndex) in group.excludedPeriods"
@@ -253,20 +253,20 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                 </el-button>
               </div>
               <div class="trip-grid">
-                <el-form-item label="开始日期（回家探亲等）">
+                <el-form-item label="出发日期">
                   <el-date-picker
                     :model-value="excluded.startDate"
                     type="date"
                     value-format="YYYY-MM-DD"
                     format="YYYY-MM-DD"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 开始日期`"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 出发日期`"
                     @update:model-value="setExcludedDate(excluded, 'startDate', $event)"
                   />
                 </el-form-item>
-                <el-form-item label="回家出发时段">
+                <el-form-item label="出发时段">
                   <el-radio-group
                     :model-value="period(excluded.startTime)"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 回家出发时段`"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 出发时段`"
                     @update:model-value="setExcludedPeriod(excluded, 'startTime', $event)"
                   >
                     <el-radio-button value="morning">
@@ -277,20 +277,20 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                     </el-radio-button>
                   </el-radio-group>
                 </el-form-item>
-                <el-form-item label="结束日期（返回出差）">
+                <el-form-item label="返回日期">
                   <el-date-picker
                     :model-value="excluded.endDate"
                     type="date"
                     value-format="YYYY-MM-DD"
                     format="YYYY-MM-DD"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 结束日期`"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回日期`"
                     @update:model-value="setExcludedDate(excluded, 'endDate', $event)"
                   />
                 </el-form-item>
-                <el-form-item label="返回出差的出发时段">
+                <el-form-item label="返回时段">
                   <el-radio-group
                     :model-value="period(excluded.endTime)"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回出发时段`"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回时段`"
                     @update:model-value="setExcludedPeriod(excluded, 'endTime', $event)"
                   >
                     <el-radio-button value="morning">
