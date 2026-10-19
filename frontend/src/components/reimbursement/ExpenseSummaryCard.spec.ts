@@ -117,6 +117,25 @@ describe('ExpenseSummaryCard', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('shows the subsidy error and blocks both preview paths, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const download = vi.spyOn(drafts, 'downloadExcelPreview').mockResolvedValue(undefined)
+    const open = vi.spyOn(drafts, 'openExcelPreviewInDingTalk').mockResolvedValue(undefined)
+    const beforePreview = vi.fn()
+    const wrapper = mount(ExpenseSummaryCard, {
+      props: { mobile, beforePreview, previewDisabledReason: '请补齐每个非补助时段的日期和出发时段' },
+      global: { plugins: [ElementPlus] },
+    })
+    expect(wrapper.get('button').attributes()).toHaveProperty('disabled')
+    expect(wrapper.get('.field-error').text()).toBe('请补齐每个非补助时段的日期和出发时段')
+    await wrapper.get('button').trigger('click')
+    expect(beforePreview).not.toHaveBeenCalled()
+    expect(download).not.toHaveBeenCalled()
+    expect(open).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('leaves subsidy calculation errors in the subsidy card instead of repeating them here', () => {
     const expense = useExpenseStore()
     expense.includeSubsidy = true

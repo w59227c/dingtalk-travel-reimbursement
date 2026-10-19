@@ -20,6 +20,10 @@ class TripType(StrEnum):
     SAME_CITY_PROJECT = "same_city_project"
     INTERNAL = "internal"
     OVERSEAS = "overseas"
+    SHORT_TERM_INTERNAL = "short_term_internal"
+    LONG_TERM_INTERNAL = "long_term_internal"
+    SHORT_TERM_OVERSEAS = "short_term_overseas"
+    LONG_TERM_OVERSEAS = "long_term_overseas"
 
     @property
     def requires_confirmation(self) -> bool:
@@ -42,6 +46,7 @@ class SubsidyCalculation:
     daily_rate: Decimal
     total: Decimal
     related_approval_id: str | None = None
+    excluded_days: Decimal | None = None
 
     def as_api_dict(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -53,7 +58,40 @@ class SubsidyCalculation:
         }
         if self.related_approval_id is not None:
             data["relatedApprovalId"] = self.related_approval_id
+        if self.excluded_days is not None:
+            data["excludedDays"] = format(self.excluded_days, ".1f")
         return data
+
+
+def excluded_effective_days(period: TripPeriod, excluded_periods: list[TripPeriod]) -> Decimal:
+    """Union unpaid half-days, clipped to the original paid half-days.
+
+    Leaving for home is a return leg (AM pays half, PM pays all). Leaving
+    home for work is a departure leg (AM pays all, PM pays half).
+    Integer half-day intervals avoid double deductions across overlapping inputs.
+    """
+    automatic_effective_days(period)
+    paid_start = period.start_date.toordinal() * 2 + (period.start_time >= NOON)
+    paid_end = period.end_date.toordinal() * 2 + 1 + (period.end_time >= NOON)
+    intervals: list[tuple[int, int]] = []
+    for excluded in excluded_periods:
+        automatic_effective_days(excluded)
+        if (excluded.start_date, excluded.start_time) < (period.start_date, period.start_time) or (
+            excluded.end_date,
+            excluded.end_time,
+        ) > (period.end_date, period.end_time):
+            raise ApiError("INVALID_EXCLUDED_PERIOD", "非补助时段必须在本项出差时段内", 422)
+        start = excluded.start_date.toordinal() * 2 + 1 + (excluded.start_time >= NOON)
+        end = excluded.end_date.toordinal() * 2 + (excluded.end_time >= NOON)
+        start, end = max(start, paid_start), min(end, paid_end)
+        if start < end:
+            intervals.append((start, end))
+    covered_end = 0
+    half_days = 0
+    for start, end in sorted(intervals):
+        half_days += max(0, end - max(start, covered_end))
+        covered_end = max(covered_end, end)
+    return Decimal(half_days) * HALF_DAY
 
 
 def automatic_effective_days(period: TripPeriod) -> Decimal:
@@ -83,28 +121,15 @@ def calculate_subsidy(
     no_subsidy_exception: bool = False,
     manual_subsidy_amount: Decimal | None = None,
     related_approval_id: str | None = None,
+    excluded_periods: list[TripPeriod] | None = None,
 ) -> SubsidyCalculation:
     calculated_days = automatic_effective_days(period)
     calendar_days = (period.end_date - period.start_date).days + 1
+    excluded_days = excluded_effective_days(period, excluded_periods or [])
+    calculated_days -= excluded_days
 
     if manual_subsidy_amount is not None:
         raise ApiError("UNEXPECTED_POLICY_OVERRIDE", "出差补助由管理员设置的每日标准计算", 422)
-
-    if trip_type is TripType.SHORT_TERM_PROJECT and calendar_days > 30:
-        raise ApiError(
-            "INVALID_TRIP_DURATION",
-            "市外项目短期必须为连续 30 个自然日以内（含），请改选市外项目长期",
-            422,
-        )
-    if trip_type is TripType.LONG_TERM_PROJECT and calendar_days <= 30:
-        raise ApiError(
-            "INVALID_TRIP_DURATION",
-            "市外项目长期必须超过 30 个自然日，请改选市外项目短期",
-            422,
-        )
-
-    if trip_type is TripType.OVERSEAS:
-        raise ApiError("SUBSIDY_NOT_SUPPORTED", "境外出差不在当前补助范围内", 422)
 
     if trip_type.requires_confirmation:
         if not policy_confirmed:
@@ -131,10 +156,6 @@ def calculate_subsidy(
         effective_days = calculated_days
         daily_rate = quantize_money(configured_daily_rate)
 
-    if trip_type is TripType.INTERNAL and calendar_days > 30:
-        effective_days = Decimal("0.0")
-        daily_rate = Decimal("0.00")
-
     total = quantize_money(effective_days * daily_rate)
     return SubsidyCalculation(
         trip_type=trip_type,
@@ -143,4 +164,5 @@ def calculate_subsidy(
         daily_rate=daily_rate,
         total=total,
         related_approval_id=related_approval_id,
+        excluded_days=excluded_days if excluded_periods else None,
     )

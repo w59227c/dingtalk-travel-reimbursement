@@ -8,10 +8,12 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    field_serializer,
     field_validator,
     model_validator,
 )
 
+from app.core.errors import ApiError
 from app.domain.categories import ExpenseCategory
 from app.domain.money import MAX_REIMBURSEMENT_AMOUNT, quantize_money
 from app.domain.subsidy import TripPeriod, TripType
@@ -27,6 +29,28 @@ class TripPurpose(StrEnum):
     SAME_CITY_PROJECT = "same_city_project"
     INTERNAL = "internal"
     OVERSEAS = "overseas"
+    SHORT_TERM_PROJECT = "short_term_project"
+    LONG_TERM_PROJECT = "long_term_project"
+    SHORT_TERM_INTERNAL = "short_term_internal"
+    LONG_TERM_INTERNAL = "long_term_internal"
+    SHORT_TERM_OVERSEAS = "short_term_overseas"
+    LONG_TERM_OVERSEAS = "long_term_overseas"
+
+
+class ExcludedPeriodInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    start_date: StrictCalendarDate = Field(alias="startDate")
+    start_time: MinuteTime = Field(alias="startTime")
+    end_date: StrictCalendarDate = Field(alias="endDate")
+    end_time: MinuteTime = Field(alias="endTime")
+
+    @field_serializer("start_time", "end_time", when_used="json")
+    def serialize_minute_time(self, value: object) -> str:
+        return value.strftime("%H:%M")
+
+    def as_period(self) -> TripPeriod:
+        return TripPeriod(self.start_date, self.start_time, self.end_date, self.end_time)
 
 
 class TripInput(BaseModel):
@@ -41,6 +65,12 @@ class TripInput(BaseModel):
     end_date: StrictCalendarDate = Field(alias="endDate")
     end_time: MinuteTime = Field(alias="endTime")
     policy_confirmed: bool = Field(default=False, alias="policyConfirmed")
+    excluded_periods: list[ExcludedPeriodInput] = Field(
+        default_factory=list,
+        alias="excludedPeriods",
+        max_length=100,
+        exclude_if=lambda value: not value,
+    )
     confirmed_effective_days: DecimalString | None = Field(
         default=None,
         alias="confirmedEffectiveDays",
@@ -79,10 +109,17 @@ class TripInput(BaseModel):
             end_time=self.end_time,
         )
 
-    def subsidy_trip_type(self) -> TripType:
-        if self.trip_type is TripPurpose.PROJECT:
+    def subsidy_trip_type(self, *, legacy: bool = False) -> TripType:
+        if self.trip_type is TripPurpose.PROJECT and legacy:
             calendar_days = (self.end_date - self.start_date).days + 1
             return TripType.LONG_TERM_PROJECT if calendar_days > 30 else TripType.SHORT_TERM_PROJECT
+        if self.trip_type in {TripPurpose.PROJECT, TripPurpose.INTERNAL, TripPurpose.OVERSEAS}:
+            if not legacy:
+                raise ApiError(
+                    "SUBSIDY_CATEGORY_CONFIRMATION_REQUIRED",
+                    "请重新确认出差审批中的完整长短期类别",
+                    422,
+                )
         return TripType(self.trip_type.value)
 
 
@@ -152,8 +189,6 @@ class TotalsRequest(BaseModel):
         ids = [item.related_approval_id for item in self.trips]
         if any(value is None for value in ids) or len(ids) != len(set(ids)):
             raise ValueError("trips require unique relatedApprovalId values")
-        if any(item.trip_type is TripPurpose.OVERSEAS for item in self.trips):
-            raise ValueError("overseas approvals do not create subsidy trips")
         return self
 
     @field_validator("items")

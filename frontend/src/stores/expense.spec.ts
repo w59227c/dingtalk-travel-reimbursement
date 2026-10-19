@@ -107,15 +107,39 @@ vi.mock('@/api/expenses', () => ({
 }))
 
 describe('expense store', () => {
-  it('does not create a subsidy payload for overseas travel', () => {
+  it('restores excluded periods independently, retains them when toggled off, and blocks incomplete calculation', async () => {
+    setActivePinia(createPinia())
+    const store = useExpenseStore()
+    const draft = durableDraft([])
+    Object.assign(draft.input.trip!, { startDate: '2026-06-30', endDate: '2026-07-07' })
+    const excluded = {
+      startDate: '2026-06-30', startTime: '09:00', endDate: '2026-07-02', endTime: '18:00',
+    }
+    draft.input.trip!.excludedPeriods = [excluded]
+    store.hydrateFromDraft(draft, [])
+    expect(store.tripPayload()?.excludedPeriods).toEqual([excluded])
+    store.trip.excludedPeriods[0]!.startDate = '2026-07-01'
+    expect(draft.input.trip!.excludedPeriods![0]!.startDate).toBe('2026-06-30')
+    store.setSubsidyIncluded(false)
+    expect(store.tripPayload()).toBeNull()
+    store.setSubsidyIncluded(true)
+    expect(store.tripPayload()?.excludedPeriods?.[0]?.startDate).toBe('2026-07-01')
+    store.trip.excludedPeriods[0]!.endDate = ''
+    await store.refreshCalculations()
+    expect(store.calculationError).toContain('请补齐每个非补助时段')
+    expect(calculateTotals).not.toHaveBeenCalled()
+    store.reset()
+    expect(store.trip.excludedPeriods).toEqual([])
+  })
+  it('creates a subsidy payload for the configured overseas category', () => {
     setActivePinia(createPinia())
     const store = useExpenseStore()
     store.setSubsidyIncluded(true)
-    store.setTripType('overseas')
+    store.setTripType('short_term_overseas')
     store.trip.startDate = '2026-09-01'
     store.trip.endDate = '2026-09-03'
-    expect(store.tripPayload()).toBeNull()
-    expect(store.policyInputError).toContain('境外出差不申请')
+    expect(store.tripPayload()?.tripType).toBe('short_term_overseas')
+    expect(store.policyInputError).toBe('')
     store.setSubsidyIncluded(false)
     expect(store.tripPayload()).toBeNull()
     expect(store.displaySubsidyTotal).toBe('0.00')
@@ -125,11 +149,11 @@ describe('expense store', () => {
     setActivePinia(createPinia())
     const store = useExpenseStore()
     const draft = durableDraft([])
-    const trip = { ...draft.input.trip!, tripType: 'overseas' as const }
+    const trip = { ...draft.input.trip!, tripType: 'short_term_overseas' as const }
     draft.input.trip = trip
     store.hydrateFromDraft(draft, [])
-    expect(store.trip.tripType).toBe('overseas')
-    expect(store.tripPayload()).toBeNull()
+    expect(store.trip.tripType).toBe('short_term_overseas')
+    expect(store.tripPayload()?.tripType).toBe('short_term_overseas')
     draft.input.trip = null
     draft.input.editingState = { includeSubsidy: false, trip }
     store.hydrateFromDraft(draft, [])
@@ -718,7 +742,7 @@ describe('expense store', () => {
       endTime: '18:00',
     })
 
-    store.setTripType('project')
+    store.setTripType('long_term_project')
     Object.assign(store.trip, {
       startDate: '2026-06-01',
       endDate: '2026-07-01',
@@ -727,7 +751,7 @@ describe('expense store', () => {
     expect(store.projectPolicyType).toBe('long_term_project')
     expect(store.requiresPolicyConfirmation).toBe(false)
     expect(store.tripPayload()).toMatchObject({
-      tripType: 'project',
+      tripType: 'long_term_project',
     })
 
     Object.assign(store.trip, {
@@ -735,12 +759,12 @@ describe('expense store', () => {
       endDate: '2026-06-30',
     })
     expect(store.projectCalendarDays).toBe(30)
-    expect(store.projectPolicyType).toBe('short_term_project')
+    expect(store.projectPolicyType).toBe('long_term_project')
     expect(store.requiresPolicyConfirmation).toBe(false)
 
-    store.setTripType('internal')
+    store.setTripType('long_term_internal')
     expect(store.tripPayload()).toMatchObject({
-      tripType: 'internal',
+      tripType: 'long_term_internal',
     })
 
     store.setTripType('same_city_project')

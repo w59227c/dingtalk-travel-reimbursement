@@ -21,8 +21,13 @@ import { pathToFileURL } from 'node:url';
 const moduleUrl = pathToFileURL('src/api/calculateTotalsPayload.ts');
 const { buildCalculateTotalsPayload } = await import(moduleUrl.href);
 const payload = buildCalculateTotalsPayload({
-  tripType: 'project', startDate: '2026-09-01', endDate: '2026-09-30',
+  tripType: 'short_term_project', startDate: '2026-09-01', endDate: '2026-09-30',
   startTime: '09:00', endTime: '18:00', policyConfirmed: false,
+  excludedPeriods: [{
+    startDate: '2026-09-10', startTime: '09:00', endDate: '2026-09-13', endTime: '18:00',
+  }, {
+    startDate: '2026-09-11', startTime: '09:00', endDate: '2026-09-12', endTime: '18:00',
+  }],
 }, [{
   id: 'ocr-test-file', source: 'ocr', category: 'local_transport',
   date: '2026-09-01', displayDate: '2026-09-01', description: '机场至酒店',
@@ -48,7 +53,9 @@ process.stdout.write(JSON.stringify(payload));
     result = response.json()["data"]
     assert result["expenseTotal"] == "44.89"
     assert result["subsidy"]["calendarDays"] == 30
-    assert result["subsidy"]["effectiveDays"] == "30.0"
+    assert result["subsidy"]["effectiveDays"] == "27.0"
+    assert result["subsidy"]["excludedDays"] == "3.0"
+    assert result["subsidyTotal"] == "2700.00"
     assert "sourceFileId" not in payload["items"][0]
 
     # The exact previous payload explains the user's 422, independently of OCR.

@@ -8,6 +8,7 @@ from test_travel_approvals import FakeWorkflow, _catalog, _instance, _profile, _
 from app.api.oa_templates import TravelCatalogConfirmation
 from app.core.errors import ApiError
 from app.integrations.dingtalk.workflow import FormOption, WorkflowFormValue, WorkflowInstanceIdPage
+from app.schemas.expenses import TripPurpose
 from app.services.oa_reimbursement_payload import build_snapshot, parse_snapshot, serialize_snapshot
 from app.services.oa_template_profiles import (
     _deserialize_travel_profiles,
@@ -26,6 +27,18 @@ from app.services.travel_approvals import (
 
 def _dynamic_source():
     source = _source()
+    source = replace(
+        source,
+        draft_input=source.draft_input.model_copy(
+            update={
+                "trip": source.draft_input.trip.model_copy(
+                    update={"trip_type": TripPurpose.BUSINESS}
+                )
+            }
+        ),
+        totals_data=source.totals_data
+        | {"subsidy": source.totals_data["subsidy"] | {"tripType": "business"}},
+    )
     profile = source.catalog.travel_profiles[0]
     source_options = (
         FormOption("商务出差", "商务出差", "business"),
@@ -60,13 +73,13 @@ def _dynamic_source():
     ("source_label", "target_label", "expected_policy"),
     [
         ("商务出差", "境内商务出差", "business"),
-        ("市外项目出差（长期）", "境内市外项目出差（长期）", "project"),
-        ("市外项目出差（短期）", "境内市外项目出差（短期）", "project"),
+        ("市外项目出差（长期）", "境内市外项目出差（长期）", "long_term_project"),
+        ("市外项目出差（短期）", "境内市外项目出差（短期）", "short_term_project"),
         ("市内项目出差（长/短期）", "境内市内项目出差（长/短期）", "same_city_project"),
-        ("公司内部出差（长期）", "公司内部出差（长期）", "internal"),
-        ("公司内部出差（短期）", "公司内部出差（短期）", "internal"),
-        ("境外长期出差", "境外商务出差（长期）", "overseas"),
-        ("境外短期出差", "境外商务出差（短期）", "overseas"),
+        ("公司内部出差（长期）", "公司内部出差（长期）", "long_term_internal"),
+        ("公司内部出差（短期）", "公司内部出差（短期）", "short_term_internal"),
+        ("境外长期出差", "境外商务出差（长期）", "long_term_overseas"),
+        ("境外短期出差", "境外商务出差（短期）", "short_term_overseas"),
     ],
 )
 def test_source_travel_categories_map_to_reimbursement_categories(
@@ -117,9 +130,7 @@ def test_dynamic_config_roundtrip_and_api_contract():
         reimbursement_mapping=source.catalog.reimbursement.mappings,
         allow_empty=False,
     )
-    assert restored == [
-        replace(profile, confirmed_schema_fingerprint=profile.schema.fingerprint)
-    ]
+    assert restored == [replace(profile, confirmed_schema_fingerprint=profile.schema.fingerprint)]
     parsed = TravelCatalogConfirmation.model_validate(
         {
             "profileKey": profile.profile_key,
@@ -147,7 +158,7 @@ def test_dynamic_config_roundtrip_and_api_contract():
 
 def test_dynamic_snapshot_roundtrip_uses_current_version():
     snapshot = build_snapshot(_dynamic_source())
-    assert snapshot.snapshot_version == 6
+    assert snapshot.snapshot_version == 7
     assert parse_snapshot(serialize_snapshot(snapshot)) == snapshot
     assert snapshot.related_approvals[0].source_travel_type_value == "商务出差"
 

@@ -129,7 +129,9 @@ class TravelApprovalCandidate:
             "profileDisplayName": self.listed.profile_display_name,
             "sourceProcessCode": self.listed.source_process_code,
             "travelTypeOption": self.listed.travel_type_option.as_dict(),
-            "subsidyTripType": _subsidy_trip_type_value(self.listed.travel_type_option),
+            "subsidyTripType": _subsidy_trip_type_value(
+                self.listed.travel_type_option, self.listed.source_travel_type_value
+            ),
             "title": self.instance.title,
             "businessId": self.instance.business_id,
             "originatorDepartmentId": self.instance.originator_department_id,
@@ -207,7 +209,7 @@ def runtime_options(catalog: OaTemplateCatalogLike) -> dict[str, object]:
                             for key, value in profile.travel_type_mappings.items()
                         },
                         "subsidyTripTypeMappings": {
-                            key: _subsidy_trip_type_value(value)
+                            key: _subsidy_trip_type_value(value, key)
                             for key, value in profile.travel_type_mappings.items()
                         },
                     }
@@ -220,8 +222,8 @@ def runtime_options(catalog: OaTemplateCatalogLike) -> dict[str, object]:
     }
 
 
-def _subsidy_trip_type_value(option: FormOption) -> str | None:
-    purpose = subsidy_purpose_for_travel_type(option.label)
+def _subsidy_trip_type_value(option: FormOption, source_label: str | None = None) -> str | None:
+    purpose = subsidy_purpose_for_travel_type(option.label, source_label)
     return purpose.value if purpose is not None else None
 
 
@@ -428,12 +430,8 @@ async def _list_approval_references(
                         source_schema=profile.schema,
                         company_component_id=travel_source_component_id(profile, "company"),
                         budget_code_component_id=travel_source_component_id(profile, "budgetCode"),
-                        travel_type_component_id=getattr(
-                            profile, "travel_type_component_id", None
-                        ),
-                        travel_type_mappings=getattr(
-                            profile, "travel_type_mappings", None
-                        ),
+                        travel_type_component_id=getattr(profile, "travel_type_component_id", None),
+                        travel_type_mappings=getattr(profile, "travel_type_mappings", None),
                     )
                 if page.next_token is None:
                     break

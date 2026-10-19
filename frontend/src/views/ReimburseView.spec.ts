@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, nextTick } from 'vue'
+import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-router'
 
 import { getPublicConfig, selectDepartmentFromTravelApproval } from '@/api/auth'
 import { calculateTotals } from '@/api/expenses'
@@ -365,6 +366,7 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
   wrapper: VueWrapper
   expense: ReturnType<typeof useExpenseStore>
   drafts: ReturnType<typeof useReimbursementDraftStore>
+  router: Router
 }> {
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -383,11 +385,21 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
   expense.categories = [
     { id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true },
   ]
-  const wrapper = mount(ReimburseView, {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', component: ReimburseView },
+      { path: '/m', component: ReimburseView, props: { mobile: true } },
+      { path: '/admin/settings', component: defineComponent({ template: '<div>设置</div>' }) },
+      { path: '/m/settings', component: defineComponent({ template: '<div>设置</div>' }) },
+    ],
+  })
+  await router.push(mobile ? '/m' : '/')
+  await router.isReady()
+  const wrapper = mount(RouterView, {
     attachTo: '#test-app',
-    props: { mobile },
     global: {
-      plugins: [pinia, ElementPlus],
+      plugins: [pinia, ElementPlus, router],
       stubs: {
         ExpenseItemsCard: realMaterials ? false : ExpenseItemsCardStub,
         ExpenseSummaryCard: ExpenseSummaryCardStub,
@@ -401,7 +413,7 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
     },
   })
   await flushPromises()
-  return { wrapper, expense, drafts: useReimbursementDraftStore() }
+  return { wrapper, expense, drafts: useReimbursementDraftStore(), router }
 }
 
 function visibleButton(wrapper: VueWrapper, label: string) {
@@ -1387,6 +1399,150 @@ describe('ReimburseView single-form OA flow', () => {
     expect(sent).not.toHaveProperty('project')
     await flushPromises()
     expect(wrapper.get('[data-testid="autosave-status"]').text()).toBe('已保存')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('autosaves exclusion-only changes and restores unfinished ranges, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    expense.includeSubsidy = true
+    Object.assign(expense.trip, {
+      startDate: '2026-09-01', endDate: '2026-09-03', excludedPeriods: [{
+        startDate: '2026-09-01', startTime: '09:00', endDate: '2026-09-02', endTime: '18:00',
+      }],
+    })
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    vi.mocked(updateReimbursementDraft).mockClear()
+    expense.trip.excludedPeriods[0]!.endDate = '2026-09-03'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    expect(vi.mocked(updateReimbursementDraft).mock.calls[0]![2].trip?.excludedPeriods?.[0]?.endDate)
+      .toBe('2026-09-03')
+    vi.mocked(updateReimbursementDraft).mockClear()
+    expense.trip.excludedPeriods[0]!.endDate = ''
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    const sent = vi.mocked(updateReimbursementDraft).mock.calls[0]![2]
+    expect(sent.trip).toBeNull()
+    expect(sent.editingState?.trip.excludedPeriods?.[0]?.endDate).toBe('')
+    wrapper.unmount()
+    const restored = await mountView(undefined, false, mobile)
+    expect(restored.expense.includeSubsidy).toBe(true)
+    expect(restored.expense.trip.excludedPeriods[0]?.endDate).toBe('')
+    expect(restored.expense.policyInputError).toContain('请补齐每个非补助时段')
+    restored.wrapper.unmount()
+  })
+
+  it.each([false, true])('persists matching half-day times for restored per-approval subsidies, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const trip = {
+      relatedApprovalId: linkedApproval.processInstanceId,
+      tripType: 'business' as const,
+      startDate: '2026-09-01', startTime: '08:00', endDate: '2026-09-03', endTime: '21:00',
+      excludedPeriods: [{ startDate: '2026-09-01', startTime: '09:00', endDate: '2026-09-03', endTime: '18:00' }],
+    }
+    serverDraft = makeDraft({
+      input: {
+        ...baseInput, trips: [trip],
+        editingState: { includeSubsidy: true, trip, trips: [trip] },
+      },
+      relatedApprovalCount: 1,
+      relatedApprovals: [{ ...linkedApproval, startDate: trip.startDate, endDate: trip.endDate }],
+    })
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    await vi.advanceTimersByTimeAsync(650)
+    const sent = vi.mocked(updateReimbursementDraft).mock.calls.at(-1)![2]
+    expect(sent.trips?.[0]).toMatchObject({ startTime: '09:00', endTime: '18:00', excludedPeriods: trip.excludedPeriods })
+    expect(sent.editingState?.trips?.[0]).toMatchObject({ startTime: '09:00', endTime: '18:00' })
+    expense.subsidyTrips[0]!.excludedPeriods![0]!.endDate = ''
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    const incomplete = vi.mocked(updateReimbursementDraft).mock.calls.at(-1)![2]
+    expect(incomplete.trips).toEqual([])
+    expect(incomplete.editingState?.trips?.[0]).toMatchObject({
+      startTime: '08:00', excludedPeriods: [expect.objectContaining({ endDate: '' })],
+    })
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('waits for exclusion edits to save before opening settings and restores them, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const { wrapper, expense, router } = await mountView(undefined, false, mobile)
+    const pending = deferred<ReimbursementDraft>()
+    vi.mocked(updateReimbursementDraft).mockReturnValueOnce(pending.promise)
+    expense.includeSubsidy = true
+    expense.trip.excludedPeriods.push({ startDate: '2026-09-01', startTime: '09:00', endDate: '', endTime: '18:00' })
+    await nextTick()
+    const home = mobile ? '/m' : '/'
+    const leaving = router.push(mobile ? '/m/settings' : '/admin/settings')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe(home)
+    expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    const input = vi.mocked(updateReimbursementDraft).mock.calls[0]![2]
+    serverDraft = makeDraft({ revision: 2, input })
+    pending.resolve(serverDraft)
+    await leaving
+    expect(router.currentRoute.value.path).toContain('/settings')
+    await router.push(home)
+    await flushPromises()
+    expect(expense.trip.excludedPeriods[0]?.endDate).toBe('')
+    expect(wrapper.get('[data-testid="autosave-status"]').text()).toBe('已保存')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('retains edits on the form when saving before navigation fails or materials are busy, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const { wrapper, expense, drafts, router } = await mountView(undefined, false, mobile)
+    expense.trip.excludedPeriods.push({ startDate: '', startTime: '09:00', endDate: '', endTime: '18:00' })
+    await nextTick()
+    vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(new Error('连接暂时中断'))
+    const settings = mobile ? '/m/settings' : '/admin/settings'
+    const home = mobile ? '/m' : '/'
+    await router.push(settings)
+    expect(router.currentRoute.value.path).toBe(home)
+    expect(wrapper.text()).toContain('连接暂时中断')
+    expect(expense.trip.excludedPeriods).toHaveLength(1)
+    vi.mocked(updateReimbursementDraft).mockClear()
+    drafts.processingFiles = true
+    await router.push(settings)
+    expect(router.currentRoute.value.path).toBe(home)
+    expect(wrapper.text()).toContain('请等待材料处理完成后重试')
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    drafts.processingFiles = false
+    await router.push(settings)
+    expect(router.currentRoute.value.path).toBe(settings)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('opens settings from a locked draft without attempting to rewrite it, mobile=%s', async (mobile) => {
+    serverDraft.status = 'LOCKED'
+    const { wrapper, router } = await mountView(undefined, false, mobile)
+    await router.push(mobile ? '/m/settings' : '/admin/settings')
+    expect(router.currentRoute.value.path).toContain('/settings')
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('explains invalid subsidy ranges beside Excel preview until repaired, mobile=%s', async (mobile) => {
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    expense.includeSubsidy = true
+    Object.assign(expense.trip, {
+      startDate: '2026-09-01', endDate: '2026-09-03', excludedPeriods: [{
+        startDate: '2026-09-01', startTime: '09:00', endDate: '', endTime: '18:00',
+      }],
+    })
+    await nextTick()
+    const summary = wrapper.findComponent(ExpenseSummaryCardStub)
+    expect(summary.props('previewDisabledReason')).toBe('请补齐每个非补助时段的日期和出发时段')
+    expense.trip.excludedPeriods[0]!.endDate = '2026-09-04'
+    await nextTick()
+    expect(summary.props('previewDisabledReason')).toBe('非补助时段必须在本项出差时段内')
+    expense.trip.excludedPeriods[0]!.endDate = '2026-09-03'
+    await nextTick()
+    expect(summary.props('previewDisabledReason')).not.toContain('非补助时段')
+    expect(expense.tripPayload()?.excludedPeriods).toHaveLength(1)
     wrapper.unmount()
   })
 

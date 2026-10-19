@@ -197,7 +197,7 @@ def _draft_input(
     }
     if trip:
         value["trip"] = {
-            "tripType": "project",
+            "tripType": "short_term_project",
             "startDate": "2026-09-01",
             "startTime": "08:00",
             "endDate": "2026-09-03",
@@ -546,7 +546,7 @@ def test_snapshot_counts_discontinuous_days_and_merges_overlapping_subsidies() -
     raw_input = _draft_input(trip=False).model_dump(mode="json", by_alias=True)
     raw_input["trips"] = [
         {
-            "tripType": "project",
+            "tripType": "short_term_project",
             "relatedApprovalId": "travel-instance-1",
             "startDate": "2026-09-01",
             "startTime": "09:00",
@@ -554,7 +554,7 @@ def test_snapshot_counts_discontinuous_days_and_merges_overlapping_subsidies() -
             "endTime": "18:00",
         },
         {
-            "tripType": "project",
+            "tripType": "short_term_project",
             "relatedApprovalId": "travel-instance-2",
             "startDate": "2026-09-03",
             "startTime": "09:00",
@@ -562,7 +562,7 @@ def test_snapshot_counts_discontinuous_days_and_merges_overlapping_subsidies() -
             "endTime": "18:00",
         },
         {
-            "tripType": "project",
+            "tripType": "short_term_project",
             "relatedApprovalId": "travel-instance-3",
             "startDate": "2026-09-09",
             "startTime": "09:00",

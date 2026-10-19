@@ -140,7 +140,12 @@ def _display_date(value: date, requested: str) -> str:
 
 def _subsidy_description(trip: TripInput, subsidy: SubsidyCalculation) -> str:
     period = _compact_date_range(trip.start_date, trip.end_date)
-    return f"{period}，共{_compact_days(subsidy.effective_days)}天出差补助"
+    exclusion = (
+        f"（扣除{_compact_days(subsidy.excluded_days)}天非补助时段）"
+        if subsidy.excluded_days is not None
+        else ""
+    )
+    return f"{period}，共{_compact_days(subsidy.effective_days)}天出差补助{exclusion}"
 
 
 def _ordered_lines(

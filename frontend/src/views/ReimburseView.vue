@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
 import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vue'
@@ -184,7 +185,14 @@ const currentFormInput = computed<ReimbursementDraftInput>(() => {
         startTime: trips[0]?.startTime ?? expense.trip.startTime,
         endTime: trips.at(-1)?.endTime ?? expense.trip.endTime,
       },
-      trips: expense.subsidyTrips.map((item) => ({ ...item })),
+      trips: expense.subsidyTrips.map((item) => {
+        const payload = trips.find((trip) => trip.relatedApprovalId === item.relatedApprovalId)
+        return {
+          ...item,
+          startTime: payload?.startTime ?? item.startTime,
+          endTime: payload?.endTime ?? item.endTime,
+        }
+      }),
     },
     items: expense.buildDraftExpenseItems(),
     dismissedOcrFileIds: [...expense.dismissedOcrFileIds],
@@ -242,7 +250,8 @@ const materialSubmissionIssues = computed(() => drafts.files
       || item.hotelBillFileIds?.includes(file.id))?.id,
   }))
   .filter((issue) => Boolean(issue.reason)))
-const submissionButtonReason = computed(() => formReadOnlyReason.value || submissionServiceReason.value
+const subsidyInputError = computed(() => formReadOnly.value ? '' : expense.policyInputError)
+const submissionButtonReason = computed(() => formReadOnlyReason.value || subsidyInputError.value || submissionServiceReason.value
   || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (drafts.busy ? '请等待材料处理完成' : '')
   || (materialSubmissionIssues.value.length
@@ -254,6 +263,7 @@ const mobileNextLabel = computed(() => mobileStep.value === mobileSteps.length -
 const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({ item, missing: missingExpenseMaterials(item, drafts.files) }))
   .filter((entry) => entry.missing.length))
 const previewDisabledReason = computed(() => expense.itemReadinessError
+  || subsidyInputError.value
   || (!budgetCodeValue.value ? '请先选择预算代码' : '')
   || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (props.mobile && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
@@ -289,6 +299,7 @@ function tripSignature(trip: TripInput | null | undefined): object | null {
     policyConfirmed: trip.policyConfirmed ?? false,
     confirmedEffectiveDays: trip.confirmedEffectiveDays ?? '',
     noSubsidyException: trip.noSubsidyException ?? false,
+    excludedPeriods: trip.excludedPeriods ?? [],
   }
 }
 function inputSignature(input: ReimbursementDraftInput): string {
@@ -566,6 +577,27 @@ async function flushAutosave(options: { includeRelated?: boolean } = {}): Promis
     } finally { saving.value = false }
   })
 }
+onBeforeRouteLeave(async () => {
+  if (submitFlowPending.value || bindingApprovalDepartment.value || replacingTemplate.value
+    || initializingWorkspace.value || verifyingRelatedApprovals.value || pendingDepartmentApproval.value) {
+    ElMessage.warning('请等待当前操作完成，或先完成部门选择')
+    return false
+  }
+  if (!sessionScope() || formReadOnly.value || (!formDirty.value && !savePromise)) return true
+  const scope = sessionScope()
+  const draftId = drafts.currentDraft?.id
+  try {
+    await flushAutosave()
+    if (sessionScope() !== scope || drafts.currentDraft?.id !== draftId || formDirty.value) {
+      throw new Error('报销内容已变化，请确认保存状态后重试')
+    }
+    return true
+  } catch (error) {
+    saveError.value = error instanceof Error ? error.message : '保存失败，请重试后再离开'
+    ElMessage.error(saveError.value)
+    return false
+  }
+})
 function validateSubmission(): string {
   if (!companyOptions.value.some((option) => option.value === companyValue.value)) return '请选择所属公司'
   if (!budgetOptions.value.some((option) => option.value === budgetCodeValue.value)) return '请选择预算代码'
@@ -845,13 +877,16 @@ watch(() => drafts.busy, () => {
   if (!saving.value && !saveError.value) scheduleAutosave()
 })
 watch(budgetLabel, (label) => { expense.manualProjectText = label })
-watch(selectedSubsidyApprovals, (approvals) => expense.syncSubsidyApprovals(approvals), {
+watch(selectedSubsidyApprovals, (approvals) => {
+  if (drafts.currentDraft && !['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status)) return
+  expense.syncSubsidyApprovals(approvals)
+}, {
   deep: true,
   immediate: true,
 })
 watch(selectedSubsidyTripType, (value) => {
-  if (value && value !== 'overseas' && expense.trip.tripType !== value) expense.setTripType(value)
-  if (value === 'overseas' && expense.includeSubsidy) expense.setSubsidyIncluded(false)
+  if (drafts.currentDraft && !['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status)) return
+  if (value && expense.trip.tripType !== value) expense.setTripType(value)
 }, { immediate: true })
 watch(() => [
   sessionScope(),

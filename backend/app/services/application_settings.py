@@ -28,14 +28,20 @@ RATE_KEYS: dict[TripType, str] = {
     TripType.SHORT_TERM_PROJECT: "subsidy_short_term_project_per_day",
     TripType.LONG_TERM_PROJECT: "subsidy_long_term_project_per_day",
     TripType.SAME_CITY_PROJECT: "subsidy_same_city_project_per_day",
-    TripType.INTERNAL: "subsidy_internal_per_day",
+    TripType.SHORT_TERM_INTERNAL: "subsidy_short_term_internal_per_day",
+    TripType.LONG_TERM_INTERNAL: "subsidy_long_term_internal_per_day",
+    TripType.SHORT_TERM_OVERSEAS: "subsidy_short_term_overseas_per_day",
+    TripType.LONG_TERM_OVERSEAS: "subsidy_long_term_overseas_per_day",
 }
 DEFAULT_RATES: dict[TripType, Decimal] = {
     TripType.BUSINESS: Decimal("100.00"),
     TripType.SHORT_TERM_PROJECT: Decimal("100.00"),
     TripType.LONG_TERM_PROJECT: Decimal("150.00"),
     TripType.SAME_CITY_PROJECT: Decimal("50.00"),
-    TripType.INTERNAL: Decimal("100.00"),
+    TripType.SHORT_TERM_INTERNAL: Decimal("100.00"),
+    TripType.LONG_TERM_INTERNAL: Decimal("100.00"),
+    TripType.SHORT_TERM_OVERSEAS: Decimal("0.00"),
+    TripType.LONG_TERM_OVERSEAS: Decimal("0.00"),
 }
 
 
@@ -67,7 +73,15 @@ def ensure_expense_setting_rows(database: Session) -> dict[str, Setting]:
     for trip_type, key in RATE_KEYS.items():
         row = database.get(Setting, key)
         if row is None:
-            row = Setting(key=key, value=format(DEFAULT_RATES[trip_type], ".2f"))
+            legacy = (
+                database.get(Setting, "subsidy_internal_per_day")
+                if trip_type in {TripType.SHORT_TERM_INTERNAL, TripType.LONG_TERM_INTERNAL}
+                else None
+            )
+            row = Setting(
+                key=key,
+                value=legacy.value if legacy else format(DEFAULT_RATES[trip_type], ".2f"),
+            )
             database.add(row)
             changed = True
         rows[key] = row
@@ -104,7 +118,7 @@ def _configuration_error(key: str) -> ApiError:
     )
 
 
-def _validated_rate(row: Setting, key: str, *, allow_zero: bool = False) -> Decimal:
+def _validated_rate(row: Setting, key: str) -> Decimal:
     try:
         amount = Decimal(row.value)
     except (InvalidOperation, ValueError):
@@ -112,7 +126,6 @@ def _validated_rate(row: Setting, key: str, *, allow_zero: bool = False) -> Deci
     if (
         not amount.is_finite()
         or amount < 0
-        or (amount == 0 and not allow_zero)
         or amount > MAX_DAILY_SUBSIDY
         or amount.as_tuple().exponent < -2
     ):

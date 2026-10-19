@@ -10,13 +10,13 @@ import {
 describe('travel type mapping', () => {
   it.each([
     ['境内商务出差', 'business'],
-    ['境内市外项目出差（长期）', 'project'],
-    ['境内市外项目出差（短期）', 'project'],
+    ['境内市外项目出差（长期）', 'long_term_project'],
+    ['境内市外项目出差（短期）', 'short_term_project'],
     ['境内市内项目出差（长/短期）', 'same_city_project'],
-    ['公司内部出差（长期）', 'internal'],
-    ['公司内部出差（短期）', 'internal'],
-    ['境外商务出差（长期）', 'overseas'],
-    ['境外商务出差（短期）', 'overseas'],
+    ['公司内部出差（长期）', 'long_term_internal'],
+    ['公司内部出差（短期）', 'short_term_internal'],
+    ['境外商务出差（长期）', 'long_term_overseas'],
+    ['境外商务出差（短期）', 'short_term_overseas'],
   ] as const)('keeps the current reimbursement label %s in policy family %s', (label, policy) => {
     expect(subsidyTripTypeForTravelLabel(label)).toBe(policy)
   })
@@ -36,12 +36,12 @@ describe('travel type mapping', () => {
           key: 'domestic-short-project',
         },
       },
-      subsidyTripTypeMappings: { '市外项目出差（短期）': 'project' },
+      subsidyTripTypeMappings: { '市外项目出差（短期）': 'short_term_project' },
     }
 
     expect(mappedTravelTypeOption(profile, '市外项目出差（短期）')?.label)
       .toBe('境内市外项目出差（短期）')
-    expect(subsidyTripTypeForProfile(profile, '市外项目出差（短期）')).toBe('project')
+    expect(subsidyTripTypeForProfile(profile, '市外项目出差（短期）')).toBe('short_term_project')
     expect(mappedTravelTypeOption(profile, undefined)).toBeNull()
   })
 })

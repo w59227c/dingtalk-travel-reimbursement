@@ -24,16 +24,22 @@ const form = reactive({
     short_term_project: '100.00',
     long_term_project: '150.00',
     same_city_project: '50.00',
-    internal: '100.00',
+    short_term_internal: '100.00',
+    long_term_internal: '100.00',
+    short_term_overseas: '0.00',
+    long_term_overseas: '0.00',
   },
   calculationMode: 'half_day_12' as const,
 })
 const rateFields: Array<{ id: SubsidyRateType; label: string }> = [
-  { id: 'business', label: '商务出差' },
-  { id: 'short_term_project', label: '市外项目短期' },
-  { id: 'long_term_project', label: '市外项目长期' },
-  { id: 'same_city_project', label: '同市项目' },
-  { id: 'internal', label: '公司内部出差' },
+  { id: 'business', label: '境内商务出差' },
+  { id: 'long_term_project', label: '境内市外项目出差（长期）' },
+  { id: 'short_term_project', label: '境内市外项目出差（短期）' },
+  { id: 'same_city_project', label: '境内市内项目出差（长/短期）' },
+  { id: 'long_term_internal', label: '公司内部出差（长期）' },
+  { id: 'short_term_internal', label: '公司内部出差（短期）' },
+  { id: 'long_term_overseas', label: '境外商务出差（长期）' },
+  { id: 'short_term_overseas', label: '境外商务出差（短期）' },
 ]
 
 onMounted(load)
@@ -68,7 +74,7 @@ async function save(): Promise<void> {
   for (const field of rateFields) {
     const normalized = normalizeSubsidyRate(form.subsidyRates[field.id])
     if (normalized === null) {
-      ElMessage.error(`${field.label}必须大于 0 且不超过 10000 元，最多两位小数`)
+      ElMessage.error(`${field.label}不能小于 0 或超过 10000 元，最多两位小数`)
       return
     }
     form.subsidyRates[field.id] = normalized
@@ -178,7 +184,7 @@ async function save(): Promise<void> {
             v-model="form.subsidyRates[field.id]"
             inputmode="decimal"
             maxlength="8"
-            placeholder="0.01 - 10000.00"
+            placeholder="0.00 - 10000.00"
             class="full-width"
             :aria-label="`${field.label}每日补助标准`"
           >
@@ -197,18 +203,18 @@ async function save(): Promise<void> {
         </h2>
         <div class="settings-rule-row">
           <span>计算方式</span>
-          <strong>商务出差按 12:00 半天边界计算</strong>
+          <strong>按 12:00 半天边界计算</strong>
         </div>
         <div class="settings-rule-row">
-          <span>项目期限</span>
-          <strong>连续 30 天以内为短期，超过 30 天为长期</strong>
+          <span>补助类别</span>
+          <strong>采用已通过出差审批中的类别和长短期，按对应每日标准计算</strong>
         </div>
         <div class="settings-rule-row">
           <span>有效天数</span>
           <strong>所有类型均按日期和时段自动计算；同市项目另需员工按制度确认</strong>
         </div>
         <p class="settings-rule-exception">
-          公司内部出差不超过 30 个自然日时按设置标准计算，超过 30 天不补助；境外出差不计补助。
+          每类均可独立配置，0 元表示不发补助。非补助时段按探亲及返回出差的出发时段扣除，重叠时间只扣一次。
         </p>
       </section>
       <el-button

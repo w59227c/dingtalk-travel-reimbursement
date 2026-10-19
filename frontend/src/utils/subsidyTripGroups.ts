@@ -1,4 +1,4 @@
-import type { TripInput } from '@/types/expenses'
+import type { ExcludedPeriodInput, TripInput } from '@/types/expenses'
 
 export interface SubsidyTripGroup {
   key: string
@@ -8,6 +8,7 @@ export interface SubsidyTripGroup {
   startTime: string
   endTime: string
   primaryRelatedApprovalId?: string
+  excludedPeriods: ExcludedPeriodInput[]
 }
 
 /** Group inclusive date ranges only when they overlap; adjacent ranges stay separate. */
@@ -50,6 +51,7 @@ export function groupOverlappingSubsidyTrips(
       startTime,
       endTime,
       primaryRelatedApprovalId: approvalIds[0],
+      excludedPeriods: items.flatMap((item) => item.excludedPeriods ?? []),
     }
   })
 }

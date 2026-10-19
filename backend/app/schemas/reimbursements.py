@@ -22,6 +22,15 @@ class BudgetProjectInput(ManualProjectInput):
     text: str = Field(min_length=1, max_length=2048)
 
 
+class ReimbursementEditingExcludedPeriodInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    start_date: str = Field(default="", alias="startDate", max_length=10)
+    start_time: str = Field(default="", alias="startTime", max_length=5)
+    end_date: str = Field(default="", alias="endDate", max_length=10)
+    end_time: str = Field(default="", alias="endTime", max_length=5)
+
+
 class ReimbursementEditingTripInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -34,6 +43,12 @@ class ReimbursementEditingTripInput(BaseModel):
     end_date: str = Field(default="", alias="endDate", max_length=10)
     end_time: str = Field(default="", alias="endTime", max_length=5)
     policy_confirmed: bool = Field(default=False, alias="policyConfirmed")
+    excluded_periods: list[ReimbursementEditingExcludedPeriodInput] = Field(
+        default_factory=list,
+        alias="excludedPeriods",
+        max_length=100,
+        exclude_if=lambda value: not value,
+    )
     confirmed_effective_days: str = Field(default="", alias="confirmedEffectiveDays", max_length=32)
     no_subsidy_exception: bool = Field(default=False, alias="noSubsidyException")
     manual_subsidy_amount: str | None = Field(

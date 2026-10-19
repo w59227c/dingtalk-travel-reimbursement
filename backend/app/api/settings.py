@@ -31,18 +31,24 @@ router = APIRouter(tags=["settings"])
 class SubsidyRatesWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    business: DecimalString = Field(gt=0, le=MAX_DAILY_SUBSIDY)
-    short_term_project: DecimalString = Field(gt=0, le=MAX_DAILY_SUBSIDY)
-    long_term_project: DecimalString = Field(gt=0, le=MAX_DAILY_SUBSIDY)
-    same_city_project: DecimalString = Field(gt=0, le=MAX_DAILY_SUBSIDY)
-    internal: DecimalString = Field(gt=0, le=MAX_DAILY_SUBSIDY)
+    business: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
+    short_term_project: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
+    long_term_project: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
+    same_city_project: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
+    short_term_internal: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
+    long_term_internal: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
+    short_term_overseas: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
+    long_term_overseas: DecimalString = Field(ge=0, le=MAX_DAILY_SUBSIDY)
 
     @field_validator(
         "business",
         "short_term_project",
         "long_term_project",
         "same_city_project",
-        "internal",
+        "short_term_internal",
+        "long_term_internal",
+        "short_term_overseas",
+        "long_term_overseas",
     )
     @classmethod
     def validate_money_scale(cls, value: Decimal) -> Decimal:
@@ -56,7 +62,10 @@ class SubsidyRatesWrite(BaseModel):
             TripType.SHORT_TERM_PROJECT: self.short_term_project,
             TripType.LONG_TERM_PROJECT: self.long_term_project,
             TripType.SAME_CITY_PROJECT: self.same_city_project,
-            TripType.INTERNAL: self.internal,
+            TripType.SHORT_TERM_INTERNAL: self.short_term_internal,
+            TripType.LONG_TERM_INTERNAL: self.long_term_internal,
+            TripType.SHORT_TERM_OVERSEAS: self.short_term_overseas,
+            TripType.LONG_TERM_OVERSEAS: self.long_term_overseas,
         }
 
 

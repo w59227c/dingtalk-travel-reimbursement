@@ -18,7 +18,10 @@ describe('settings API', () => {
       short_term_project: '100',
       long_term_project: '150',
       same_city_project: '50',
-      internal: '100',
+      short_term_internal: '100',
+        long_term_internal: '100',
+        short_term_overseas: '0.00',
+        long_term_overseas: '0.00',
     } as const
     vi.mocked(http.put).mockResolvedValue({
       data: {
@@ -48,14 +51,17 @@ describe('settings API', () => {
         short_term_project: '100.00',
         long_term_project: '150.00',
         same_city_project: '50.00',
-        internal: '100.00',
+        short_term_internal: '100.00',
+        long_term_internal: '100.00',
+        short_term_overseas: '0.00',
+        long_term_overseas: '0.00',
       },
       calculationMode: 'half_day_12',
     })
   })
 
-  it('rejects zero, excessive rates, negative values and excess precision locally', async () => {
-    for (const value of ['0', '10000.01', '-1', '88.501']) {
+  it('rejects excessive rates, negative values and excess precision locally', async () => {
+    for (const value of ['10000.01', '-1', '88.501']) {
       expect(normalizeSubsidyRate(value)).toBeNull()
       await expect(
         updateExpenseSettings({
@@ -67,13 +73,16 @@ describe('settings API', () => {
             short_term_project: '100.00',
             long_term_project: '150.00',
             same_city_project: '50.00',
-            internal: '100.00',
+            short_term_internal: '100.00',
+        long_term_internal: '100.00',
+        short_term_overseas: '0.00',
+        long_term_overseas: '0.00',
           },
           calculationMode: 'half_day_12',
         }),
-      ).rejects.toThrow('每日补助必须大于 0')
+      ).rejects.toThrow('每日补助不能小于 0')
     }
-    expect(normalizeSubsidyRate('0')).toBeNull()
+    expect(normalizeSubsidyRate('0')).toBe('0.00')
     expect(normalizeSubsidyRate('0', true)).toBe('0.00')
     expect(normalizeSubsidyRate('-0.01', true)).toBeNull()
     expect(http.put).toHaveBeenCalledTimes(0)

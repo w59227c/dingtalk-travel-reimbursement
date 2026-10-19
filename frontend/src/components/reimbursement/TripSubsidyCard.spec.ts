@@ -119,6 +119,29 @@ describe('TripSubsidyCard', () => {
     expect(previews[1]?.text()).toContain('补助 ¥200.00')
   })
 
+  it.each([false, true])('allows an exclusion across merged approval boundaries, mobile=%s', async (mobile) => {
+    const selected = [approvals[0]!, { ...approvals[1]!, startDate: '2026-09-03' }]
+    const expense = useExpenseStore()
+    const wrapper = mountCard('business', selected, false, mobile)
+    await wrapper.get('[aria-label="补助 1 添加非补助时段"]').trigger('click')
+    Object.assign(expense.subsidyTrips[0]!.excludedPeriods![0]!, {
+      startDate: '2026-09-02', endDate: '2026-09-04', endTime: '18:00',
+    })
+    expect(expense.policyInputError).toBe('')
+    expect(expense.tripPayloads()).toHaveLength(2)
+    expect(expense.tripPayloads()[0]?.excludedPeriods?.[0]?.endDate).toBe('2026-09-04')
+    expense.totals = {
+      expenseTotal: '0.00', subsidyTotal: '300.00', totalAmount: '300.00', receiptCount: 0,
+      uppercaseAmount: '叁佰元整', subsidy: null, subsidies: [{
+        relatedApprovalId: 'approval-1', tripType: 'business', calendarDays: 5,
+        effectiveDays: '3.0', excludedDays: '2.0', dailyRate: '100.00', total: '300.00',
+      }],
+    }
+    await nextTick()
+    expect(wrapper.get('.subsidy-preview').text()).toContain('原补助 5.0 天')
+    expect(wrapper.get('.subsidy-preview').text()).toContain('扣除 2.0 天')
+  })
+
   it.each([
     { presentation: 'desktop', mobile: false },
     { presentation: 'mobile', mobile: true },
@@ -202,28 +225,57 @@ describe('TripSubsidyCard', () => {
     expect(expense.tripPayloads().every((trip) => trip.policyConfirmed)).toBe(true)
   })
 
-  it('shows that an internal trip over 30 days has no subsidy', () => {
-    const longApproval = [{
-      processInstanceId: 'approval-long',
-      title: '长期内部出差',
-      startDate: '2026-09-01',
-      endDate: '2026-10-01',
-    }]
-    const wrapper = mountCard('internal', longApproval)
-    expect(wrapper.text()).toContain('公司内部长期出差，不计算补助')
-    expect(wrapper.text()).toContain('超过 30 天，本项补助为 0')
+  it.each([false, true])('uses the approved internal category at any duration, mobile=%s', (mobile) => {
+    const selected = [{ processInstanceId: 'long', title: '内部出差', startDate: '2026-09-01', endDate: '2026-10-01' }]
+    const wrapper = mountCard('short_term_internal', selected, false, mobile)
+    expect(wrapper.findComponent({ name: 'ElInput' }).props('modelValue')).toBe('公司内部出差（短期）')
+    expect(wrapper.text()).not.toContain('超过 30 天')
+    expect(wrapper.findAll('.subsidy-item')).toHaveLength(1)
   })
 
-  it('does not offer a subsidy for overseas approvals and permits clearing restored state', async () => {
+  it.each([false, true])('offers subsidies for configurable overseas categories, mobile=%s', (mobile) => {
     const expense = useExpenseStore()
-    const wrapper = mountCard('overseas')
-    expect(wrapper.text()).toContain('境外出差不计算出差补助')
-    expect(wrapper.findAll('.subsidy-item')).toHaveLength(0)
+    const wrapper = mountCard('long_term_overseas', approvals, false, mobile)
+    expect(wrapper.findComponent({ name: 'ElInput' }).props('modelValue')).toBe('境外商务出差（长期）')
+    expect(wrapper.findAll('.subsidy-item')).toHaveLength(2)
+    expect(expense.tripPayloads()[0]?.tripType).toBe('long_term_overseas')
+  })
+
+  it.each([false, true])('adds, edits, removes and validates multiple excluded periods, mobile=%s', async (mobile) => {
+    const expense = useExpenseStore()
+    const wrapper = mountCard('business', approvals, false, mobile)
+    const add = wrapper.get('[aria-label="补助 1 添加非补助时段"]')
+    await add.trigger('click')
+    expect(expense.policyInputError).toContain('请补齐每个非补助时段')
     expect(expense.tripPayloads()).toEqual([])
-    expect(wrapper.get('[role="switch"]').attributes('disabled')).toBeUndefined()
-    wrapper.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', false)
+    const first = expense.subsidyTrips[0]!.excludedPeriods![0]!
+    Object.assign(first, { startDate: '2026-09-01', endDate: '2026-09-02' })
     await nextTick()
-    expect(expense.includeSubsidy).toBe(false)
+    await wrapper.get('[aria-label="补助 1 非补助时段 1 回家出发时段"] input[value="afternoon"]').setValue()
+    await wrapper.get('[aria-label="补助 1 非补助时段 1 返回出发时段"] input[value="afternoon"]').setValue()
+    expect(first.startTime).toBe('18:00')
+    expect(first.endTime).toBe('18:00')
+    const dates = wrapper.findAllComponents({ name: 'ElDatePicker' })
+    dates[0]!.vm.$emit('update:modelValue', null)
+    await nextTick()
+    expect(first.startDate).toBe('')
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-02')
+    await nextTick()
+    expect(first.startDate).toBe('2026-09-02')
+    await add.trigger('click')
+    Object.assign(expense.subsidyTrips[0]!.excludedPeriods![1]!, {
+      startDate: '2026-09-02', endDate: '2026-09-03', endTime: '18:00',
+    })
+    expect(expense.tripPayloads()[0]?.excludedPeriods).toHaveLength(2)
+    expect(expense.subsidyTrips[1]?.excludedPeriods).toBeUndefined()
+    await wrapper.get('[aria-label="补助 1 删除非补助时段 1"]').trigger('click')
+    expect(expense.tripPayloads()[0]?.excludedPeriods).toHaveLength(1)
+    expense.syncSubsidyApprovals(approvals)
+    expect(expense.subsidyTrips[0]?.excludedPeriods).toHaveLength(1)
+    const readonlyWrapper = mountCard('business', approvals, true, mobile)
+    expect(readonlyWrapper.findComponent({ name: 'ElForm' }).props('disabled')).toBe(true)
+    await readonlyWrapper.get('[aria-label="补助 1 添加非补助时段"]').trigger('click')
+    expect(expense.subsidyTrips[0]?.excludedPeriods).toHaveLength(1)
   })
 
   it('allows a restored subsidy to be turned off when its category can no longer be resolved', async () => {

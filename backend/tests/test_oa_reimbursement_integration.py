@@ -461,7 +461,9 @@ class LocalStorageBoundary:
         return AttachmentRecycleOutcome.CLEANED
 
 
-def _draft_input(*, source_file_id: str | None = None) -> ReimbursementDraftInput:
+def _draft_input(
+    *, source_file_id: str | None = None, excluded_periods: list | None = None
+) -> ReimbursementDraftInput:
     return ReimbursementDraftInput.model_validate(
         {
             "ocrDispositionVersion": 1,
@@ -469,7 +471,8 @@ def _draft_input(*, source_file_id: str | None = None) -> ReimbursementDraftInpu
             "budgetCodeValue": "26007 项目",
             "project": {"mode": "manual", "text": "26007 MES 项目"},
             "trip": {
-                "tripType": "project",
+                "tripType": "short_term_project",
+                "excludedPeriods": excluded_periods or [],
                 "startDate": "2026-09-01",
                 "startTime": "08:00",
                 "endDate": "2026-09-03",
@@ -505,6 +508,7 @@ def _persist_ready_draft(
     travel_type: FormOption,
     *,
     travel_instance_ids: tuple[str, ...] = (TRAVEL_INSTANCE_ID,),
+    excluded_periods: list | None = None,
 ):
     client.app.state.dingtalk_workflow = workflow
     settings = client.app.state.settings
@@ -555,7 +559,9 @@ def _persist_ready_draft(
         calculation = validate_and_calculate_input(
             database,
             catalog=catalog,
-            draft_input=_draft_input().model_copy(update={"accounting_source_verified": True}),
+            draft_input=_draft_input(excluded_periods=excluded_periods).model_copy(
+                update={"accounting_source_verified": True}
+            ),
             max_items=settings.expense_max_items,
         )
         draft = ReimbursementDraft(
@@ -646,9 +652,9 @@ def _persist_ready_draft(
         linked_calculation = validate_and_calculate_input(
             database,
             catalog=catalog,
-            draft_input=_draft_input(source_file_id=files[0].id).model_copy(
-                update={"accounting_source_verified": True}
-            ),
+            draft_input=_draft_input(
+                source_file_id=files[0].id, excluded_periods=excluded_periods
+            ).model_copy(update={"accounting_source_verified": True}),
             max_items=settings.expense_max_items,
         )
         draft.input_json = linked_calculation.canonical_json
@@ -799,8 +805,7 @@ def test_submit_auto_syncs_budget_option_label_without_reconfirming_catalog(
         replace(
             component,
             options=tuple(
-                replace(option, label="26007 新项目名称")
-                for option in component.options
+                replace(option, label="26007 新项目名称") for option in component.options
             ),
         )
         if component.component_id == "budget-id"
@@ -840,10 +845,9 @@ def test_submit_auto_syncs_budget_option_label_without_reconfirming_catalog(
     polled = client.get(
         f"/api/oa/reimbursements/submissions/{response.json()['data']['submissionId']}"
     )
-    assert (
-        polled.json()["data"]["status"]
-        == ReimbursementSubmissionStatus.SUBMITTED.value
-    ), polled.json()
+    assert polled.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value, (
+        polled.json()
+    )
 
 
 def test_locked_submission_allows_unused_option_addition(
@@ -1057,9 +1061,7 @@ def test_worker_rechecks_the_saved_travel_approval_department_before_upload(
     result = client.get(
         f"/api/oa/reimbursements/submissions/{response.json()['data']['submissionId']}"
     )
-    assert result.json()["data"]["error"]["code"] == (
-        "TRAVEL_APPROVAL_DEPARTMENT_CHANGED"
-    )
+    assert result.json()["data"]["error"]["code"] == ("TRAVEL_APPROVAL_DEPARTMENT_CHANGED")
     assert storage.put_files == []
     assert workflow.create_calls == 0
 
@@ -1231,8 +1233,10 @@ def test_validation_splits_a_180_day_membership_window_before_querying_dingtalk(
     assert workflow.create_calls == 1
 
 
+@pytest.mark.parametrize("with_exclusions", [False, True])
 def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     enabled_manual_worker_client,
+    with_exclusions,
 ) -> None:
     reimbursement_schema, _travel_schema, travel_type = _schemas()
     travel_schema = _itinerary_schema()
@@ -1240,7 +1244,30 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     storage = LocalStorageBoundary(auto_rename_first=True)
     client = enabled_manual_worker_client
     csrf = str(mock_login(client)["csrfToken"])
-    draft_id, source_file_ids = _persist_ready_draft(client, workflow, travel_type)
+    periods = (
+        [
+            {
+                "startDate": "2026-09-01",
+                "startTime": "09:00",
+                "endDate": "2026-09-03",
+                "endTime": "18:00",
+            },
+            {
+                "startDate": "2026-09-02",
+                "startTime": "09:00",
+                "endDate": "2026-09-03",
+                "endTime": "18:00",
+            },
+        ]
+        if with_exclusions
+        else []
+    )
+    draft_id, source_file_ids = _persist_ready_draft(
+        client,
+        workflow,
+        travel_type,
+        excluded_periods=periods,
+    )
     first_key = "11111111-1111-4111-8111-111111111111"
 
     submitted = client.post(
@@ -1295,7 +1322,15 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     bundle_pages = PdfReader(io.BytesIO(storage.put_files[0].content)).pages
     assert len(bundle_pages) == 2
     assert bundle_pages[0].extract_text() == "Invoice"
-    load_workbook(io.BytesIO(storage.put_files[-1].content))
+    workbook = load_workbook(io.BytesIO(storage.put_files[-1].content))
+    subsidy_rows = [row for row in workbook.active.iter_rows() if row[1].value == "出差补助"]
+    assert len(subsidy_rows) == 1
+    assert subsidy_rows[0][6].value == (100 if with_exclusions else 300)
+    if with_exclusions:
+        assert "扣除2天非补助时段" in subsidy_rows[0][3].value
+        assert any(
+            "已扣除2.0天非补助时段" in item.value for item in workflow.created_command.form_values
+        )
 
     with client.app.state.database_session_factory() as database:
         submission = database.get(ReimbursementSubmission, submission_id)
@@ -1305,6 +1340,11 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
             .order_by(ReimbursementUpload.sort_order)
         ).all()
         assert submission is not None
+        assert submission.snapshot_version == 7
+        frozen = json.loads(submission.form_snapshot_json)
+        if with_exclusions:
+            assert frozen["subsidy"]["excludedDays"] == "2.0"
+            assert frozen["input"]["trip"]["excludedPeriods"] == periods
         assert submission.status == ReimbursementSubmissionStatus.SUBMITTED.value
         assert submission.approval_url.startswith("dingtalk://dingtalkclient/action/openapp?")
         assert [item.role for item in uploads] == [

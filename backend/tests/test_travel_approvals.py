@@ -202,7 +202,7 @@ def test_runtime_options_preserve_exact_oa_values_and_catalog_version() -> None:
                     "label": "市外项目出差（短期）",
                     "key": "option-domestic",
                 },
-                "subsidyTripType": "project",
+                "subsidyTripType": "short_term_project",
             }
         ],
     }

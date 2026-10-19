@@ -1219,7 +1219,9 @@ def _validate_related_snapshot(
         [draft_input.trip] if draft_input.trip is not None else []
     )
     selected_travel_type = next(iter(travel_type_options.values()))
-    expected_purpose = subsidy_purpose_for_travel_type(selected_travel_type.label)
+    expected_purpose = subsidy_purpose_for_travel_type(
+        selected_travel_type.label, related[0].source_travel_type_value
+    )
     if subsidy_trips and (
         expected_purpose is None
         or any(item.trip_type is not expected_purpose for item in subsidy_trips)

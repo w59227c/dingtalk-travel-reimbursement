@@ -7,18 +7,33 @@ from app.schemas.expenses import TripInput, TripPurpose
 from app.services.application_settings import get_expense_settings
 
 
-def subsidy_purpose_for_travel_type(label: str) -> TripPurpose | None:
-    """Map the configured OA travel-category label to the subsidy policy family."""
+def subsidy_purpose_for_travel_type(
+    label: str,
+    source_label: str | None = None,
+) -> TripPurpose | None:
+    """Keep the approved long/short category, including older collapsed OA mappings."""
 
+    if source_label:
+        source_purpose = subsidy_purpose_for_travel_type(source_label)
+        if source_purpose is not None:
+            return source_purpose
     normalized = "".join(label.split())
+    long_term = "长期" in normalized
+    short_term = "短期" in normalized
     if "境外" in normalized:
-        return TripPurpose.OVERSEAS
+        if long_term:
+            return TripPurpose.LONG_TERM_OVERSEAS
+        return TripPurpose.SHORT_TERM_OVERSEAS if short_term else None
     if "同市" in normalized or "市内项目" in normalized:
         return TripPurpose.SAME_CITY_PROJECT
     if "公司内部" in normalized:
-        return TripPurpose.INTERNAL
+        if long_term:
+            return TripPurpose.LONG_TERM_INTERNAL
+        return TripPurpose.SHORT_TERM_INTERNAL if short_term else None
     if "市外项目" in normalized:
-        return TripPurpose.PROJECT
+        if long_term:
+            return TripPurpose.LONG_TERM_PROJECT
+        return TripPurpose.SHORT_TERM_PROJECT if short_term else None
     if "商务" in normalized:
         return TripPurpose.BUSINESS
     return None
@@ -36,9 +51,6 @@ def calculate_trip_subsidies(
     results: list[SubsidyCalculation] = []
     for trip in merge_overlapping_subsidy_trips(trips):
         trip_type = trip.subsidy_trip_type()
-        if trip.trip_type is TripPurpose.OVERSEAS:
-            # Overseas approvals remain linkable but never create subsidy lines.
-            continue
         results.append(
             calculate_subsidy(
                 trip_type=trip_type,
@@ -49,6 +61,7 @@ def calculate_trip_subsidies(
                 no_subsidy_exception=trip.no_subsidy_exception,
                 manual_subsidy_amount=trip.manual_subsidy_amount,
                 related_approval_id=trip.related_approval_id,
+                excluded_periods=[item.as_period() for item in trip.excluded_periods],
             )
         )
     return results
@@ -99,6 +112,9 @@ def merge_overlapping_subsidy_trips(trips: list[TripInput]) -> list[TripInput]:
                         "end_date": end_date,
                         "end_time": end_time,
                         "policy_confirmed": all(item.policy_confirmed for item in group),
+                        "excluded_periods": [
+                            excluded for item in group for excluded in item.excluded_periods
+                        ],
                         "confirmed_effective_days": next(
                             (
                                 item.confirmed_effective_days

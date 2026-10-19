@@ -28,7 +28,7 @@ export async function getAdminExpenseSettings(): Promise<AdminExpenseSettings> {
   return response.data.data
 }
 
-export function normalizeSubsidyRate(value: string, allowZero = false): string | null {
+export function normalizeSubsidyRate(value: string, allowZero = true): string | null {
   const cents = moneyToCents(value)
   if (
     cents === null
@@ -46,7 +46,7 @@ export async function updateExpenseSettings(
     Object.entries(input.subsidyRates).map(([tripType, value]) => {
       const normalized = normalizeSubsidyRate(value)
       if (normalized === null) {
-        throw new Error('每日补助必须大于 0 且不能超过 10000 元，最多两位小数')
+        throw new Error('每日补助不能小于 0 或超过 10000 元，最多两位小数')
       }
       return [tripType, normalized]
     }),

@@ -10,7 +10,7 @@ import {
   createReceiptKeyword,
   listReceiptKeywords,
 } from '@/api/receiptKeywords'
-import { getAdminExpenseSettings } from '@/api/settings'
+import { getAdminExpenseSettings, updateExpenseSettings } from '@/api/settings'
 import SettingsAdminView from './SettingsAdminView.vue'
 
 vi.mock('@/api/expenses', () => ({ getExpenseCategories: vi.fn() }))
@@ -51,7 +51,10 @@ describe('SettingsAdminView receipt keywords', () => {
         short_term_project: '100.00',
         long_term_project: '150.00',
         same_city_project: '50.00',
-        internal: '100.00',
+        short_term_internal: '100.00',
+        long_term_internal: '100.00',
+        short_term_overseas: '0.00',
+        long_term_overseas: '0.00',
       },
       calculationMode: 'half_day_12',
     })
@@ -109,6 +112,36 @@ describe('SettingsAdminView receipt keywords', () => {
 
     const reimbursementLink = wrapper.findAll('a').find((link) => link.text().trim() === '报销单')!
     expect(reimbursementLink.attributes('data-to')).toBe('/m')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('edits and saves all eight independent subsidy rates, mobile=%s', async (mobile) => {
+    vi.mocked(updateExpenseSettings).mockImplementation(async (input) => input)
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile },
+      global: { plugins: [createPinia(), ElementPlus], stubs: { RouterLink: true } },
+    })
+    await flushPromises()
+    const labels = [
+      '境内商务出差', '境内市外项目出差（长期）', '境内市外项目出差（短期）',
+      '境内市内项目出差（长/短期）', '公司内部出差（长期）', '公司内部出差（短期）',
+      '境外商务出差（长期）', '境外商务出差（短期）',
+    ]
+    for (const label of labels) {
+      expect(wrapper.find(`[aria-label="${label}每日补助标准"]`).exists()).toBe(true)
+    }
+    await wrapper.get('[aria-label="境内商务出差每日补助标准"]').setValue('0')
+    await wrapper.get('[aria-label="公司内部出差（长期）每日补助标准"]').setValue('125.5')
+    await wrapper.get('[aria-label="境外商务出差（长期）每日补助标准"]').setValue('80')
+    await wrapper.findAll('button').find((button) => button.text() === '保存设置')!.trigger('click')
+    await flushPromises()
+    expect(updateExpenseSettings).toHaveBeenCalledWith(expect.objectContaining({
+      subsidyRates: {
+        business: '0.00', short_term_project: '100.00', long_term_project: '150.00',
+        same_city_project: '50.00', short_term_internal: '100.00', long_term_internal: '125.50',
+        short_term_overseas: '0.00', long_term_overseas: '80.00',
+      },
+    }))
     wrapper.unmount()
   })
 

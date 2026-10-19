@@ -7,6 +7,7 @@ import type {
   ExpenseCategoryMetadata,
   ExpenseItem,
   ExpenseTotals,
+  ExcludedPeriodInput,
   TripInput,
   TripType,
 } from '@/types/expenses'
@@ -22,6 +23,7 @@ import { itineraryConfirmationWarnings, matchItineraries } from '@/utils/itinera
 import { centsToMoney, moneyToCents } from '@/utils/money'
 import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime } from '@/utils/tripPeriod'
+import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 
 const SPECIAL_TRIP_TYPES = new Set<TripType>([
   'same_city_project',
@@ -100,6 +102,7 @@ export const useExpenseStore = defineStore('expense', () => {
     policyConfirmed: false,
     confirmedEffectiveDays: '',
     noSubsidyException: false,
+    excludedPeriods: [] as ExcludedPeriodInput[],
   })
   const subsidyTrips = ref<TripInput[]>([])
   const items = ref<ExpenseItem[]>([])
@@ -117,19 +120,45 @@ export const useExpenseStore = defineStore('expense', () => {
   const calculatedSignature = ref('')
 
   const projectCalendarDays = computed(() =>
-    trip.tripType === 'project' ? calendarDays(trip.startDate, trip.endDate) : null,
+    ['short_term_project', 'long_term_project'].includes(trip.tripType)
+      ? calendarDays(trip.startDate, trip.endDate) : null,
   )
   const projectPolicyType = computed(() => {
-    if (trip.tripType !== 'project' || projectCalendarDays.value === null) return null
-    return projectCalendarDays.value > 30 ? 'long_term_project' : 'short_term_project'
+    return ['short_term_project', 'long_term_project'].includes(trip.tripType)
+      ? trip.tripType : null
   })
   const requiresPolicyConfirmation = computed(
     () => includeSubsidy.value && SPECIAL_TRIP_TYPES.has(trip.tripType),
   )
   const maxExpenseItems = ref(200)
+  const excludedPeriodInputError = computed(() => {
+    if (!includeSubsidy.value) return ''
+    const groups = subsidyTrips.value.length
+      ? groupOverlappingSubsidyTrips(subsidyTrips.value)
+      : [{ ...trip, excludedPeriods: trip.excludedPeriods }]
+    for (const group of groups) {
+      for (const excluded of group.excludedPeriods) {
+        if (!isCalendarDate(excluded.startDate) || !isCalendarDate(excluded.endDate)
+          || !tripPeriodFromTime(excluded.startTime) || !tripPeriodFromTime(excluded.endTime)) {
+          return '请补齐每个非补助时段的日期和出发时段'
+        }
+        const start = `${excluded.startDate} ${excluded.startTime}`
+        const end = `${excluded.endDate} ${excluded.endTime}`
+        if (end < start) return '非补助时段的结束时间不能早于开始时间'
+        if (start < `${group.startDate} ${group.startTime}`
+          || end > `${group.endDate} ${group.endTime}`) {
+          return '非补助时段必须在本项出差时段内'
+        }
+      }
+    }
+    return ''
+  })
   const policyInputError = computed(() => {
     if (!includeSubsidy.value) return ''
-    if (trip.tripType === 'overseas') return '境外出差不申请出差补助'
+    if (['project', 'internal', 'overseas'].includes(trip.tripType)) {
+      return '请重新确认出差审批中的完整长短期类别'
+    }
+    if (excludedPeriodInputError.value) return excludedPeriodInputError.value
     if (!subsidyTrips.value.length) {
       if (!trip.startDate || !trip.endDate) return '请完整填写出发和返回日期、时段'
       if (requiresPolicyConfirmation.value && !trip.policyConfirmed) {
@@ -213,7 +242,11 @@ export const useExpenseStore = defineStore('expense', () => {
 
   function tripPayloads(): TripInput[] {
     if (!includeSubsidy.value) return []
-    if (trip.tripType === 'overseas') return []
+    if (['project', 'internal', 'overseas'].includes(trip.tripType)) return []
+    if (excludedPeriodInputError.value) return []
+    function exclusions(values: ExcludedPeriodInput[] | undefined): Pick<TripInput, 'excludedPeriods'> {
+      return values?.length ? { excludedPeriods: values.map((item) => ({ ...item })) } : {}
+    }
     if (subsidyTrips.value.length) {
       return subsidyTrips.value.flatMap((item) => {
         const startPeriod = tripPeriodFromTime(item.startTime)
@@ -228,6 +261,7 @@ export const useExpenseStore = defineStore('expense', () => {
           startTime: TRIP_PERIOD_TIME[startPeriod],
           endDate: item.endDate,
           endTime: TRIP_PERIOD_TIME[endPeriod],
+          ...exclusions(item.excludedPeriods),
         }
         if (trip.tripType === 'same_city_project') payload.policyConfirmed = Boolean(item.policyConfirmed)
         return [payload]
@@ -248,6 +282,7 @@ export const useExpenseStore = defineStore('expense', () => {
       startTime: TRIP_PERIOD_TIME[startPeriod],
       endDate: trip.endDate,
       endTime: TRIP_PERIOD_TIME[endPeriod],
+      ...exclusions(trip.excludedPeriods),
     }
     if (requiresPolicyConfirmation.value) payload.policyConfirmed = trip.policyConfirmed
     return [payload]
@@ -272,6 +307,8 @@ export const useExpenseStore = defineStore('expense', () => {
         endDate: approval.endDate,
         endTime: current?.endTime ?? (index === lastIndex ? trip.endTime : '18:00'),
         policyConfirmed: current?.policyConfirmed ?? false,
+        ...(current?.excludedPeriods?.length
+          ? { excludedPeriods: current.excludedPeriods.map((item) => ({ ...item })) } : {}),
       }
     })
     const changed = JSON.stringify(nextTrips) !== JSON.stringify(subsidyTrips.value)
@@ -474,8 +511,13 @@ export const useExpenseStore = defineStore('expense', () => {
       policyConfirmed: persistedTrip?.policyConfirmed ?? false,
       confirmedEffectiveDays: persistedTrip?.confirmedEffectiveDays ?? '',
       noSubsidyException: persistedTrip?.noSubsidyException ?? false,
+      excludedPeriods: (persistedTrip?.excludedPeriods ?? []).map((item) => ({ ...item })),
     })
-    subsidyTrips.value = persistedTrips.map((item) => ({ ...item }))
+    subsidyTrips.value = persistedTrips.map((item) => ({
+      ...item,
+      ...(item.excludedPeriods?.length
+        ? { excludedPeriods: item.excludedPeriods.map((excluded) => ({ ...excluded })) } : {}),
+    }))
 
     const candidates = draftFiles
       .map((file) => ({ file, item: draftOcrExpenseItem(file) }))
@@ -751,6 +793,7 @@ export const useExpenseStore = defineStore('expense', () => {
       policyConfirmed: false,
       confirmedEffectiveDays: '',
       noSubsidyException: false,
+      excludedPeriods: [],
     })
     subsidyTrips.value = []
     items.value = []

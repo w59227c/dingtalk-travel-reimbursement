@@ -9,7 +9,6 @@ from app.schemas.expenses import (
     MAX_EXPENSE_ITEMS_HARD_LIMIT,
     ExpenseLineBase,
     TripInput,
-    TripPurpose,
 )
 from app.schemas.primitives import StrictCalendarDate
 
@@ -68,6 +67,4 @@ class ExcelGenerateRequest(BaseModel):
         ids = [item.related_approval_id for item in self.trips]
         if any(value is None for value in ids) or len(ids) != len(set(ids)):
             raise ValueError("trips require unique relatedApprovalId values")
-        if any(item.trip_type is TripPurpose.OVERSEAS for item in self.trips):
-            raise ValueError("overseas approvals do not create subsidy trips")
         return self

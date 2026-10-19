@@ -26,6 +26,7 @@ export function subsidyTripTypeForProfile(
       : null
   }
   return profile.subsidyTripType
+    ?? subsidyTripTypeForTravelLabel(sourceTravelTypeValue ?? '')
     ?? subsidyTripTypeForTravelLabel(
       mappedTravelTypeOption(profile, sourceTravelTypeValue)?.label ?? '',
     )
@@ -35,10 +36,18 @@ export function subsidyTripTypeForProfile(
 export function subsidyTripTypeForTravelLabel(label: string): TripType | null {
   const normalized = label.replace(/\s+/g, '')
   if (!normalized) return null
-  if (normalized.includes('境外')) return 'overseas'
+  const longTerm = normalized.includes('长期')
+  const shortTerm = normalized.includes('短期')
+  if (normalized.includes('境外')) {
+    return longTerm ? 'long_term_overseas' : shortTerm ? 'short_term_overseas' : null
+  }
   if (normalized.includes('同市') || normalized.includes('市内项目')) return 'same_city_project'
-  if (normalized.includes('公司内部')) return 'internal'
-  if (normalized.includes('市外项目')) return 'project'
+  if (normalized.includes('公司内部')) {
+    return longTerm ? 'long_term_internal' : shortTerm ? 'short_term_internal' : null
+  }
+  if (normalized.includes('市外项目')) {
+    return longTerm ? 'long_term_project' : shortTerm ? 'short_term_project' : null
+  }
   if (normalized.includes('商务')) return 'business'
   return null
 }

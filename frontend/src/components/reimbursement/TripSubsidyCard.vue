@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 
 import { useExpenseStore } from '@/stores/expense'
-import type { SubsidyResult, TripInput, TripType } from '@/types/expenses'
+import type { ExcludedPeriodInput, SubsidyResult, TripInput, TripType } from '@/types/expenses'
 import { groupOverlappingSubsidyTrips, type SubsidyTripGroup } from '@/utils/subsidyTripGroups'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime, type TripDayPeriod } from '@/utils/tripPeriod'
 
@@ -26,7 +26,6 @@ const props = withDefaults(defineProps<{
 })
 
 const expense = useExpenseStore()
-const isOverseas = computed(() => props.approvalTripType === 'overseas')
 const subsidyGroups = computed(() => groupOverlappingSubsidyTrips(expense.subsidyTrips))
 const subsidyCalculationError = computed(() => {
   if (!expense.includeSubsidy || !expense.calculationError || expense.itemReadinessError) return ''
@@ -34,27 +33,26 @@ const subsidyCalculationError = computed(() => {
   return expense.calculationError
 })
 
-const tripTypeNames: Record<Exclude<TripType, 'overseas'>, string> = {
+const tripTypeNames: Record<TripType, string> = {
   business: '境内商务出差',
   project: '境内市外项目',
   same_city_project: '境内同市项目',
   internal: '公司内部出差',
+  overseas: '境外出差',
+  short_term_project: '境内市外项目出差（短期）',
+  long_term_project: '境内市外项目出差（长期）',
+  short_term_internal: '公司内部出差（短期）',
+  long_term_internal: '公司内部出差（长期）',
+  short_term_overseas: '境外商务出差（短期）',
+  long_term_overseas: '境外商务出差（长期）',
 }
 
 function tripTypeName(type: TripType | null | undefined): string {
-  if (type === 'overseas') return '境外出差（不申请补助）'
   return type ? tripTypeNames[type] : '未识别出差类别'
 }
 
 function approvalFor(item: TripInput): SubsidyApproval | undefined {
   return props.approvals.find((approval) => approval.processInstanceId === item.relatedApprovalId)
-}
-
-function calendarDays(group: SubsidyTripGroup): number | null {
-  const start = Date.parse(`${group.startDate}T00:00:00Z`)
-  const end = Date.parse(`${group.endDate}T00:00:00Z`)
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null
-  return Math.floor((end - start) / 86_400_000) + 1
 }
 
 function period(time: string): TripDayPeriod | undefined {
@@ -72,6 +70,34 @@ function setPeriod(group: SubsidyTripGroup, field: 'startTime' | 'endTime', valu
 
 function setPolicyConfirmed(group: SubsidyTripGroup, value: boolean): void {
   for (const trip of group.trips) trip.policyConfirmed = value
+}
+
+function addExcludedPeriod(group: SubsidyTripGroup): void {
+  if (props.readonly || group.excludedPeriods.length >= 100) return
+  const first = group.trips[0]!
+  first.excludedPeriods ??= []
+  first.excludedPeriods.push({ startDate: '', startTime: '09:00', endDate: '', endTime: '09:00' })
+}
+
+function removeExcludedPeriod(group: SubsidyTripGroup, excluded: ExcludedPeriodInput): void {
+  if (props.readonly) return
+  for (const trip of group.trips) {
+    trip.excludedPeriods = trip.excludedPeriods?.filter((item) => item !== excluded)
+  }
+}
+
+function setExcludedPeriod(
+  excluded: ExcludedPeriodInput,
+  field: 'startTime' | 'endTime',
+  value: string | number | boolean | undefined,
+): void {
+  if (!props.readonly && (value === 'morning' || value === 'afternoon')) {
+    excluded[field] = TRIP_PERIOD_TIME[value]
+  }
+}
+
+function setExcludedDate(excluded: ExcludedPeriodInput, field: 'startDate' | 'endDate', value: unknown): void {
+  if (!props.readonly) excluded[field] = typeof value === 'string' ? value : ''
 }
 
 function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | null {
@@ -98,7 +124,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
         <el-switch
           :model-value="expense.includeSubsidy"
           :disabled="props.readonly || (!expense.includeSubsidy
-            && (isOverseas || !props.approvals.length || !props.approvalTripType))"
+            && (!props.approvals.length || !props.approvalTripType))"
           active-text="申请出差补助"
           inactive-text="不申请"
           @update:model-value="expense.setSubsidyIncluded"
@@ -106,14 +132,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
       </el-form-item>
 
       <el-alert
-        v-if="isOverseas"
-        title="境外出差不计算出差补助"
-        description="境外审批仍可用于报销关联，但本系统不生成境外出差补助。"
-        type="info"
-        :closable="false"
-      />
-      <el-alert
-        v-else-if="!props.approvals.length"
+        v-if="!props.approvals.length"
         title="请先关联已通过的出差审批"
         description="系统按审批日期生成补助时段；不连续时分别计算，日期重叠时自动合并。"
         type="info"
@@ -193,30 +212,98 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           </div>
 
           <el-alert
-            v-if="props.approvalTripType === 'project'"
-            :title="(calendarDays(group) ?? 0) > 30 ? '市外长期项目' : '市外短期项目'"
-            :description="(calendarDays(group) ?? 0) > 30
-              ? `共 ${calendarDays(group)} 个自然日，系统自动采用长期项目标准。`
-              : `共 ${calendarDays(group)} 个自然日，系统自动采用短期项目标准。`"
-            type="info"
-            :closable="false"
-          />
-          <el-alert
-            v-else-if="props.approvalTripType === 'internal'"
-            :title="(calendarDays(group) ?? 0) > 30 ? '公司内部长期出差，不计算补助' : '公司内部短期出差'"
-            :description="(calendarDays(group) ?? 0) > 30
-              ? `共 ${calendarDays(group)} 个自然日，超过 30 天，本项补助为 0。`
-              : `共 ${calendarDays(group)} 个自然日，按设置中的公司内部出差每日标准自动计算。`"
-            type="info"
-            :closable="false"
-          />
-          <el-alert
-            v-else
             title="自动计算规则"
             description="出发日上午计 1 天、下午计 0.5 天；返回日上午计 0.5 天、下午计 1 天。同一天最多计 1 天。"
             type="info"
             :closable="false"
           />
+
+          <section
+            class="excluded-periods"
+            :class="{ 'excluded-periods--mobile': props.mobile }"
+            :aria-label="`补助 ${index + 1} 非补助时段`"
+          >
+            <div class="excluded-periods__heading">
+              <strong>非补助时段</strong>
+              <el-button
+                :aria-label="`补助 ${index + 1} 添加非补助时段`"
+                :disabled="group.excludedPeriods.length >= 100"
+                @click="addExcludedPeriod(group)"
+              >
+                添加非补助时段
+              </el-button>
+            </div>
+            <p class="excluded-periods__hint">
+              回家探亲：上午出发给半天补助，下午出发给全天；返回出差：上午出发给全天，下午出发给半天。中间完整日期不补助，重叠时段只扣一次。
+            </p>
+            <div
+              v-for="(excluded, excludedIndex) in group.excludedPeriods"
+              :key="excludedIndex"
+              class="excluded-period"
+            >
+              <div class="excluded-periods__heading">
+                <span>时段 {{ excludedIndex + 1 }}</span>
+                <el-button
+                  type="danger"
+                  link
+                  :aria-label="`补助 ${index + 1} 删除非补助时段 ${excludedIndex + 1}`"
+                  @click="removeExcludedPeriod(group, excluded)"
+                >
+                  删除
+                </el-button>
+              </div>
+              <div class="trip-grid">
+                <el-form-item label="开始日期（回家探亲等）">
+                  <el-date-picker
+                    :model-value="excluded.startDate"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    format="YYYY-MM-DD"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 开始日期`"
+                    @update:model-value="setExcludedDate(excluded, 'startDate', $event)"
+                  />
+                </el-form-item>
+                <el-form-item label="回家出发时段">
+                  <el-radio-group
+                    :model-value="period(excluded.startTime)"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 回家出发时段`"
+                    @update:model-value="setExcludedPeriod(excluded, 'startTime', $event)"
+                  >
+                    <el-radio-button value="morning">
+                      上午
+                    </el-radio-button>
+                    <el-radio-button value="afternoon">
+                      下午
+                    </el-radio-button>
+                  </el-radio-group>
+                </el-form-item>
+                <el-form-item label="结束日期（返回出差）">
+                  <el-date-picker
+                    :model-value="excluded.endDate"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    format="YYYY-MM-DD"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 结束日期`"
+                    @update:model-value="setExcludedDate(excluded, 'endDate', $event)"
+                  />
+                </el-form-item>
+                <el-form-item label="返回出差的出发时段">
+                  <el-radio-group
+                    :model-value="period(excluded.endTime)"
+                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回出发时段`"
+                    @update:model-value="setExcludedPeriod(excluded, 'endTime', $event)"
+                  >
+                    <el-radio-button value="morning">
+                      上午
+                    </el-radio-button>
+                    <el-radio-button value="afternoon">
+                      下午
+                    </el-radio-button>
+                  </el-radio-group>
+                </el-form-item>
+              </div>
+            </div>
+          </section>
 
           <div
             v-if="props.approvalTripType === 'same_city_project'"
@@ -237,6 +324,10 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
             aria-live="polite"
           >
             <span>自然日 {{ subsidyFor(group, index)?.calendarDays }} 天</span>
+            <span v-if="subsidyFor(group, index)?.excludedDays !== undefined">
+              原补助 {{ (Number(subsidyFor(group, index)?.effectiveDays) + Number(subsidyFor(group, index)?.excludedDays)).toFixed(1) }} 天
+            </span>
+            <span v-if="subsidyFor(group, index)?.excludedDays !== undefined">扣除 {{ subsidyFor(group, index)?.excludedDays }} 天</span>
             <span>有效 {{ subsidyFor(group, index)?.effectiveDays }} 天</span>
             <span>¥{{ subsidyFor(group, index)?.dailyRate }} / 天</span>
             <strong>补助 ¥{{ subsidyFor(group, index)?.total }}</strong>
@@ -323,6 +414,15 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 24px;
 }
+
+.excluded-periods { margin-top: 16px; }
+.excluded-periods__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.excluded-periods__hint { color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
+.excluded-period { margin-top: 12px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
+.excluded-period .trip-grid { margin-top: 12px; }
+.excluded-period :deep(.el-date-editor.el-input) { width: 100%; min-width: 0; }
+.excluded-periods--mobile .trip-grid { grid-template-columns: minmax(0, 1fr); }
+.excluded-periods--mobile .excluded-periods__heading { flex-wrap: wrap; }
 
 .policy-confirmation {
   margin-top: 14px;

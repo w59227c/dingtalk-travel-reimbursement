@@ -28,7 +28,7 @@ from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
 from app.domain.expenses import ExpenseTotals, calculate_expense_totals
 from app.domain.money import money_string
 from app.domain.reimbursement_proofs import payment_proof_required
-from app.domain.subsidy import SubsidyCalculation, TripType
+from app.domain.subsidy import SubsidyCalculation, TripType, calculate_subsidy
 from app.integrations.dingtalk.storage import ApprovalAttachment
 from app.integrations.dingtalk.workflow import (
     CreateProcessInstanceCommand,
@@ -86,7 +86,7 @@ from app.services.subsidy_calculation import (
     subsidy_purpose_for_travel_type,
 )
 
-SNAPSHOT_VERSION = 6
+SNAPSHOT_VERSION = 7
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _SIGNED_INT64_MAX = 9_223_372_036_854_775_807
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -193,6 +193,17 @@ class SnapshotProject(_SnapshotModel):
         return self
 
 
+class SnapshotExcludedPeriod(_SnapshotModel):
+    start_date: StrictCalendarDate
+    start_time: MinuteTime
+    end_date: StrictCalendarDate
+    end_time: MinuteTime
+
+    @field_serializer("start_time", "end_time", when_used="json")
+    def serialize_minute_time(self, value: object) -> str:
+        return value.strftime("%H:%M")
+
+
 class SnapshotTrip(_SnapshotModel):
     trip_type: TripPurpose
     related_approval_id: ShortText | None = None
@@ -201,6 +212,10 @@ class SnapshotTrip(_SnapshotModel):
     end_date: StrictCalendarDate
     end_time: MinuteTime
     policy_confirmed: bool
+    excluded_periods: tuple[SnapshotExcludedPeriod, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     confirmed_effective_days: DecimalString | None = None
     no_subsidy_exception: bool
     manual_subsidy_amount: DecimalString | None = Field(
@@ -271,6 +286,10 @@ class SnapshotSubsidy(_SnapshotModel):
     daily_rate: DecimalString
     total: DecimalString
     related_approval_id: ShortText | None = None
+    excluded_days: DecimalString | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class SnapshotTotals(_SnapshotModel):
@@ -296,10 +315,13 @@ class SnapshotRelatedApproval(_SnapshotModel):
     business_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     instance_created_at: ShortText
     verified_at: ShortText
-    originator_department_id: Annotated[
-        str,
-        StringConstraints(min_length=1, max_length=128),
-    ] | None = Field(default=None, exclude_if=lambda value: value is None)
+    originator_department_id: (
+        Annotated[
+            str,
+            StringConstraints(min_length=1, max_length=128),
+        ]
+        | None
+    ) = Field(default=None, exclude_if=lambda value: value is None)
     source_travel_type_value: LongText | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -346,7 +368,7 @@ class SnapshotFormValue(_SnapshotModel):
 
 
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[6] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6, 7] = SNAPSHOT_VERSION
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
@@ -502,12 +524,9 @@ def collect_snapshot_source(
         draft_input=draft_input,
         max_items=max_items,
     )
-    if (
-        calculation.canonical_json != draft.input_json
-        and not _only_derived_project_changed(
-            draft.input_json,
-            calculation.canonical_json,
-        )
+    if calculation.canonical_json != draft.input_json and not _only_derived_project_changed(
+        draft.input_json,
+        calculation.canonical_json,
     ):
         raise _snapshot_error("报销内容已变化，请重新确认后再提交")
 
@@ -1030,7 +1049,9 @@ def _validate_related_sources(
         [draft_input.trip] if draft_input.trip is not None else []
     )
     selected_travel_type = next(iter(travel_type_options.values()))
-    expected_purpose = subsidy_purpose_for_travel_type(selected_travel_type.label)
+    expected_purpose = subsidy_purpose_for_travel_type(
+        selected_travel_type.label, related[0].source_travel_type_value
+    )
     if subsidy_trips and (
         expected_purpose is None
         or any(item.trip_type is not expected_purpose for item in subsidy_trips)
@@ -1136,10 +1157,7 @@ def _snapshot_travel_profile(item: TravelTemplateContract) -> SnapshotTravelProf
         budget_code_component_id=budget_code_component_id,
         travel_type_component_id=item.travel_type_component_id,
         travel_type_mappings=(
-            {
-                key: _snapshot_option(option)
-                for key, option in item.travel_type_mappings.items()
-            }
+            {key: _snapshot_option(option) for key, option in item.travel_type_mappings.items()}
             if item.travel_type_mappings is not None
             else None
         ),
@@ -1157,6 +1175,10 @@ def _snapshot_trip(trip: TripInput | None) -> SnapshotTrip | None:
         end_date=trip.end_date,
         end_time=trip.end_time,
         policy_confirmed=trip.policy_confirmed,
+        excluded_periods=tuple(
+            SnapshotExcludedPeriod.model_validate(item.model_dump())
+            for item in trip.excluded_periods
+        ),
         confirmed_effective_days=trip.confirmed_effective_days,
         no_subsidy_exception=trip.no_subsidy_exception,
         manual_subsidy_amount=trip.manual_subsidy_amount,
@@ -1341,9 +1363,14 @@ def _description_v1(
     ]
     calculated = subsidies or ((subsidy,) if subsidy is not None else ())
     for item in calculated:
+        exclusion = (
+            f"（已扣除{format(item.excluded_days, '.1f')}天非补助时段）"
+            if item.excluded_days is not None
+            else ""
+        )
         lines.append(
             f"出差补助：{format(item.effective_days, '.1f')}天 × "
-            f"{money_string(item.daily_rate)} = {money_string(item.total)}"
+            f"{money_string(item.daily_rate)} = {money_string(item.total)}{exclusion}"
         )
     lines.append(f"合计：{money_string(totals.total_amount)}")
     return "\n".join(lines)
@@ -1392,9 +1419,7 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         snapshot.related_approvals
     ):
         raise ValueError("related approval ids must be unique")
-    related_department_ids = [
-        item.originator_department_id for item in snapshot.related_approvals
-    ]
+    related_department_ids = [item.originator_department_id for item in snapshot.related_approvals]
     if any(related_department_ids) and (
         any(item is None for item in related_department_ids)
         or len(set(related_department_ids)) != 1
@@ -1576,13 +1601,39 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         raise ValueError("trip input requires one subsidy calculation per merged period")
     for trip_item, subsidy_item in zip(output_trips, calculated_subsidies, strict=True):
         if (
-            subsidy_item.trip_type != trip_item.subsidy_trip_type()
+            subsidy_item.trip_type
+            != trip_item.subsidy_trip_type(legacy=snapshot.snapshot_version == 6)
             or subsidy_item.calendar_days != (trip_item.end_date - trip_item.start_date).days + 1
             or subsidy_item.related_approval_id != trip_item.related_approval_id
             or money_string(subsidy_item.effective_days * subsidy_item.daily_rate)
             != money_string(subsidy_item.total)
         ):
             raise ValueError("snapshot subsidy mismatch")
+        if snapshot.snapshot_version == 6:
+            if trip_item.excluded_periods or subsidy_item.excluded_days is not None:
+                raise ValueError("legacy snapshots cannot contain excluded periods")
+            if trip_item.trip_type.value not in {
+                "business",
+                "project",
+                "same_city_project",
+                "internal",
+                "overseas",
+            }:
+                raise ValueError("legacy snapshot category mismatch")
+        else:
+            recalculated = calculate_subsidy(
+                trip_type=trip_item.subsidy_trip_type(),
+                period=trip_item.as_period(),
+                configured_daily_rate=subsidy_item.daily_rate,
+                policy_confirmed=trip_item.policy_confirmed,
+                confirmed_effective_days=trip_item.confirmed_effective_days,
+                no_subsidy_exception=trip_item.no_subsidy_exception,
+                manual_subsidy_amount=trip_item.manual_subsidy_amount,
+                related_approval_id=trip_item.related_approval_id,
+                excluded_periods=[item.as_period() for item in trip_item.excluded_periods],
+            )
+            if recalculated != subsidy_item:
+                raise ValueError("snapshot subsidy days mismatch")
     start_date = min(item.start_date for item in snapshot.related_approvals)
     end_date = max(item.end_date for item in snapshot.related_approvals)
     if snapshot.travel_period != SnapshotTravelPeriod(
@@ -1617,6 +1668,15 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         options.append(_profile_selected_type(profile, related.source_travel_type_value))
     if any(item != snapshot.selections.travel_type for item in options):
         raise ValueError("travel type option mismatch")
+    if snapshot.snapshot_version == 7 and subsidy_trips:
+        expected_purpose = subsidy_purpose_for_travel_type(
+            snapshot.selections.travel_type.label,
+            snapshot.related_approvals[0].source_travel_type_value,
+        )
+        if expected_purpose is None or any(
+            item.trip_type != expected_purpose for item in subsidy_trips
+        ):
+            raise ValueError("snapshot subsidy category differs from approval")
     expected_values = _snapshot_form_values(
         company=FormOption(**snapshot.selections.company.model_dump()),
         budget=FormOption(**snapshot.selections.budget_code.model_dump()),
@@ -1696,6 +1756,7 @@ def _subsidy_from_snapshot(value: SnapshotSubsidy | None) -> SubsidyCalculation 
         daily_rate=value.daily_rate,
         total=value.total,
         related_approval_id=value.related_approval_id,
+        excluded_days=value.excluded_days,
     )
 
 
