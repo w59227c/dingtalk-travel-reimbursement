@@ -214,7 +214,7 @@ async function save(): Promise<void> {
           <strong>所有类型均按日期和时段自动计算；同市项目另需员工按制度确认</strong>
         </div>
         <p class="settings-rule-exception">
-          每类均可独立配置，0 元表示不发补助。非补助时段按探亲及返回出差的出发时段扣除，重叠时间只扣一次。
+          每类均可独立配置，0 元表示不发补助。非补助时段按出发和返回时段扣除，各段不能重叠或重复。
         </p>
       </section>
       <el-button
