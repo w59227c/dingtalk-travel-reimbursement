@@ -1,12 +1,15 @@
+import subprocess
+import sys
+
 import pytest
 from pypdf import PdfWriter
 from pypdf.generic import (
     ArrayObject,
     DecodedStreamObject,
     DictionaryObject,
+    FloatObject,
     NameObject,
     NumberObject,
-    TextStringObject,
 )
 
 from app.domain.categories import ExpenseCategory
@@ -25,41 +28,10 @@ from app.ocr.workers import _append_passenger_fields
 def _positioned_party_pdf(path, *, seller_left=False, buyer_only=False, conflicting=False):
     writer = PdfWriter()
     page = writer.add_blank_page(width=640, height=842)
-    # Standard CID font keeps this synthetic PDF independent of installed fonts.
-    font = DictionaryObject(
-        {
-            NameObject("/Type"): NameObject("/Font"),
-            NameObject("/Subtype"): NameObject("/Type0"),
-            NameObject("/BaseFont"): NameObject("/STSong-Light"),
-            NameObject("/Encoding"): NameObject("/UniGB-UCS2-H"),
-            NameObject("/DescendantFonts"): ArrayObject(
-                [
-                    DictionaryObject(
-                        {
-                            NameObject("/Type"): NameObject("/Font"),
-                            NameObject("/Subtype"): NameObject("/CIDFontType0"),
-                            NameObject("/BaseFont"): NameObject("/STSong-Light"),
-                            NameObject("/CIDSystemInfo"): DictionaryObject(
-                                {
-                                    NameObject("/Registry"): TextStringObject("Adobe"),
-                                    NameObject("/Ordering"): TextStringObject("GB1"),
-                                    NameObject("/Supplement"): NumberObject(4),
-                                }
-                            ),
-                        }
-                    )
-                ]
-            ),
-        }
-    )
-    page[NameObject("/Resources")] = DictionaryObject(
-        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
-    )
-    commands = []
+    cells = []
 
     def cell(x, y, text):
-        encoded = text.encode("utf-16be").hex()
-        commands.append(f"BT /F1 10 Tf 1 0 0 1 {x} {y} Tm <{encoded}> Tj ET")
+        cells.append((x, y, text))
 
     buyer_x, seller_x = (300, 20) if seller_left else (20, 300)
     # Values deliberately precede every label in PDF stream order.
@@ -80,6 +52,57 @@ def _positioned_party_pdf(path, *, seller_left=False, buyer_only=False, conflict
     cell(20, 580, "*交通运输服务*客运服务费")
     cell(20, 560, "出行日期：2026年07月01日")
     cell(20, 540, "甲地-乙地")
+    # Embed simple vector glyphs with explicit Unicode mappings. Unembedded
+    # standard CJK fonts still depend on the host's available substitute fonts.
+    codes = {character: index for index, character in enumerate(
+        sorted({character for _, _, text in cells for character in text}), start=1,
+    )}
+    assert len(codes) < 100
+    glyph = DecodedStreamObject()
+    glyph.set_data(b"1000 0 0 0 1000 1000 d1 0 0 1000 1000 re f")
+    glyph_ref = writer._add_object(glyph)
+    unicode_map = DecodedStreamObject()
+    mappings = "\n".join(
+        f"<{code:02x}> <{character.encode('utf-16be').hex()}>"
+        for character, code in codes.items()
+    )
+    unicode_map.set_data((
+        "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /SyntheticUnicode def /CMapType 2 def\n"
+        "1 begincodespacerange <00> <FF> endcodespacerange\n"
+        f"{len(codes)} beginbfchar\n{mappings}\nendbfchar\n"
+        "endcmap CMapName currentdict /CMap defineresource pop end end"
+    ).encode("ascii"))
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type3"),
+        NameObject("/FontBBox"): ArrayObject([NumberObject(v) for v in (0, 0, 1000, 1000)]),
+        NameObject("/FontMatrix"): ArrayObject([
+            FloatObject(v) for v in (0.001, 0, 0, 0.001, 0, 0)
+        ]),
+        NameObject("/CharProcs"): DictionaryObject({
+            NameObject(f"/g{code}"): glyph_ref for code in codes.values()
+        }),
+        NameObject("/Encoding"): DictionaryObject({
+            NameObject("/Type"): NameObject("/Encoding"),
+            NameObject("/Differences"): ArrayObject([
+                NumberObject(1), *(NameObject(f"/g{code}") for code in codes.values()),
+            ]),
+        }),
+        NameObject("/FirstChar"): NumberObject(1),
+        NameObject("/LastChar"): NumberObject(len(codes)),
+        NameObject("/Widths"): ArrayObject([NumberObject(1000) for _ in codes]),
+        NameObject("/Resources"): DictionaryObject(),
+        NameObject("/ToUnicode"): writer._add_object(unicode_map),
+    })
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)}),
+    })
+    commands = []
+    for x, y, text in cells:
+        encoded = "".join(f"{codes[character]:02x}" for character in text)
+        commands.append(f"BT /F1 10 Tf 1 0 0 1 {x} {y} Tm <{encoded}> Tj ET")
     stream = DecodedStreamObject()
     stream.set_data("\n".join(commands).encode("ascii"))
     page[NameObject("/Contents")] = writer._add_object(stream)
@@ -92,6 +115,34 @@ def test_pdf_seller_uses_coordinates_independently_of_stream_order(tmp_path, sel
     path = _positioned_party_pdf(tmp_path / "seller.pdf", seller_left=seller_left)
     assert invoice_seller_from_pdf(str(path)) == "示例出行销售公司"
     assert invoice_seller_from_pdf(str(path), max_characters=10) is None
+
+
+@pytest.mark.parametrize("seller_left", [False, True])
+def test_pdf_seller_fixture_does_not_require_system_fonts(tmp_path, seller_left):
+    path = _positioned_party_pdf(tmp_path / "seller.pdf", seller_left=seller_left)
+    # PDFium's font hooks are process-global; isolate this environment in a child.
+    script = """
+import ctypes
+import sys
+import pypdfium2 as pdfium
+from app.ocr.invoice_parties import invoice_seller_from_pdf
+
+font_info = pdfium.raw.FPDF_SYSFONTINFO()
+font_info.version = 1
+callbacks = []
+for name, callback_type in font_info._fields_:
+    if name != "version":
+        callback = callback_type(lambda *args: 0)
+        callbacks.append(callback)
+        setattr(font_info, name, callback)
+pdfium.raw.FPDF_SetSystemFontInfo(ctypes.byref(font_info))
+assert invoice_seller_from_pdf(sys.argv[1]) == "示例出行销售公司"
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(path)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("changes", [{"buyer_only": True}, {"conflicting": True}])
