@@ -86,7 +86,7 @@ from app.services.subsidy_calculation import (
     subsidy_purpose_for_travel_type,
 )
 
-SNAPSHOT_VERSION = 7
+SNAPSHOT_VERSION = 8
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _SIGNED_INT64_MAX = 9_223_372_036_854_775_807
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -246,6 +246,9 @@ class SnapshotExpenseItem(_SnapshotModel):
     hotel_bill_file_ids: tuple[
         Annotated[str, StringConstraints(min_length=1, max_length=36)], ...
     ] = ()
+    receipt_attachment_file_ids: tuple[
+        Annotated[str, StringConstraints(min_length=1, max_length=36)], ...
+    ] = Field(default=(), exclude_if=lambda value: not value)
     rail_type: Literal["high_speed", "emu", "regular", "unknown"] = "unknown"
     transport_type: Literal["ride_hailing", "taxi", "rail", "hotel", "other"] | None = None
     original_currency: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")] | None = None
@@ -368,7 +371,7 @@ class SnapshotFormValue(_SnapshotModel):
 
 
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[6, 7] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6, 7, 8] = SNAPSHOT_VERSION
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
@@ -578,6 +581,7 @@ def collect_snapshot_source(
             file_id
             for item in draft_input.items
             for file_id in ([item.source_file_id] if item.source_file_id else [])
+            + item.receipt_attachment_file_ids
             + item.hotel_bill_file_ids
             + item.itinerary_file_ids
             + item.payment_proof_file_ids
@@ -1200,6 +1204,7 @@ def _snapshot_expense_item(
         requires_itinerary=item.requires_itinerary,
         payment_proof_file_ids=tuple(item.payment_proof_file_ids),
         hotel_bill_file_ids=tuple(item.hotel_bill_file_ids),
+        receipt_attachment_file_ids=tuple(item.receipt_attachment_file_ids),
         rail_type=item.rail_type,
         transport_type=item.transport_type,
         original_currency=item.original_currency,
@@ -1533,7 +1538,14 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         if item.processing_role == ReimbursementDraftFileRole.ATTACHMENT_ONLY.value
     }
     by_id = {file.draft_file_id: file for file in snapshot.original_files}
+    receipt_attachment_ids: set[str] = set()
     for item in snapshot.input.items:
+        if item.receipt_attachment_file_ids:
+            if snapshot.snapshot_version < 8 or item.source_file_id is not None:
+                raise ValueError("receipt attachments require a manual expense in snapshot v8")
+            if receipt_attachment_ids.intersection(item.receipt_attachment_file_ids):
+                raise ValueError("receipt attachments must belong to one manual expense")
+            receipt_attachment_ids.update(item.receipt_attachment_file_ids)
         if len(item.itinerary_file_ids) != len(set(item.itinerary_file_ids)) or not set(
             item.itinerary_file_ids
         ).issubset(support_ids):
@@ -1553,6 +1565,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
             (item.itinerary_file_ids, "itinerary"),
             (item.payment_proof_file_ids, "payment_proof"),
             (item.hotel_bill_file_ids, "hotel_bill"),
+            (item.receipt_attachment_file_ids, "other"),
         ):
             if len(proof_ids) != len(set(proof_ids)) or any(
                 file_id not in support_ids or by_id[file_id].attachment_kind != kind
@@ -1564,6 +1577,11 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
                 amount=item.amount,
                 category=item.category,
                 rail_type=item.rail_type,
+                receipt_count=(
+                    item.receipt_count
+                    if snapshot.snapshot_version >= 8 and not item.source_file_id
+                    else 1
+                ),
             )
             and not item.payment_proof_file_ids
         ):
@@ -1668,7 +1686,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         options.append(_profile_selected_type(profile, related.source_travel_type_value))
     if any(item != snapshot.selections.travel_type for item in options):
         raise ValueError("travel type option mismatch")
-    if snapshot.snapshot_version == 7 and subsidy_trips:
+    if snapshot.snapshot_version >= 7 and subsidy_trips:
         expected_purpose = subsidy_purpose_for_travel_type(
             snapshot.selections.travel_type.label,
             snapshot.related_approvals[0].source_travel_type_value,

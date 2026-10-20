@@ -187,6 +187,132 @@ describe('ExpenseItemsCard durable files', () => {
     vi.unstubAllGlobals()
   })
 
+  it.each([false, true])('uploads a manual aggregate photo without OCR and restores count and attachment (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const photo = serverFile('photo-1', '出租车合拍.jpg', 'ATTACHMENT_ONLY')
+    vi.mocked(uploadReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: photo })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await wrapper.findAll('button').find((button) => button.text() === '手动添加')!.trigger('click')
+    await wrapper.get('[data-testid="manual-receipt-upload"]').trigger('click')
+    await selectFiles(wrapper, 'manual-receipt-input', [new File(['photo'], photo.name, { type: 'image/jpeg' })])
+    await flushPromises()
+    expect(uploadReimbursementDraftFile).toHaveBeenCalledWith('draft-1', 1, expect.any(File), expect.objectContaining({ role: 'ATTACHMENT_ONLY', attachmentKind: 'other' }))
+    expect(recognizeReimbursementDraftFile).not.toHaveBeenCalled()
+    const field = (label: string) => wrapper.findAllComponents({ name: 'ElFormItem' }).find((entry) => entry.props('label') === label)!
+    field('发生日期').findComponent({ name: 'ElDatePicker' }).vm.$emit('update:modelValue', '2026-09-01')
+    field('说明').findComponent({ name: 'ElInput' }).vm.$emit('update:modelValue', '出租车小票合计')
+    field('金额（元）').findComponent({ name: 'ElInput' }).vm.$emit('update:modelValue', '1240.00')
+    field('票据张数').findComponent({ name: 'ElInputNumber' }).vm.$emit('update:modelValue', 12)
+    field('市内交通类型').findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'taxi')
+    await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((entry) => entry.props('label') === '付款凭证')).toBe(false)
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((entry) => entry.props('label') === '对应行程单')).toBe(false)
+    field('票据张数').findComponent({ name: 'ElInputNumber' }).vm.$emit('update:modelValue', 1)
+    await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((entry) => entry.props('label') === '付款凭证')).toBe(true)
+    field('票据张数').findComponent({ name: 'ElInputNumber' }).vm.$emit('update:modelValue', 12)
+    await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
+    await flushPromises()
+    expect(expense.items[0]).toMatchObject({ source: 'manual', amount: '1240.00', receiptCount: 12, receiptAttachmentFileIds: [photo.id] })
+    expect(wrapper.find('[data-testid="payment-proof-needed"]').exists()).toBe(false)
+    expect(expense.items[0]!.sourceFileId).toBeUndefined()
+    expect(wrapper.findAll('[data-testid="manual-receipt-attached"]').length).toBeGreaterThan(0)
+    const savedInput = { ...draft().input, items: expense.buildDraftExpenseItems() }
+    wrapper.unmount()
+    expense.hydrateFromDraft({ ...draft(2), input: savedInput }, [photo])
+    expect(expense.items[0]).toMatchObject({ source: 'manual', receiptCount: 12, receiptAttachmentFileIds: [photo.id] })
+  })
+
+  it.each([false, true])('preserves old taxi itinerary materials without offering association controls (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    drafts.files = [recognizedItinerary()]
+    expense.upsertManualItem({ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01', description: '出租车', amount: '60.00', receiptCount: 1, transportType: 'taxi', itineraryFileIds: ['proof-1'] })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('行程单')
+    expect(wrapper.text()).not.toContain('更改关联')
+    expect(wrapper.text()).not.toContain('选择行程单')
+    await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((entry) => entry.props('label') === '对应行程单')).toBe(false)
+    await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
+    expect(expense.buildDraftExpenseItems()[0]?.itineraryFileIds).toEqual(['proof-1'])
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('keeps a cancelled manual upload as material and never attaches it to a new editor (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const pending = deferred<Awaited<ReturnType<typeof uploadReimbursementDraftFile>>>()
+    vi.mocked(uploadReimbursementDraftFile).mockReturnValue(pending.promise)
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await wrapper.findAll('button').find((button) => button.text() === '手动添加')!.trigger('click')
+    await wrapper.get('[data-testid="manual-receipt-upload"]').trigger('click')
+    await selectFiles(wrapper, 'manual-receipt-input', [new File(['photo'], '合拍.jpg', { type: 'image/jpeg' })])
+    await flushPromises()
+    await wrapper.findAll('button').find((button) => button.text() === '取消')!.trigger('click')
+    pending.resolve({ draftId: 'draft-1', revision: 2, file: serverFile('photo-1', '合拍.jpg', 'ATTACHMENT_ONLY') })
+    await flushPromises()
+    expect(expense.items).toEqual([])
+    expect(drafts.files).toHaveLength(1)
+    await wrapper.findAll('button').find((button) => button.text() === '手动添加')!.trigger('click')
+    const select = wrapper.findAllComponents({ name: 'ElFormItem' }).find((entry) => entry.props('label') === '票据照片/文件')!.findComponent({ name: 'ElSelect' })
+    expect(select.props('modelValue')).toEqual([])
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('retries only the failed manual photo and retains successful selections (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    let failed = false
+    const upload = vi.spyOn(drafts, 'uploadFile').mockImplementation(async (file) => {
+      if (file.name === '第二张.jpg' && !failed) { failed = true; throw new Error('测试上传失败') }
+      const saved = serverFile(file.name, file.name, 'ATTACHMENT_ONLY')
+      drafts.files.push(saved)
+      return { draftId: 'draft-1', revision: 2, file: saved }
+    })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await wrapper.findAll('button').find((button) => button.text() === '手动添加')!.trigger('click')
+    await wrapper.get('[data-testid="manual-receipt-upload"]').trigger('click')
+    await selectFiles(wrapper, 'manual-receipt-input', ['第一张.jpg', '第二张.jpg'].map((name) => new File(['photo'], name)))
+    await flushPromises()
+    const retry = wrapper.findAll('button').filter((button) => button.text() === '重试上传').at(-1)!
+    await retry.trigger('click')
+    await flushPromises()
+    expect(upload).toHaveBeenCalledTimes(3)
+    expect(upload.mock.calls.map((args) => args[0].name)).toEqual(['第一张.jpg', '第二张.jpg', '第二张.jpg'])
+    const select = wrapper.findAllComponents({ name: 'ElFormItem' }).find((entry) => entry.props('label') === '票据照片/文件')!.findComponent({ name: 'ElSelect' })
+    expect(select.props('modelValue')).toEqual(['第一张.jpg', '第二张.jpg'])
+    expect(expense.items).toEqual([])
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('shows manual receipt metadata after locked file cleanup (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    const photo = serverFile('photo-1', '出租车合拍.jpg', 'ATTACHMENT_ONLY', { status: 'PURGED' })
+    const input = { ...draft().input, items: [{ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01', description: '小票汇总', amount: '240.00', receiptCount: 12, receiptAttachmentFileIds: [photo.id] }] }
+    drafts.currentDraft = { ...draft(), status: 'LOCKED', input }
+    drafts.files = [photo]
+    expense.hydrateFromDraft(drafts.currentDraft, [photo])
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile, readonly: true }, global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid="manual-receipt-attached"]').length).toBeGreaterThan(0)
+    expect(wrapper.text()).toContain('出租车合拍.jpg')
+    expect(expense.items[0]?.receiptCount).toBe(12)
+    wrapper.unmount()
+  })
+
   it('shows unreadable itinerary rows as needing recognition instead of zero trips', async () => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = draft()
@@ -1119,7 +1245,7 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
-  it('lets the employee confirm an unclassified OCR city-transport invoice as taxi and match its itinerary on save', async () => {
+  it.each([false, true])('keeps a confirmed taxi free of itinerary controls and auto links (mobile=%s)', async (mobile) => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
     const drafts = useReimbursementDraftStore()
@@ -1128,7 +1254,7 @@ describe('ExpenseItemsCard durable files', () => {
     Object.assign(invoice.ocrResult, { transportType: 'other', requiresItinerary: false })
     drafts.files = [invoice, recognizedItinerary()]
     expense.upsertDraftOcrItem(invoice)
-    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
     await flushPromises()
     expect(expense.items[0]?.itineraryFileIds).toEqual([])
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
@@ -1136,10 +1262,11 @@ describe('ExpenseItemsCard durable files', () => {
     expect(transportField).toBeDefined()
     transportField!.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'taxi')
     await flushPromises()
-    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((field) => field.props('label') === '对应行程单')).toBe(true)
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((field) => field.props('label') === '对应行程单')).toBe(false)
+    expect(wrapper.find('[data-testid="editor-itinerary-upload"]').exists()).toBe(false)
     await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
     await flushPromises()
-    expect(expense.buildDraftExpenseItems()[0]).toMatchObject({ transportType: 'taxi', requiresItinerary: false, itineraryFileIds: ['proof-1'], itineraryAutoMatchDisabled: false })
+    expect(expense.buildDraftExpenseItems()[0]).toMatchObject({ transportType: 'taxi', requiresItinerary: false, itineraryFileIds: [], itineraryAutoMatchDisabled: false })
     wrapper.unmount()
   })
 
@@ -1155,7 +1282,7 @@ describe('ExpenseItemsCard durable files', () => {
     const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
     await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
     const formItem = (label: string) => wrapper.findAllComponents({ name: 'ElFormItem' }).find((field) => field.props('label') === label)!
-    formItem('市内交通类型').findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'taxi')
+    formItem('市内交通类型').findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'ride_hailing')
     await flushPromises()
     expect(formItem('对应行程单').findAllComponents({ name: 'ElOption' }).map((option) => option.props('value'))).toEqual(['proof-1'])
     await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
@@ -1188,7 +1315,8 @@ describe('ExpenseItemsCard durable files', () => {
     expect(wrapper.text()).toContain('网约车费用必须有对应行程单')
     transportField!.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'taxi')
     await flushPromises()
-    expect(wrapper.text()).toContain('出租车费用可按需关联行程单')
+    expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((field) => field.props('label') === '对应行程单')).toBe(false)
+    expect(wrapper.find('[data-testid="editor-itinerary-upload"]').exists()).toBe(false)
     await wrapper.findAll('button').find((button) => button.text() === '保存')!.trigger('click')
     await flushPromises()
     expect(expense.buildDraftExpenseItems()[0]).toMatchObject({ transportType: 'taxi', requiresItinerary: false })
@@ -1474,9 +1602,9 @@ describe('ExpenseItemsCard durable files', () => {
 
   it.each([
     ['hotel', 'hotel', false], ['rail_fare', 'rail', false],
-    ['local_transport', 'other', false], ['local_transport', 'taxi', true],
+    ['local_transport', 'other', false], ['local_transport', 'taxi', false],
     ['local_transport', 'ride_hailing', true],
-  ] as const)('shows itinerary editing only for taxi expenses (%s/%s)', async (category, transportType, visible) => {
+  ] as const)('shows itinerary editing only for ride-hailing expenses (%s/%s)', async (category, transportType, visible) => {
     const expense = useExpenseStore()
     expense.categories = [{ id: category, name: category, order: 1, manualSelectable: true }]
     expense.items = [{
@@ -1637,7 +1765,7 @@ describe('ExpenseItemsCard durable files', () => {
     const batch = wrapper.get('[data-testid="batch-progress"]')
     expect(batch.text()).toContain('本批 1 个文件处理结束，1 个需要处理')
     expect(batch.text()).toContain('已识别 0/1')
-    expect(batch.text()).toContain('本地识别繁忙，请稍后重试')
+    expect(batch.text()).toContain('自动识别繁忙，请稍后重试')
     expect(batch.text()).not.toContain('已处理完成')
     expect(expense.items).toHaveLength(0)
     wrapper.unmount()
@@ -1814,17 +1942,17 @@ describe('ExpenseItemsCard durable files', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('自动识别')
-    expect(wrapper.text()).toContain('尚未配置，请手工填写')
+    expect(wrapper.text()).toContain('暂不可用，请手工填写')
     expect(wrapper.text()).not.toContain('本地 OCR')
     wrapper.unmount()
   })
 
-  it('lets a manual city-transport row explicitly choose taxi or ride-hailing and preserves the requirement', async () => {
+  it.each([false, true])('keeps manual taxi and ride-hailing requirements distinct (mobile=%s)', async (mobile) => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
     expense.upsertManualItem({ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01', description: '市内交通', amount: '20.00', receiptCount: 3 })
     useReimbursementDraftStore().currentDraft = draft()
-    const wrapper = mount(ExpenseItemsCard, { global: { plugins: [pinia, ElementPlus] } })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
     for (const transportType of ['taxi', 'ride_hailing'] as const) {
       await wrapper.findAll('button').find((button) => button.text() === '编辑')!.trigger('click')
       await flushPromises()
@@ -1832,8 +1960,7 @@ describe('ExpenseItemsCard durable files', () => {
         .findComponent({ name: 'ElSelect' })
       selector.vm.$emit('update:modelValue', transportType)
       await flushPromises()
-      expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((item) => String(item.props('label')).includes('对应行程单'))).toBe(true)
-      expect(wrapper.findAllComponents({ name: 'ElFormItem' }).find((item) => item.props('label') === '票据张数')!.text()).toContain('付款凭证按本行金额判断')
+      expect(wrapper.findAllComponents({ name: 'ElFormItem' }).some((item) => String(item.props('label')).includes('对应行程单'))).toBe(transportType === 'ride_hailing')
       await wrapper.findAllComponents({ name: 'ElButton' }).find((button) => button.text() === '保存')!.trigger('click')
       expect(expense.items[0]).toMatchObject({ transportType, requiresItinerary: transportType === 'ride_hailing', receiptCount: 3 })
     }

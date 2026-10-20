@@ -90,6 +90,12 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
     hotel_bill_file_ids: list[str] = Field(
         default_factory=list, alias="hotelBillFileIds", max_length=100
     )
+    receipt_attachment_file_ids: list[str] = Field(
+        default_factory=list,
+        alias="receiptAttachmentFileIds",
+        max_length=100,
+        exclude_if=lambda value: not value,
+    )
     rail_type: RailType = Field(default="unknown", alias="railType")
     requires_itinerary: bool = Field(default=False, alias="requiresItinerary", strict=True)
     transport_type: Literal["ride_hailing", "taxi", "rail", "hotel", "other"] | None = Field(
@@ -138,7 +144,10 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
             raise ValueError("subsidy is calculated by the server")
         return value
 
-    @field_validator("itinerary_file_ids", "payment_proof_file_ids", "hotel_bill_file_ids")
+    @field_validator(
+        "itinerary_file_ids", "payment_proof_file_ids", "hotel_bill_file_ids",
+        "receipt_attachment_file_ids",
+    )
     @classmethod
     def normalize_itinerary_ids(cls, values: list[str]) -> list[str]:
         result = [value.strip() for value in values]
@@ -165,6 +174,8 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
 
     @model_validator(mode="after")
     def normalize_itinerary_requirement(self) -> ReimbursementDraftExpenseItemInput:
+        if self.source_file_id and self.receipt_attachment_file_ids:
+            raise ValueError("receipt attachments are only available for manual expenses")
         if self.transport_type is None and self.requires_itinerary:
             self.transport_type = "ride_hailing"
         self.requires_itinerary = self.transport_type == "ride_hailing"

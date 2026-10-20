@@ -6,6 +6,7 @@ import re
 from collections.abc import Sequence
 
 from app.ocr.itinerary import ItineraryPage
+from app.ocr.payment_proofs import classify_bank_payment
 from app.ocr.special_receipts import PhysicalTaxiReceiptParser
 
 
@@ -68,6 +69,7 @@ def classify_material(pages: Sequence[ItineraryPage], *, page_count: int) -> tup
         re.search(r"滴滴|高德|网约车|出租车|打车|快车|专车|出行|用车|ride|trip", lower)
     )
     itinerary = itinerary_title and route_table and ride_signal and not airline
+    bank_payment = classify_bank_payment(pages)
     payment = (
         payment_title
         or bool(
@@ -82,6 +84,8 @@ def classify_material(pages: Sequence[ItineraryPage], *, page_count: int) -> tup
             lower,
         )
     )
+    if bank_payment is not None:
+        payment = bank_payment == "posted"
     if invoice or foreign_invoice:
         if page_count != 1:
             return "unknown", "多页或混合票据请拆分为单张发票，或确认作为证明材料"

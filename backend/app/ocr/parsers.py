@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from app.domain.categories import ExpenseCategory
@@ -11,12 +12,14 @@ from app.ocr.extractors import (
     extract_date,
     extract_invoice_amount,
     extract_passenger_occurrence_date,
+    extract_passenger_service_keywords,
     extract_passenger_transport_type,
     extract_route,
     extract_train_route,
     extract_train_travel_date,
     uses_invoice_date_as_occurrence,
 )
+from app.ocr.invoice_parties import invoice_keyword_lines, invoice_seller_name
 from app.ocr.keyword_defaults import DEFAULT_RECEIPT_KEYWORD_RULES
 from app.ocr.special_receipts import ForeignReceiptParser, PhysicalTaxiReceiptParser
 from app.ocr.types import (
@@ -40,50 +43,31 @@ _PASSENGER_TRANSPORT_KEYWORDS = (
     "客运服务费",
     "交通工具类型",
 )
-_RIDE_HAILING_PROVIDERS = (
-    "滴滴出行",
-    "滴滴科技",
-    "滴滴快车",
-    "滴滴专车",
-    "曹操出行",
-    "吉利优行电子科技",
-    "t3出行",
-    "首汽约车",
-    "花小猪",
-    "高德打车",
-)
 
 
-def _with_transport_evidence(parsed: ParsedExpense, lines: list[OcrLine]) -> ParsedExpense:
+def _with_transport_evidence(
+    parsed: ParsedExpense,
+    lines: list[OcrLine],
+    keyword_rules: tuple[ReceiptKeywordRule, ...],
+) -> ParsedExpense:
     if parsed.transport_type is not None:
         return parsed
-    text = "".join("".join(line.text.casefold().split()) for line in lines)
-    transport = extract_passenger_transport_type(lines)
-    ride_hailing = (
-        transport == "网约车"
-        or any(
-            phrase in text for phrase in ("网约车服务", "网约车发票", "网约车行程", "网络预约出租")
+    if parsed.category is ExpenseCategory.LOCAL_TRANSPORT:
+        matches = GenericInvoiceParser(keyword_rules=keyword_rules).matching_rules(lines)
+        types = {rule.transport_type for rule in matches if rule.transport_type is not None}
+        # A ride-hailing provider can issue a ticket whose vehicle field says taxi.
+        transport_type = (
+            "ride_hailing" if "ride_hailing" in types else "taxi" if "taxi" in types else None
         )
-        or (
-            any(provider in text for provider in _RIDE_HAILING_PROVIDERS)
-            and any(
-                service in text for service in ("旅客运输", "客运", "运输服务", "行程单", "出租车")
-            )
-        )
-    )
-    if ride_hailing:
         return replace(
             parsed,
-            category=ExpenseCategory.LOCAL_TRANSPORT,
-            transport_type="ride_hailing",
-            requires_itinerary=True,
+            transport_type=transport_type,
+            requires_itinerary=transport_type == "ride_hailing",
         )
     if parsed.category is ExpenseCategory.RAIL_FARE:
         return replace(parsed, transport_type="rail")
     if parsed.category is ExpenseCategory.LODGING:
         return replace(parsed, transport_type="hotel")
-    if transport in {"出租车", "出租汽车"}:
-        return replace(parsed, transport_type="taxi")
     return parsed
 
 
@@ -162,49 +146,79 @@ class GenericInvoiceParser:
         hits = sum(keyword in text for keyword in self._invoice_keywords)
         return min(0.9, 0.2 + hits * 0.15) if hits else 0.0
 
-    def _rule_matches(self, text: str) -> set[ExpenseCategory]:
-        normalized = text.casefold()
-        return {
-            rule.category
-            for rule in self._keyword_rules
-            if rule.keyword and rule.keyword in normalized
-        }
-
     def _classification(
         self,
-        text: str,
         lines: list[OcrLine],
     ) -> tuple[ExpenseCategory, bool]:
-        if is_passenger_transport_text(text):
-            transport_type = extract_passenger_transport_type(lines)
-            if transport_type is not None:
-                transport_matches = self._rule_matches(transport_type)
-                if len(transport_matches) == 1:
-                    return next(iter(transport_matches)), False
-                return ExpenseCategory.OTHER, True
-
-            # A service item explicitly naming passenger service is useful even
-            # when the structured transport-type cell is absent. Do not scan
-            # route/company names: words such as "航空大酒店" are not transport proof.
-            service_keywords = ("客运服务费", "公路客运", "道路旅客运输", "汽车客运")
-            normalized = "".join(text.casefold().split())
-            present_service_matches = {
-                rule.category
-                for rule in self._keyword_rules
-                if rule.keyword and rule.keyword in service_keywords and rule.keyword in normalized
-            }
-            if len(present_service_matches) == 1:
-                return next(iter(present_service_matches)), False
-            return ExpenseCategory.OTHER, True
-
-        matches = self._rule_matches(text)
+        matches = {rule.category for rule in self.matching_rules(lines)}
         if len(matches) == 1:
             return next(iter(matches)), False
         return ExpenseCategory.OTHER, True
 
+    def matching_rules(self, lines: list[OcrLine]) -> tuple[ReceiptKeywordRule, ...]:
+        keyword_lines = invoice_keyword_lines(lines)
+        keyword_text = " ".join(line.text for line in keyword_lines).casefold()
+        compact = "".join(keyword_text.split())
+        seller = invoice_seller_name("\n".join(line.text for line in lines))
+        seller_text = "".join(seller.casefold().split()) if seller else None
+        service_lines = [
+            line
+            for line in keyword_lines
+            if (
+                re.match(r"\s*(?:(?:项目|商品|服务)名称|[*＊])", line.text)
+                or not any(
+                    label in line.text
+                    for label in ("公司", "名称", "销售方", "销方", "开票方", "纳税人")
+                )
+            )
+            and not (seller_text and "".join(line.text.casefold().split()) in seller_text)
+        ]
+        service_text = " ".join(line.text for line in service_lines).casefold()
+        keywords = tuple(rule.keyword for rule in self._keyword_rules if rule.keyword)
+        transport = extract_passenger_transport_type(lines, keywords)
+        passenger = is_passenger_transport_text(service_text) or transport is not None
+        service_keywords = (
+            extract_passenger_service_keywords(service_lines, keywords) if passenger else set()
+        )
+        matched: list[ReceiptKeywordRule] = []
+        for rule in self._keyword_rules:
+            if not rule.keyword:
+                continue
+            typed_transport = rule.transport_type is not None
+            operator_context = passenger or any(
+                any(
+                    f"{''.join(rule.keyword.split())}{label}"
+                    in "".join(line.text.casefold().split())
+                    for label in ("服务", "发票", "行程单")
+                )
+                for line in service_lines
+            )
+            seller_match = (
+                seller_text is not None
+                and "".join(rule.keyword.split()) in seller_text
+                and (rule.category is not ExpenseCategory.LOCAL_TRANSPORT or operator_context)
+            )
+            if seller_match:
+                matched.append(rule)
+            elif (
+                typed_transport
+                and seller_text is None
+                and operator_context
+                and "".join(rule.keyword.split()) in compact
+            ):
+                matched.append(rule)
+            elif passenger:
+                if (transport is not None and rule.keyword in transport.casefold()) or (
+                    transport is None and rule.keyword in service_keywords
+                ):
+                    matched.append(rule)
+            elif not typed_transport and rule.keyword in keyword_text:
+                matched.append(rule)
+        return tuple(matched)
+
     def parse(self, lines: list[OcrLine], context: ParseContext) -> ParsedExpense:
-        text = " ".join(line.text for line in lines)
-        category, needs_review = self._classification(text, lines)
+        text = " ".join(line.text for line in invoice_keyword_lines(lines))
+        category, needs_review = self._classification(lines)
         transport_invoice = is_passenger_transport_text(text) or category in {
             ExpenseCategory.LOCAL_TRANSPORT,
             ExpenseCategory.RAIL_FARE,
@@ -295,12 +309,14 @@ class ReceiptParserRegistry:
     ) -> ParsedExpense:
         if parsed.category is not ExpenseCategory.OTHER or not self._keyword_rules:
             return parsed
-        raw_text = " ".join(line.text for line in lines)
+        raw_text = " ".join(line.text for line in invoice_keyword_lines(lines))
         if is_passenger_transport_text(raw_text):
             return parsed
-        text = raw_text.casefold()
         matches = {
-            rule.category for rule in self._keyword_rules if rule.keyword and rule.keyword in text
+            rule.category
+            for rule in GenericInvoiceParser(keyword_rules=self._keyword_rules).matching_rules(
+                lines
+            )
         }
         if len(matches) != 1:
             return parsed
@@ -318,7 +334,9 @@ class ReceiptParserRegistry:
             parsed = self._fallback.parse(lines, context)
         else:
             parsed = parser.parse(lines, context)
-        parsed = _with_transport_evidence(self._apply_keyword_fallback(parsed, lines), lines)
+        parsed = _with_transport_evidence(
+            self._apply_keyword_fallback(parsed, lines), lines, self._keyword_rules
+        )
         invoice_numbers, order_numbers = extract_document_numbers(lines)
         return replace(
             parsed,

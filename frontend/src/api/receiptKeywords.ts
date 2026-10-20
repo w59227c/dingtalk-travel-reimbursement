@@ -2,16 +2,20 @@ import { http } from './http'
 import type { ApiEnvelope } from '@/types/auth'
 import type { ExpenseCategoryId } from '@/types/expenses'
 
+export type ReceiptKeywordTransportType = 'other' | 'ride_hailing' | 'taxi'
+
 export interface ReceiptKeywordMapping {
   id: number
   keyword: string
   categoryId: ExpenseCategoryId
   categoryName: string
+  transportType?: ReceiptKeywordTransportType
 }
 
 export interface ReceiptKeywordInput {
   keyword: string
   categoryId: ExpenseCategoryId
+  transportType?: ReceiptKeywordTransportType
 }
 
 export async function listReceiptKeywords(): Promise<ReceiptKeywordMapping[]> {

@@ -324,6 +324,7 @@ function inputSignature(input: ReimbursementDraftInput): string {
       itineraryAutoMatchDisabled: item.itineraryAutoMatchDisabled ?? false,
       paymentProofFileIds: item.paymentProofFileIds ?? [],
       hotelBillFileIds: item.hotelBillFileIds ?? [],
+      receiptAttachmentFileIds: item.receiptAttachmentFileIds ?? [],
       railType: item.railType ?? 'unknown',
       requiresItinerary: item.requiresItinerary ?? false,
       originalCurrency: item.originalCurrency,
@@ -427,7 +428,7 @@ async function verifyRelatedApprovals(
       drafts.mutationError = ''
       saveError.value = ''
     } else if (reconciliation === 'restored') {
-      relatedApprovalVerificationError.value = '服务器未保存所选出差审批，请重新选择或重试'
+      relatedApprovalVerificationError.value = '所选出差审批未保存，请重新选择或重试'
       drafts.mutationError = ''
       saveError.value = relatedApprovalVerificationError.value
     }
@@ -617,7 +618,7 @@ function validateSubmission(): string {
     if (item.category === 'lodging' && !item.hotelBillFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'hotel_bill')),
     )) return `“${item.description || '住宿费用'}”缺少住宿明细，请补充后提交`
-    if ((item.requiresItinerary || item.transportType === 'ride_hailing') && !item.itineraryFileIds?.some((id) =>
+    if (item.transportType !== 'taxi' && (item.requiresItinerary || item.transportType === 'ride_hailing') && !item.itineraryFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'itinerary')),
     )) return `“${item.description || '网约车费用'}”缺少对应行程单，请点击编辑补齐`
     if (isForeignExpense(item) && !item.cnyAmountConfirmed) {
@@ -971,7 +972,8 @@ onBeforeUnmount(() => {
           系统设置
         </RouterLink>
         <el-tag
-          :type="health.available === true ? 'success' : health.available === false ? 'danger' : 'info'"
+          v-if="health.available !== true"
+          :type="health.available === false ? 'danger' : 'info'"
           round
         >
           {{ health.label }}

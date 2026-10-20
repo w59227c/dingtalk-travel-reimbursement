@@ -25,5 +25,14 @@ def load_receipt_keyword_rules(database: Session) -> tuple[ReceiptKeywordRule, .
         metadata = CATEGORY_BY_ID.get(category)
         if metadata is None or not metadata.manual_selectable or category is ExpenseCategory.OTHER:
             continue
-        rules.append(ReceiptKeywordRule(keyword=row.normalized_keyword, category=category))
+        transport_type = row.transport_type if category is ExpenseCategory.LOCAL_TRANSPORT else None
+        rules.append(
+            ReceiptKeywordRule(
+                keyword=row.normalized_keyword,
+                category=category,
+                transport_type=transport_type
+                if transport_type in {"ride_hailing", "taxi"}
+                else None,
+            )
+        )
     return tuple(rules)

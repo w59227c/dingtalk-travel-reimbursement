@@ -8,7 +8,9 @@ import { getExpenseCategories } from '@/api/expenses'
 import { getOaTemplateCatalog } from '@/api/oaTemplates'
 import {
   createReceiptKeyword,
+  deleteReceiptKeyword,
   listReceiptKeywords,
+  updateReceiptKeyword,
 } from '@/api/receiptKeywords'
 import { getAdminExpenseSettings, updateExpenseSettings } from '@/api/settings'
 import SettingsAdminView from './SettingsAdminView.vue'
@@ -67,6 +69,7 @@ describe('SettingsAdminView receipt keywords', () => {
       catalog: null,
     })
     vi.mocked(getExpenseCategories).mockResolvedValue([
+      { id: 'local_transport', name: '市内交通费', order: 0, manualSelectable: true },
       { id: 'office', name: '办公费', order: 1, manualSelectable: true },
       { id: 'other', name: '其他', order: 2, manualSelectable: true },
       { id: 'subsidy', name: '出差补助', order: 3, manualSelectable: false },
@@ -182,6 +185,41 @@ describe('SettingsAdminView receipt keywords', () => {
       categoryId: 'office',
     })
     expect(wrapper.text()).toContain('办公费')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('groups, adds, moves and deletes transport keywords, mobile=%s', async (mobile) => {
+    const mappings = [
+      { id: 21, keyword: '客运服务费', categoryId: 'local_transport' as const, categoryName: '市内交通费', transportType: 'other' as const },
+      { id: 22, keyword: '滴滴畅行', categoryId: 'local_transport' as const, categoryName: '市内交通费', transportType: 'ride_hailing' as const },
+      { id: 23, keyword: '出租车', categoryId: 'local_transport' as const, categoryName: '市内交通费', transportType: 'taxi' as const },
+    ]
+    vi.mocked(listReceiptKeywords).mockReset().mockResolvedValue(mappings)
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>)
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile },
+      global: { plugins: [createPinia(), ElementPlus], stubs: { RouterLink: true } },
+    })
+    await flushPromises()
+    expect(wrapper.get('[aria-label="市内交通费通用关键词"]').text()).toContain('客运服务费')
+    expect(wrapper.get('[aria-label="市内交通费出租车关键词"]').text()).toContain('出租车')
+    const rideGroup = wrapper.get('[aria-label="市内交通费网约车关键词"]')
+    expect(rideGroup.text()).toContain('滴滴畅行')
+    await rideGroup.findAll('button').find((button) => button.text().trim() === '添加')!.trigger('click')
+    await wrapper.get('.el-dialog input').setValue('示例出行')
+    await wrapper.findAll('.el-dialog button').find((button) => button.text().trim() === '保存')!.trigger('click')
+    await flushPromises()
+    expect(createReceiptKeyword).toHaveBeenCalledWith({ keyword: '示例出行', categoryId: 'local_transport', transportType: 'ride_hailing' })
+    await wrapper.get('[aria-label="市内交通费网约车关键词"] .settings-keyword-tag').trigger('click')
+    const typeSelect = wrapper.findAllComponents({ name: 'ElSelect' }).find((select) => select.props('ariaLabel') === '关键词交通类型')!
+    typeSelect.vm.$emit('update:modelValue', 'taxi')
+    await wrapper.findAll('.el-dialog button').find((button) => button.text().trim() === '保存')!.trigger('click')
+    await flushPromises()
+    expect(updateReceiptKeyword).toHaveBeenCalledWith(22, { keyword: '滴滴畅行', categoryId: 'local_transport', transportType: 'taxi' })
+    await wrapper.get('[aria-label="市内交通费网约车关键词"] .el-tag__close').trigger('click')
+    await flushPromises()
+    expect(deleteReceiptKeyword).toHaveBeenCalledWith(22)
+    confirm.mockRestore()
     wrapper.unmount()
   })
 

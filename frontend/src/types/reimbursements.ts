@@ -23,6 +23,7 @@ export interface ReimbursementDraftExpenseItemInput extends Omit<ExcelExpenseIte
   itineraryAutoMatchDisabled?: boolean
   paymentProofFileIds?: string[]
   hotelBillFileIds?: string[]
+  receiptAttachmentFileIds?: string[]
   railType?: ExpenseItem['railType']
   requiresItinerary?: boolean
   transportType?: ExpenseItem['transportType']

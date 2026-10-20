@@ -197,7 +197,12 @@ def recognize_itinerary_worker(
                     )
                     if candidate_kind == "expense":
                         candidate_lines = [(line.text, line.confidence) for line in candidate.lines]
-                        _append_passenger_fields(candidate_lines, text, layout)
+                        _append_passenger_fields(
+                            candidate_lines,
+                            text,
+                            layout,
+                            pdf_path=path if page_count == 1 else None,
+                        )
                         native_receipt_lines = normalized_lines(
                             [OcrLine(value, score) for value, score in candidate_lines]
                         )
@@ -304,6 +309,7 @@ def recognize_itinerary_worker(
                     raw_lines,
                     "\n".join(line.text for line in pages[0].lines),
                     pages[0].layout_text,
+                    pdf_path=path if extension == "pdf" and page_count == 1 else None,
                 )
                 result["expense"] = ReceiptParserRegistry(keyword_rules=keyword_rules).parse(
                     normalized_lines([OcrLine(text, score) for text, score in raw_lines]),

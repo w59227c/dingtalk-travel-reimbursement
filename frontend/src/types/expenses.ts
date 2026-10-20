@@ -52,6 +52,7 @@ export interface ExpenseItem {
   itineraryAutoMatchDisabled?: boolean
   paymentProofFileIds?: string[]
   hotelBillFileIds?: string[]
+  receiptAttachmentFileIds?: string[]
   railType?: RailType
   requiresItinerary?: boolean
   transportType?: 'ride_hailing' | 'taxi' | 'rail' | 'hotel' | 'other'

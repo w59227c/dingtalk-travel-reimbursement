@@ -39,6 +39,15 @@ function itinerary(id: string, changes: Partial<ItineraryOcrResult> = {}): Reimb
 }
 
 describe('conservative itinerary matching', () => {
+  it('never matches or recommends an itinerary for a confirmed taxi', () => {
+    const source = invoice('invoice', { transportType: 'taxi', invoiceNumbers: ['INV-001'] })
+    const taxi = item('invoice', { transportType: 'taxi' })
+    expect(matchItineraries([taxi], [source, itinerary('proof')])).toEqual([])
+    expect(suggestItineraries([taxi], [source, itinerary('proof')])).toEqual([])
+    Object.assign(source.ocrResult!, { type: 'invoice', description: null, warnings: ['MISSING_ROUTE'] })
+    expect(suggestItineraries([taxi], [source, itinerary('proof')])).toEqual([])
+  })
+
   it('uses an explicit unique invoice number before route/amount evidence', () => {
     const files = [invoice('invoice', { invoiceNumbers: [' inv-001 '], amount: '99.00' }), itinerary('proof')]
     expect(matchItineraries([item('invoice', { amount: '99.00', description: '打车' })], files))

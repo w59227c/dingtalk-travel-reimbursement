@@ -63,7 +63,7 @@ export function matchItineraries(items: readonly ExpenseItem[], files: readonly 
   const sources: SourceInvoice[] = items.flatMap((item) => {
     const file = files.find((candidate) => candidate.id === item.sourceFileId)
     const evidence = receiptOcrResult(file)
-    return item.sourceFileId && isTaxiExpense(item) && file?.role === 'EXPENSE_SOURCE'
+    return item.sourceFileId && item.transportType === 'ride_hailing' && file?.role === 'EXPENSE_SOURCE'
       && file.status === 'ACTIVE' && evidence?.status === 'recognized' && evidence.fileId === file.id
       ? [{ item, tokens: identifiers(evidence) }] : []
   })
@@ -171,7 +171,7 @@ function suggestAmountItineraries(items: readonly ExpenseItem[], files: readonly
       || item.category !== 'local_transport' || evidence.categoryId !== 'local_transport' || isForeignExpense(item)
       || (evidence.originalCurrency && evidence.originalCurrency.toUpperCase() !== 'CNY')
       || [item.transportType, evidence.transportType].some((type) => type && !['ride_hailing', 'taxi', 'other'].includes(type))
-      || item.itineraryAutoMatchDisabled || item.itineraryFileIds?.length
+      || item.transportType === 'taxi' || item.itineraryAutoMatchDisabled || item.itineraryFileIds?.length
       || amount === null || amount <= 0 || moneyToCents(evidence.amount ?? '') !== amount) return []
     const issueDate = ISSUE_DATE_WARNINGS.some((warning) => evidence.warnings.includes(warning))
     // Do not relax contradictory, fully read travel evidence to amount-only.

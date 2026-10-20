@@ -206,6 +206,7 @@ def create_reimbursement_draft(
     created_at = now or utc_now()
     if _draft_file_reference_ids(draft_input) or any(
         item.itinerary_file_ids or item.payment_proof_file_ids or item.hotel_bill_file_ids
+        or item.receipt_attachment_file_ids
         for item in draft_input.items
     ):
         raise _invalid_file_reference_error()
@@ -632,11 +633,16 @@ def validate_draft_file_references(
     ):
         raise _invalid_file_reference_error()
 
+    receipt_attachment_ids: set[str] = set()
     for item in draft_input.items:
+        if receipt_attachment_ids.intersection(item.receipt_attachment_file_ids):
+            raise _invalid_file_reference_error()
+        receipt_attachment_ids.update(item.receipt_attachment_file_ids)
         for proof_ids, kind in (
             (item.itinerary_file_ids, "itinerary"),
             (item.payment_proof_file_ids, "payment_proof"),
             (item.hotel_bill_file_ids, "hotel_bill"),
+            (item.receipt_attachment_file_ids, "other"),
         ):
             if any(
                 file_id not in files_by_id
@@ -678,6 +684,7 @@ def validate_submission_evidence(
                 amount=item.amount,
                 category=item.category,
                 rail_type=_authoritative_rail_type(item, evidence),
+                receipt_count=1 if item.source_file_id else item.receipt_count,
             )
             and not item.payment_proof_file_ids
         ):
@@ -819,6 +826,9 @@ def detach_draft_files_from_input(
                 ],
                 "hotel_bill_file_ids": [
                     value for value in item.hotel_bill_file_ids if value not in file_ids
+                ],
+                "receipt_attachment_file_ids": [
+                    value for value in item.receipt_attachment_file_ids if value not in file_ids
                 ],
             }
         )

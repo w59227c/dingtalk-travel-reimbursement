@@ -377,7 +377,7 @@ function accountingLabel(row: ApprovalRow): string {
     </div>
 
     <p class="field-help">
-      默认查询近期审批；需要更早记录时设置日期范围。选中的审批会自动保存并由服务器重新核验。
+      默认查询近期审批；需要更早记录时设置日期范围。选中的审批会自动保存。
     </p>
   </section>
 </template>

@@ -441,6 +441,7 @@ export const useExpenseStore = defineStore('expense', () => {
       itineraryAutoMatchDisabled: false,
       paymentProofFileIds: [],
       hotelBillFileIds: [],
+      receiptAttachmentFileIds: [],
       railType: evidenceRailType(categoryId, undefined, candidate),
       originalCurrency: candidate.originalCurrency ?? undefined,
       originalAmount: candidate.originalAmount ?? undefined,
@@ -469,6 +470,7 @@ export const useExpenseStore = defineStore('expense', () => {
       item.itineraryAutoMatchDisabled = items.value[index]?.itineraryAutoMatchDisabled ?? false
       item.paymentProofFileIds = items.value[index]?.paymentProofFileIds ?? []
       item.hotelBillFileIds = items.value[index]?.hotelBillFileIds ?? []
+      item.receiptAttachmentFileIds = items.value[index]?.receiptAttachmentFileIds ?? []
       item.railType = evidenceRailType(item.category, items.value[index]?.railType, receiptOcrResult(file))
       items.value[index] = item
     }
@@ -563,6 +565,7 @@ export const useExpenseStore = defineStore('expense', () => {
         itineraryAutoMatchDisabled: persisted.itineraryAutoMatchDisabled ?? false,
         paymentProofFileIds: [...(persisted.paymentProofFileIds ?? [])],
         hotelBillFileIds: [...(persisted.hotelBillFileIds ?? [])],
+        receiptAttachmentFileIds: [...(persisted.receiptAttachmentFileIds ?? [])],
         railType: evidenceRailType(persisted.category, persisted.railType, receiptOcrResult(
           draftFiles.find((file) => file.id === sourceFileId),
         )),
@@ -642,6 +645,7 @@ export const useExpenseStore = defineStore('expense', () => {
       item.itineraryFileIds = item.itineraryFileIds?.filter((id) => id !== fileId)
       item.paymentProofFileIds = item.paymentProofFileIds?.filter((id) => id !== fileId)
       item.hotelBillFileIds = item.hotelBillFileIds?.filter((id) => id !== fileId)
+      item.receiptAttachmentFileIds = item.receiptAttachmentFileIds?.filter((id) => id !== fileId)
     }
     dismissedOcrFileIds.value = dismissedOcrFileIds.value.filter((id) => id !== fileId)
     if (items.value.length !== previousLength) {
@@ -663,6 +667,8 @@ export const useExpenseStore = defineStore('expense', () => {
     for (const item of items.value) {
       const itineraryIds = (item.itineraryFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'itinerary')))
       const paymentIds = (item.paymentProofFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'payment_proof')))
+      const receiptIds = (item.receiptAttachmentFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'other')))
+      if (receiptIds.length !== (item.receiptAttachmentFileIds?.length ?? 0)) item.receiptAttachmentFileIds = receiptIds
       const hotelIds = (item.hotelBillFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'hotel_bill')))
       if (itineraryIds.length !== (item.itineraryFileIds?.length ?? 0)) item.itineraryFileIds = itineraryIds
       if (paymentIds.length !== (item.paymentProofFileIds?.length ?? 0)) item.paymentProofFileIds = paymentIds
@@ -732,6 +738,7 @@ export const useExpenseStore = defineStore('expense', () => {
       itineraryAutoMatchDisabled: item.itineraryAutoMatchDisabled ?? false,
       paymentProofFileIds: [...(item.paymentProofFileIds ?? [])],
       hotelBillFileIds: [...(item.hotelBillFileIds ?? [])],
+      ...(item.receiptAttachmentFileIds?.length ? { receiptAttachmentFileIds: [...item.receiptAttachmentFileIds] } : {}),
       railType: item.railType ?? 'unknown',
       requiresItinerary: item.transportType === 'ride_hailing',
       originalCurrency: item.originalCurrency,

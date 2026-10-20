@@ -10,6 +10,7 @@ from threading import Lock
 from typing import Any
 
 from app.ocr.extractors import PASSENGER_ROUTE_PREFIX
+from app.ocr.invoice_parties import SELLER_NAME_PREFIX, invoice_seller_name
 from app.ocr.model_artifacts import model_directory_ready
 from app.ocr.types import OcrEngineConfig, OcrLine
 
@@ -292,6 +293,9 @@ class PaddleLocalOcrEngine:
             for result in results:
                 payload = self._payload(result)
                 normalized.extend(self._lines(payload))
+                seller = invoice_seller_name(self._itinerary_layout(payload))
+                if seller:
+                    normalized.append(OcrLine(f"{SELLER_NAME_PREFIX}{seller}", 1.0))
                 try:
                     route = self._recover_passenger_route(result, payload)
                 except OcrRuntimeError:

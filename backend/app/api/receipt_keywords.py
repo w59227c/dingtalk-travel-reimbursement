@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -27,6 +27,15 @@ class ReceiptKeywordWrite(BaseModel):
 
     keyword: str = Field(min_length=2, max_length=100)
     category_id: str = Field(alias="categoryId", min_length=1, max_length=64)
+    transport_type: Literal["other", "ride_hailing", "taxi"] | None = Field(
+        default=None, alias="transportType"
+    )
+
+    @model_validator(mode="after")
+    def validate_transport_type(self) -> ReceiptKeywordWrite:
+        if self.transport_type is not None and self.category_id != ExpenseCategory.LOCAL_TRANSPORT:
+            raise ValueError("transport type is only available for local transport keywords")
+        return self
 
     @field_validator("keyword")
     @classmethod
@@ -51,12 +60,15 @@ class ReceiptKeywordWrite(BaseModel):
 
 def _mapping_data(mapping: ReceiptKeywordMapping) -> dict[str, object]:
     category = ExpenseCategory(mapping.category_id)
-    return {
+    data: dict[str, object] = {
         "id": mapping.id,
         "keyword": mapping.keyword,
         "categoryId": category.value,
         "categoryName": CATEGORY_BY_ID[category].name,
     }
+    if category is ExpenseCategory.LOCAL_TRANSPORT:
+        data["transportType"] = mapping.transport_type or "other"
+    return data
 
 
 def _save(database: Session, mapping: ReceiptKeywordMapping) -> None:
@@ -96,6 +108,7 @@ def create_receipt_keyword(
         keyword=body.keyword,
         normalized_keyword=normalize_receipt_keyword(body.keyword),
         category_id=body.category_id,
+        transport_type=body.transport_type if body.transport_type != "other" else None,
     )
     _save(database, mapping)
     return success(_mapping_data(mapping))
@@ -114,6 +127,7 @@ def update_receipt_keyword(
     mapping.keyword = body.keyword
     mapping.normalized_keyword = normalize_receipt_keyword(body.keyword)
     mapping.category_id = body.category_id
+    mapping.transport_type = body.transport_type if body.transport_type != "other" else None
     _save(database, mapping)
     return success(_mapping_data(mapping))
 

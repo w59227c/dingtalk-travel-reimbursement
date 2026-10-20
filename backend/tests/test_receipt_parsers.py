@@ -642,6 +642,8 @@ def test_physical_taxi_missing_total_never_uses_meter_or_unit_price(
         (("交通工具类型 出租汽车",), "taxi", False),
         (("客运服务费",), None, False),
         (("滴滴出行广告推广",), None, False),
+        (("滴滴出行广告推广服务",), None, False),
+        (("滴滴出行广告推广发票",), None, False),
         (("交通工具类型 铁路",), "rail", False),
     ],
 )
@@ -660,7 +662,18 @@ def test_itinerary_requirement_uses_transport_evidence_not_category_alone(
         assert parsed.category is ExpenseCategory.LOCAL_TRANSPORT
 
 
-@pytest.mark.parametrize("provider", ["合肥滴滴科技有限公司", "苏州市吉利优行电子科技有限公司"])
+@pytest.mark.parametrize(
+    "provider",
+    [
+        "合肥滴滴科技有限公司",
+        "苏州市吉利优行电子科技有限公司",
+        "示例南京领行科技分公司",
+        "示例长燃智享分公司",
+        "示例享道出行分公司",
+        "示例郑州哈拜网络科技分公司",
+        "示例杭州携华网络科技分公司",
+    ],
+)
 def test_passenger_invoice_recognizes_operator_company_names_and_wrapped_service(provider):
     parsed = ReceiptParserRegistry().parse(
         lines(
@@ -689,6 +702,100 @@ def test_wrapped_passenger_service_without_provider_does_not_assume_ride_hailing
     )
     assert parsed.category is ExpenseCategory.LOCAL_TRANSPORT
     assert parsed.transport_type is None and not parsed.requires_itinerary
+
+
+@pytest.mark.parametrize(
+    ("service_lines", "expected"),
+    [
+        (("*交通运输服务*国内航空", "旅客运输服务", "次 1 90.00 9% 8.10"), ExpenseCategory.AIRFARE),
+        (("*交通运输服务*客运服 48.54 1 48.54 3% 1.46", "务费"), ExpenseCategory.LOCAL_TRANSPORT),
+        (("*交通运输服务*客运服 -4.85 3% -0.15", "务费"), ExpenseCategory.LOCAL_TRANSPORT),
+        (("*交通运输服务*客运服务",), ExpenseCategory.LOCAL_TRANSPORT),
+    ],
+)
+def test_passenger_tax_items_survive_wrapped_names_and_numeric_columns(service_lines, expected):
+    parsed = ReceiptParserRegistry().parse(
+        lines("电子发票", "旅客运输服务", *service_lines, "开票日期 2026-10-01", "价税合计 ¥50.00"),
+        ParseContext(2026),
+    )
+    assert parsed.category is expected
+    assert "MANUAL_REVIEW_REQUIRED" not in parsed.warnings
+
+
+def test_passenger_service_keyword_configuration_remains_authoritative():
+    document = lines(
+        "电子发票 旅客运输服务",
+        "*交通运输服务*客运服 48.54 3% 1.46",
+        "务费",
+        "价税合计 ¥50.00",
+    )
+    for rules, expected in (
+        ((), ExpenseCategory.OTHER),
+        ((ReceiptKeywordRule("客运服务费", ExpenseCategory.OFFICE),), ExpenseCategory.OFFICE),
+        (
+            (
+                ReceiptKeywordRule("客运服务费", ExpenseCategory.OFFICE),
+                ReceiptKeywordRule("客运服务", ExpenseCategory.LOCAL_TRANSPORT),
+            ),
+            ExpenseCategory.OTHER,
+        ),
+    ):
+        assert (
+            ReceiptParserRegistry(keyword_rules=rules).parse(document, ParseContext(2026)).category
+            is expected
+        )
+
+
+def test_configured_operator_keywords_control_category_and_itinerary_requirement():
+    document = lines(
+        "电子发票 旅客运输服务",
+        "示例出行服务公司",
+        "开票日期 2026-10-01",
+        "价税合计 ¥50.00",
+    )
+    for transport_type, required in (("ride_hailing", True), ("taxi", False)):
+        rule = ReceiptKeywordRule(
+            "示例出行", ExpenseCategory.LOCAL_TRANSPORT, transport_type=transport_type
+        )
+        parsed = ReceiptParserRegistry(keyword_rules=(rule,)).parse(document, ParseContext(2026))
+        assert parsed.category is ExpenseCategory.LOCAL_TRANSPORT
+        assert parsed.transport_type == transport_type
+        assert parsed.requires_itinerary is required
+    removed = ReceiptParserRegistry(keyword_rules=()).parse(document, ParseContext(2026))
+    assert removed.category is ExpenseCategory.OTHER
+    assert not removed.requires_itinerary
+
+
+def test_didi_changxing_uses_the_visible_ride_hailing_keyword():
+    parsed = ReceiptParserRegistry().parse(
+        lines(
+            "电子发票 旅客运输服务",
+            "上海滴滴畅行科技有限公司",
+            "*交通运输服务*客运服 48.54 3% 1.46",
+            "务费",
+            "价税合计 ¥50.00",
+        ),
+        ParseContext(2026),
+    )
+    assert parsed.category is ExpenseCategory.LOCAL_TRANSPORT
+    assert parsed.transport_type == "ride_hailing"
+    assert parsed.requires_itinerary
+
+
+def test_transport_keyword_conflicts_are_not_overridden_by_operator_detection():
+    parsed = ReceiptParserRegistry(
+        keyword_rules=(
+            ReceiptKeywordRule(
+                "示例出行", ExpenseCategory.LOCAL_TRANSPORT, transport_type="ride_hailing"
+            ),
+            ReceiptKeywordRule("航空", ExpenseCategory.AIRFARE),
+        )
+    ).parse(
+        lines("电子发票 旅客运输服务", "示例出行公司", "*交通运输服务*国内航空旅客运输服务"),
+        ParseContext(2026),
+    )
+    assert parsed.category is ExpenseCategory.OTHER
+    assert "MANUAL_REVIEW_REQUIRED" in parsed.warnings
 
 
 def test_separated_invoice_date_is_flagged_when_passenger_table_is_blank():

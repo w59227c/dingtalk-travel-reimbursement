@@ -22,6 +22,11 @@ from app.ocr.extractors import (
     extract_passenger_fields_from_layout,
     extract_passenger_transport_from_layout,
 )
+from app.ocr.invoice_parties import (
+    SELLER_NAME_PREFIX,
+    invoice_seller_from_pdf,
+    invoice_seller_name,
+)
 from app.ocr.pdf_inspection import PdfLimits, inspect_single_page_pdf
 from app.ocr.qr import decode_invoice_qr, invoice_qr_to_payload
 
@@ -44,8 +49,17 @@ def _passenger_fields(plain_text: str, layout_text: str) -> tuple[date | None, s
 
 
 def _append_passenger_fields(
-    lines: list[tuple[str, float]], plain_text: str, layout_text: str
+    lines: list[tuple[str, float]],
+    plain_text: str,
+    layout_text: str,
+    *,
+    pdf_path: str | None = None,
 ) -> None:
+    seller = invoice_seller_name(layout_text)
+    if seller is None and pdf_path is not None:
+        seller = invoice_seller_from_pdf(pdf_path)
+    if seller:
+        lines.append((f"{SELLER_NAME_PREFIX}{seller}", 1.0))
     occurrence_date, route = _passenger_fields(plain_text, layout_text)
     if occurrence_date:
         lines.append((f"{PASSENGER_OCCURRENCE_DATE_PREFIX}{occurrence_date.isoformat()}", 1.0))
@@ -214,7 +228,7 @@ def extract_pdf_text_worker(
             extract_text=True,
         )
         lines = [(line, 1.0) for line in inspection.text.splitlines() if line.strip()]
-        _append_passenger_fields(lines, inspection.text, inspection.layout_text)
+        _append_passenger_fields(lines, inspection.text, inspection.layout_text, pdf_path=path)
         return {
             "ok": True,
             "lines": lines,
@@ -268,7 +282,9 @@ def recognize_document_worker(
             )
             if _pdf_text_is_sufficient(inspection.text):
                 lines = [(line, 1.0) for line in inspection.text.splitlines() if line.strip()]
-                _append_passenger_fields(lines, inspection.text, inspection.layout_text)
+                _append_passenger_fields(
+                    lines, inspection.text, inspection.layout_text, pdf_path=path
+                )
                 return {
                     "ok": True,
                     "lines": lines,

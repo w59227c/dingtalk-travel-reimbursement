@@ -32,6 +32,8 @@ const hasReusableProof = computed(() => props.files.some((file) => isActiveProof
   && !props.item.paymentProofFileIds?.includes(file.id)))
 const hotelFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'hotel_bill', props.allowPurged)
   && props.item.hotelBillFileIds?.includes(file.id)))
+const receiptFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'other', props.allowPurged)
+  && props.item.receiptAttachmentFileIds?.includes(file.id)))
 const hasReusableHotel = computed(() => props.files.some((file) => isActiveProof(file, 'hotel_bill')
   && !props.item.hotelBillFileIds?.includes(file.id)))
 
@@ -50,6 +52,27 @@ function hotelSummary(file: ReimbursementDraftFile): string {
     :data-expense-material-id="item.id"
     tabindex="-1"
   >
+    <div
+      v-for="file in receiptFiles"
+      :key="file.id"
+      class="attached-material"
+      data-testid="manual-receipt-attached"
+    >
+      <span class="attached-label">票据材料</span>
+      <button
+        v-if="file.status !== 'PURGED'"
+        class="material-preview"
+        type="button"
+        :disabled="previewLoading"
+        @click="emit('preview', file)"
+      >
+        {{ file.name }} · 预览
+      </button>
+      <span
+        v-else
+        class="attached-label"
+      >{{ file.name }}</span>
+    </div>
     <div
       v-if="item.category === 'lodging'"
       class="material-needed"

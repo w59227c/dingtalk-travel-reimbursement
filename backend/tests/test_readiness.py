@@ -85,7 +85,7 @@ def test_related_approval_department_migration_preserves_old_rows_and_guards_evi
                 {"fingerprint": "b" * 64, "now": now},
             )
 
-        command.upgrade(config, "head")
+        command.upgrade(config, "20260915_0019")
         with engine.begin() as connection:
             row = connection.execute(
                 text(
@@ -232,6 +232,7 @@ def test_ready_rejects_a_missing_reimbursement_table(
         ("reimbursement_drafts", "owner_user_id"),
         ("reimbursement_draft_files", "file_status"),
         ("reimbursement_draft_related_approvals", "originator_department_id"),
+        ("receipt_keyword_mappings", "transport_type"),
         ("reimbursement_submissions", "process_instance_id"),
         ("reimbursement_uploads", "file_id"),
     ],

@@ -69,20 +69,20 @@ def test_saving_source_receipt_normalizes_count_but_manual_aggregate_keeps_count
     assert restored["totals"]["receiptCount"] == 4
 
 
-def test_payment_threshold_does_not_divide_amount_by_manual_receipt_count(
-    client_factory, monkeypatch
+@pytest.mark.parametrize("count", [2, 20])
+def test_manual_aggregate_does_not_require_payment_proof_for_total_amount(
+    client_factory, monkeypatch, count
 ):
     client, _, draft_id, _, _ = _proof_setup(client_factory, monkeypatch)
     value = _input()
-    value["items"][0].update(amount="501.00", receiptCount=2)
+    value["items"][0].update(amount="12000.00", receiptCount=count)
     with client.app.state.database_session_factory() as database:
-        with pytest.raises(ApiError, match="付款凭证"):
-            validate_draft_file_references(
-                database,
-                draft_id=draft_id,
-                draft_input=ReimbursementDraftInput.model_validate(value),
-                require_submission_proofs=True,
-            )
+        validate_draft_file_references(
+            database,
+            draft_id=draft_id,
+            draft_input=ReimbursementDraftInput.model_validate(value),
+            require_submission_proofs=True,
+        )
 
 
 def test_new_draft_cannot_reference_payment_file_from_an_existing_draft(
@@ -487,7 +487,7 @@ def test_review_submit_and_snapshot_order_enforce_new_payment_rule(
     assert accepted.status_code == 202, accepted.text
     with client.app.state.database_session_factory() as database:
         snapshot = json.loads(database.scalar(select(ReimbursementSubmission)).form_snapshot_json)
-        assert snapshot["snapshotVersion"] == 7
+        assert snapshot["snapshotVersion"] == 8
         assert [file["draftFileId"] for file in snapshot["originalFiles"]] == [
             sources[0],
             sources[1],

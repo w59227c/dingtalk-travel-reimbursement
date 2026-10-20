@@ -247,6 +247,7 @@ def list_draft_files(
                 *item.itinerary_file_ids,
                 *item.payment_proof_file_ids,
                 *item.hotel_bill_file_ids,
+                *item.receipt_attachment_file_ids,
             )
             if file_id is not None
         }
@@ -1607,6 +1608,7 @@ def _input_references_file(input_json: str, file_id: str) -> bool:
         or file_id in item.itinerary_file_ids
         or file_id in item.payment_proof_file_ids
         or file_id in item.hotel_bill_file_ids
+        or file_id in item.receipt_attachment_file_ids
         for item in value.items
     )
 

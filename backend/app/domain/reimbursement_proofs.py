@@ -9,10 +9,11 @@ PAYMENT_PROOF_EXEMPT_RAIL_TYPES = frozenset({"high_speed"})
 
 
 def payment_proof_required(
-    *, amount: Decimal | None, category: ExpenseCategory, rail_type: str
+    *, amount: Decimal | None, category: ExpenseCategory, rail_type: str, receipt_count: int = 1
 ) -> bool:
     return (
-        amount is not None
+        receipt_count == 1
+        and amount is not None
         and amount > Decimal("500.00")
         and not (
             category is ExpenseCategory.RAIL_FARE and rail_type in PAYMENT_PROOF_EXEMPT_RAIL_TYPES

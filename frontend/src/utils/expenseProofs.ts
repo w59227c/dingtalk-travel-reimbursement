@@ -3,8 +3,10 @@ import type { OcrReceiptCandidate } from '@/types/receipts'
 import type { ReimbursementAttachmentKind, ReimbursementDraftFile } from '@/types/reimbursements'
 import { moneyToCents } from '@/utils/money'
 
-export function requiresPaymentProof(item: Pick<ExpenseItem, 'amount' | 'category' | 'railType'>): boolean {
-  return (moneyToCents(item.amount) ?? 0) > 50_000
+export function requiresPaymentProof(item: Pick<ExpenseItem, 'amount' | 'category' | 'railType'>
+  & Partial<Pick<ExpenseItem, 'receiptCount' | 'sourceFileId' | 'source'>>): boolean {
+  const count = item.sourceFileId || item.source === 'ocr' ? 1 : item.receiptCount ?? 1
+  return count === 1 && (moneyToCents(item.amount) ?? 0) > 50_000
     && !(item.category === 'rail_fare' && item.railType === 'high_speed')
 }
 
@@ -62,7 +64,7 @@ export function missingExpenseMaterials(
   options: { allowPurged?: boolean } = {},
 ): string[] {
   const missing: string[] = []
-  if ((item.requiresItinerary || item.transportType === 'ride_hailing') && !item.itineraryFileIds?.some((id) =>
+  if (item.transportType !== 'taxi' && (item.requiresItinerary || item.transportType === 'ride_hailing') && !item.itineraryFileIds?.some((id) =>
     files.some((file) => file.id === id && isRecordedProof(file, 'itinerary', options.allowPurged)))) missing.push('行程单')
   if (requiresPaymentProof(item) && !item.paymentProofFileIds?.some((id) =>
     files.some((file) => file.id === id && isRecordedProof(file, 'payment_proof', options.allowPurged)))) missing.push('付款凭证')

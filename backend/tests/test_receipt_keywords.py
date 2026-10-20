@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from app.domain.categories import ExpenseCategory
 from app.models.receipt_keyword import ReceiptKeywordMapping
+from app.ocr.parsers import ReceiptParserRegistry
+from app.ocr.types import OcrLine, ParseContext
+from app.services.receipt_keywords import load_receipt_keyword_rules
 from tests.conftest import mock_login
 
 
@@ -123,3 +127,63 @@ def test_seeded_keyword_can_be_edited_moved_and_deleted(client_factory) -> None:
     )
     assert deleted.status_code == 200
     assert admin.get("/api/admin/receipt-keywords").json()["data"] == []
+
+
+def test_transport_keyword_groups_are_editable_and_control_recognition(client_factory):
+    admin = client_factory(auth_mock_enabled=True, auth_mock_user_id="bootstrap-admin")
+    headers = {"X-CSRF-Token": mock_login(admin)["csrfToken"]}
+    body = {"keyword": "示例出行", "categoryId": "local_transport", "transportType": "ride_hailing"}
+    assert admin.post("/api/admin/receipt-keywords", json=body).status_code == 403
+    created = admin.post("/api/admin/receipt-keywords", headers=headers, json=body)
+    assert created.status_code == 201
+    mapping = created.json()["data"]
+    assert mapping["transportType"] == "ride_hailing"
+    document = [
+        OcrLine(value, 1)
+        for value in ("电子发票 旅客运输服务", "销售方名称：示例出行公司", "价税合计 ¥20.00")
+    ]
+    for transport_type, required in (("ride_hailing", True), ("taxi", False)):
+        body["transportType"] = transport_type
+        response = admin.put(
+            f"/api/admin/receipt-keywords/{mapping['id']}", headers=headers, json=body
+        )
+        assert response.status_code == 200
+        with admin.app.state.database_session_factory() as database:
+            rules = load_receipt_keyword_rules(database)
+        parsed = ReceiptParserRegistry(keyword_rules=rules).parse(document, ParseContext(2026))
+        assert parsed.category is ExpenseCategory.LOCAL_TRANSPORT
+        assert parsed.transport_type == transport_type
+        assert parsed.requires_itinerary is required
+    body["transportType"] = "other"
+    assert (
+        admin.put(
+            f"/api/admin/receipt-keywords/{mapping['id']}", headers=headers, json=body
+        ).json()["data"]["transportType"]
+        == "other"
+    )
+    with admin.app.state.database_session_factory() as database:
+        rules = load_receipt_keyword_rules(database)
+    parsed = ReceiptParserRegistry(keyword_rules=rules).parse(document, ParseContext(2026))
+    assert parsed.category is ExpenseCategory.LOCAL_TRANSPORT
+    assert parsed.transport_type is None and not parsed.requires_itinerary
+    for invalid in ({**body, "transportType": "unknown"}, {**body, "categoryId": "office"}):
+        assert (
+            admin.put(
+                f"/api/admin/receipt-keywords/{mapping['id']}", headers=headers, json=invalid
+            ).status_code
+            == 422
+        )
+    body.pop("transportType")
+    body["categoryId"] = "office"
+    moved = admin.put(f"/api/admin/receipt-keywords/{mapping['id']}", headers=headers, json=body)
+    assert moved.status_code == 200 and "transportType" not in moved.json()["data"]
+    with admin.app.state.database_session_factory() as database:
+        rules = load_receipt_keyword_rules(database)
+    parsed = ReceiptParserRegistry(keyword_rules=rules).parse(document, ParseContext(2026))
+    assert parsed.category is ExpenseCategory.OFFICE and not parsed.requires_itinerary
+    assert (
+        admin.delete(f"/api/admin/receipt-keywords/{mapping['id']}", headers=headers).status_code
+        == 200
+    )
+    with admin.app.state.database_session_factory() as database:
+        assert load_receipt_keyword_rules(database) == ()

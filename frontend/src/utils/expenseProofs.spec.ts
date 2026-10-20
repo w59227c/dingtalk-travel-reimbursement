@@ -17,6 +17,18 @@ describe('payment proof requirement', () => {
   ] as const)('requires proof for %s %s %s: %s', (amount, category, railType, expected) => {
     expect(requiresPaymentProof({ amount, category, railType })).toBe(expected)
   })
+
+  it('exempts manual aggregates and keeps source receipts subject to the single-ticket rule', () => {
+    const item = { amount: '12000.00', category: 'local_transport', receiptCount: 20 }
+    expect(requiresPaymentProof(item)).toBe(false)
+    expect(requiresPaymentProof({ ...item, receiptCount: 1 })).toBe(true)
+    expect(requiresPaymentProof({ ...item, sourceFileId: 'invoice' })).toBe(true)
+    expect(requiresPaymentProof({ ...item, source: 'ocr' })).toBe(true)
+  })
+
+  it('does not request itineraries for taxis with a stale legacy flag', () => {
+    expect(missingExpenseMaterials({ amount: '20.00', transportType: 'taxi', requiresItinerary: true } as ExpenseItem, [])).toEqual([])
+  })
 })
 
 describe('hotel stay details', () => {

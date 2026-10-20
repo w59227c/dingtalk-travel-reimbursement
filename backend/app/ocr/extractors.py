@@ -4,7 +4,9 @@ import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from app.domain.categories import ExpenseCategory
 from app.domain.money import MAX_REIMBURSEMENT_AMOUNT, quantize_money
+from app.ocr.keyword_defaults import DEFAULT_RECEIPT_KEYWORD_RULES
 from app.ocr.types import OcrLine
 
 _FULL_DATE = re.compile(
@@ -36,21 +38,18 @@ PASSENGER_OCCURRENCE_DATE_PREFIX = "发生日期："
 _LAYOUT_COLUMN_GAP = re.compile(r"\s{4,}")
 _ROUTE_FORBIDDEN_TEXT = ("价税合计", "开票日期", "发票号码", "项目名称")
 _PASSENGER_ROW_HEADERS = ("出行日期", "出发地", "到达地", "交通工具类型")
-_PASSENGER_TRANSPORT_VALUES = (
-    "道路旅客运输",
-    "出租汽车",
-    "公路客运",
-    "汽车客运",
-    "出租车",
-    "网约车",
-    "高铁",
-    "动车",
-    "铁路",
-    "火车",
-    "航空",
-    "飞机",
-    "民航",
+_PASSENGER_TRANSPORT_VALUES = tuple(
+    rule.keyword
+    for rule in DEFAULT_RECEIPT_KEYWORD_RULES
+    if rule.category
+    in {ExpenseCategory.AIRFARE, ExpenseCategory.RAIL_FARE, ExpenseCategory.LOCAL_TRANSPORT}
 )
+# Validate a flattened table's vehicle cell, without assigning an expense category.
+_PASSENGER_VEHICLE_VALUE = re.compile(
+    r"航空|飞机|民航|铁路|火车|高铁|动车(?:组)?|(?:网络预约)?出租汽车|出租车|网约车"
+    r"|道路旅客运输|公路客运|汽车客运"
+)
+_TRANSPORT_TAX_ITEM = re.compile(r"[*＊]\s*交通运输服务\s*[*＊]")
 _PASSENGER_ROW_NON_LOCATIONS = frozenset(
     {
         "无",
@@ -490,7 +489,67 @@ def extract_invoice_amount(
     return visible, ("QR_AMOUNT_MISMATCH",)
 
 
-def extract_passenger_transport_type(lines: list[OcrLine]) -> str | None:
+def extract_passenger_service_keywords(lines: list[OcrLine], keywords: tuple[str, ...]) -> set[str]:
+    """Match configured words inside service cells, including wrapped PDF cells.
+
+    Numeric columns can interrupt a project name in plain PDF text. A following
+    fragment is joined only when it completes the same configured word, never
+    by concatenating an unrelated route, company, or next invoice item.
+    """
+    texts = [
+        re.sub(r"^(?:项目|商品|服务)名称\s*[:：]?\s*", "", line.text.strip())
+        for line in lines
+        if line.text.strip()
+    ]
+    matched: set[str] = set()
+    for index, text in enumerate(texts):
+        tax_item = _TRANSPORT_TAX_ITEM.search(text)
+        if tax_item:
+            cell = text[tax_item.end() :]
+        elif any(label in text for label in ("服务", "客运")) and not any(
+            label in text for label in ("公司", "发票", "出发地", "到达地", "备注", "名称")
+        ):
+            cell = text
+        else:
+            continue
+        head = "".join(re.split(r"[\d¥￥%*＊:：]", cell, maxsplit=1)[0].split()).rstrip("+-−")
+        if not head:
+            continue
+        for keyword in keywords:
+            word = "".join(keyword.casefold().split())
+            if not word:
+                continue
+            if word in head.casefold():
+                matched.add(keyword)
+                continue
+            for length in range(2, len(word)):
+                if not head.casefold().endswith(word[:length]):
+                    continue
+                remaining = word[length:]
+                for continuation in texts[index + 1 : index + 4]:
+                    fragment = (
+                        "".join(re.split(r"[\d¥￥%*＊:：]", continuation, maxsplit=1)[0].split())
+                        .rstrip("+-−")
+                        .casefold()
+                    )
+                    if not fragment:
+                        break
+                    if fragment.startswith(remaining):
+                        matched.add(keyword)
+                        break
+                    if not remaining.startswith(fragment):
+                        break
+                    remaining = remaining[len(fragment) :]
+                    if not remaining:
+                        matched.add(keyword)
+                        break
+    return matched
+
+
+def extract_passenger_transport_type(
+    lines: list[OcrLine],
+    values: tuple[str, ...] | None = None,
+) -> str | None:
     """Extract transport evidence from the invoice field instead of route/company text."""
 
     texts = [line.text.strip() for line in lines if line.text.strip()]
@@ -499,13 +558,18 @@ def extract_passenger_transport_type(lines: list[OcrLine]) -> str | None:
             continue
         suffix = text.split("交通工具类型", 1)[1].strip(" ：:")
         explicit_suffix = bool(suffix)
-        search_values = [suffix] if explicit_suffix else texts[index + 1 : index + 10]
+        header = " ".join(texts[max(0, index - 8) : index + 1])
+        table = all(label in header for label in ("出发地", "到达地"))
+        search_values = (
+            [suffix] if explicit_suffix else _passenger_table_transport_cells(texts, index)
+            if table else texts[index + 1 : index + 2]
+        )
         matches: list[str] = []
         for candidate in search_values:
             if any(stop in candidate for stop in ("价税合计", "开票日期", "开票人")):
                 break
-            candidates = [candidate] if explicit_suffix else [candidate.split()[-1]]
-            for value in _PASSENGER_TRANSPORT_VALUES:
+            candidates = [candidate]
+            for value in _PASSENGER_TRANSPORT_VALUES if values is None else values:
                 if (
                     any(
                         value in field if explicit_suffix else value == field
@@ -518,6 +582,32 @@ def extract_passenger_transport_type(lines: list[OcrLine]) -> str | None:
             return " ".join(matches)
         return None
     return None
+
+
+def _passenger_table_transport_cells(texts: list[str], header_index: int) -> list[str]:
+    """Read the final cell only when a dated row has every expected column."""
+    header = " ".join(texts[max(0, header_index - 8) : header_index + 1])
+    expected = 4 if "等级" in header else 3  # origin, destination, optional grade, vehicle
+    cells: list[str] = []
+    boundaries = ("价税合计", "合计", "开票日期", "开票人", "购买方", "销售方", "项目名称")
+    for row_index in range(header_index + 1, min(len(texts), header_index + 10)):
+        text = texts[row_index]
+        if any(boundary in text for boundary in boundaries):
+            break
+        match = _FULL_DATE.search(text)
+        if match is None:
+            continue
+        values = text[match.end() :].split()
+        if not values:
+            for following in texts[row_index + 1 : row_index + expected + 4]:
+                if any(boundary in following for boundary in boundaries) or _FULL_DATE.search(
+                    following
+                ):
+                    break
+                values.extend(following.split())
+        if len(values) == expected and _PASSENGER_VEHICLE_VALUE.fullmatch(values[-1]):
+            cells.append(values[-1])
+    return cells
 
 
 def _compact_layout_value(value: str) -> str:

@@ -91,8 +91,8 @@ async function downloadExcel(): Promise<void> {
         class="field-help excel-preview-help"
       >
         {{ props.mobile
-          ? '点击后由钉钉下载并打开报销单；正式提交时仍会重新生成最终文件。'
-          : '预览前会自动保存当前内容；正式提交时生成最终报销单和票据汇总 PDF。' }}
+          ? '点击后由钉钉下载并打开报销单。'
+          : '预览前会自动保存当前内容。' }}
       </p>
     </div>
   </el-card>

@@ -158,7 +158,7 @@ def test_dynamic_config_roundtrip_and_api_contract():
 
 def test_dynamic_snapshot_roundtrip_uses_current_version():
     snapshot = build_snapshot(_dynamic_source())
-    assert snapshot.snapshot_version == 7
+    assert snapshot.snapshot_version == 8
     assert parse_snapshot(serialize_snapshot(snapshot)) == snapshot
     assert snapshot.related_approvals[0].source_travel_type_value == "商务出差"
 

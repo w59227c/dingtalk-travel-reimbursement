@@ -10,7 +10,7 @@ import {
   listReceiptKeywords,
   updateReceiptKeyword,
 } from '@/api/receiptKeywords'
-import type { ReceiptKeywordMapping } from '@/api/receiptKeywords'
+import type { ReceiptKeywordMapping, ReceiptKeywordTransportType } from '@/api/receiptKeywords'
 import type { ExpenseCategoryMetadata } from '@/types/expenses'
 
 const keywordMappings = ref<ReceiptKeywordMapping[]>([])
@@ -21,7 +21,12 @@ const loadError = ref('')
 const dialogOpen = ref(false)
 const editingKeywordId = ref<number | null>(null)
 const validationError = ref('')
-const form = reactive({ keyword: '', categoryId: '' })
+const form = reactive({ keyword: '', categoryId: '', transportType: 'other' as ReceiptKeywordTransportType })
+const transportGroups: Array<{ id: ReceiptKeywordTransportType; label: string }> = [
+  { id: 'other', label: '通用' },
+  { id: 'ride_hailing', label: '网约车' },
+  { id: 'taxi', label: '出租车' },
+]
 
 const configurableCategories = computed(() =>
   keywordCategories.value.filter((category) => category.id !== 'other'),
@@ -34,6 +39,11 @@ const keywordGroups = computed(() =>
     ),
   })),
 )
+function mappingGroups(categoryId: string, mappings: ReceiptKeywordMapping[]) {
+  return categoryId === 'local_transport'
+    ? transportGroups.map((group) => ({ ...group, mappings: mappings.filter((mapping) => (mapping.transportType ?? 'other') === group.id) }))
+    : [{ id: 'other' as const, label: '', mappings }]
+}
 const dialogTitle = computed(() => {
   if (editingKeywordId.value !== null) return '编辑分类关键词'
   const category = keywordCategories.value.find(
@@ -63,10 +73,10 @@ async function load(): Promise<void> {
   }
 }
 
-function openCreate(categoryId: string): void {
+function openCreate(categoryId: string, transportType: ReceiptKeywordTransportType = 'other'): void {
   editingKeywordId.value = null
   validationError.value = ''
-  Object.assign(form, { keyword: '', categoryId })
+  Object.assign(form, { keyword: '', categoryId, transportType })
   dialogOpen.value = true
 }
 
@@ -76,6 +86,7 @@ function openEdit(mapping: ReceiptKeywordMapping): void {
   Object.assign(form, {
     keyword: mapping.keyword,
     categoryId: mapping.categoryId,
+    transportType: mapping.transportType ?? 'other',
   })
   dialogOpen.value = true
 }
@@ -95,7 +106,9 @@ async function save(): Promise<void> {
   }
   saving.value = true
   try {
-    const input = { keyword, categoryId: form.categoryId }
+    const input = { keyword, categoryId: form.categoryId,
+      ...(form.categoryId === 'local_transport' ? { transportType: form.transportType } : {}),
+    }
     if (editingKeywordId.value === null) await createReceiptKeyword(input)
     else await updateReceiptKeyword(editingKeywordId.value, input)
     dialogOpen.value = false
@@ -137,6 +150,7 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
         <h2>票据分类关键词</h2>
         <p>按费用类别维护关键词；点击关键词可修改，点击 × 可删除。</p>
         <p>不同类别同时命中时保留为“其他”；专用票据仍会结合版式结构识别。</p>
+        <p>市内交通费分为通用、网约车、出租车；网约车关键词用于识别交通类型，并要求关联行程单。</p>
       </div>
     </div>
     <el-alert
@@ -168,37 +182,54 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
         :aria-label="`${group.category.name}分类关键词`"
       >
         <strong>{{ group.category.name }}</strong>
-        <div class="settings-keyword-tags">
-          <template v-if="group.category.id === 'other'">
-            <span class="settings-keyword-empty">未命中或冲突时自动归入，无需配置关键词</span>
-          </template>
-          <template v-else-if="group.mappings.length > 0">
-            <el-tag
-              v-for="mapping in group.mappings"
-              :key="mapping.id"
-              closable
-              disable-transitions
-              class="settings-keyword-tag"
-              title="点击修改关键词"
-              @click="openEdit(mapping)"
-              @close.stop="remove(mapping)"
-            >
-              {{ mapping.keyword }}
-            </el-tag>
-          </template>
-          <span
-            v-else
-            class="settings-keyword-empty"
-          >暂无关键词</span>
-        </div>
-        <el-button
-          v-if="group.category.id !== 'other'"
-          link
-          type="primary"
-          @click="openCreate(group.category.id)"
+        <div
+          v-if="group.category.id === 'other'"
+          class="settings-keyword-tags"
         >
-          添加
-        </el-button>
+          <span class="settings-keyword-empty">未命中或冲突时自动归入，无需配置关键词</span>
+        </div>
+        <div
+          v-else
+          class="settings-keyword-subgroups"
+          :class="{ 'settings-keyword-subgroups--transport': group.category.id === 'local_transport' }"
+        >
+          <div
+            v-for="subgroup in mappingGroups(group.category.id, group.mappings)"
+            :key="subgroup.id"
+            class="settings-keyword-subgroup"
+            :aria-label="subgroup.label ? `${group.category.name}${subgroup.label}关键词` : undefined"
+          >
+            <span
+              v-if="subgroup.label"
+              class="settings-keyword-subgroup-label"
+            >{{ subgroup.label }}</span>
+            <div class="settings-keyword-tags">
+              <el-tag
+                v-for="mapping in subgroup.mappings"
+                :key="mapping.id"
+                closable
+                disable-transitions
+                class="settings-keyword-tag"
+                title="点击修改关键词"
+                @click="openEdit(mapping)"
+                @close.stop="remove(mapping)"
+              >
+                {{ mapping.keyword }}
+              </el-tag>
+              <span
+                v-if="subgroup.mappings.length === 0"
+                class="settings-keyword-empty"
+              >暂无关键词</span>
+            </div>
+            <el-button
+              link
+              type="primary"
+              @click="openCreate(group.category.id, subgroup.id)"
+            >
+              添加
+            </el-button>
+          </div>
+        </div>
       </section>
     </div>
   </el-card>
@@ -229,6 +260,26 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
           class="field-help"
         >
           至少 2 个字符，避免单个数字误匹配日期、金额和票据号码。
+        </p>
+      </el-form-item>
+      <el-form-item
+        v-if="form.categoryId === 'local_transport'"
+        label="交通类型"
+      >
+        <el-select
+          v-model="form.transportType"
+          class="full-width"
+          aria-label="关键词交通类型"
+        >
+          <el-option
+            v-for="group in transportGroups"
+            :key="group.id"
+            :label="group.label"
+            :value="group.id"
+          />
+        </el-select>
+        <p class="field-help">
+          网约车需关联行程单；出租车不提供行程单关联，通用类型不要求。
         </p>
       </el-form-item>
       <el-form-item
@@ -263,3 +314,29 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.settings-keyword-subgroups { min-width: 0; grid-column: 2 / -1; }
+.settings-keyword-subgroup { display: flex; align-items: center; gap: 12px; }
+.settings-keyword-subgroup + .settings-keyword-subgroup { margin-top: 12px; }
+.settings-keyword-subgroup-label { flex: 0 0 3em; color: var(--el-text-color-secondary); }
+.settings-keyword-subgroup .settings-keyword-tags { flex: 1; min-width: 0; }
+.settings-keyword-subgroups--transport .settings-keyword-subgroup { padding: 16px 0; }
+.settings-keyword-subgroups--transport .settings-keyword-subgroup:first-child { padding-top: 4px; }
+.settings-keyword-subgroups--transport .settings-keyword-subgroup:last-child { padding-bottom: 4px; }
+.settings-keyword-subgroups--transport .settings-keyword-subgroup + .settings-keyword-subgroup {
+  margin-top: 0;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.settings-keyword-subgroups--transport .settings-keyword-subgroup-label {
+  color: var(--el-text-color-primary);
+  font-weight: 600;
+}
+@media (max-width: 700px) {
+  .settings-keyword-subgroups { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (max-width: 420px) {
+  .settings-keyword-subgroup { flex-wrap: wrap; gap: 8px; }
+  .settings-keyword-subgroup-label { flex-basis: 100%; }
+}
+</style>

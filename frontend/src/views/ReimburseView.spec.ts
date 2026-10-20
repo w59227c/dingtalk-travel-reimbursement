@@ -462,6 +462,7 @@ describe('ReimburseView single-form OA flow', () => {
     const { wrapper } = await mountView(undefined, false, true)
 
     expect(wrapper.find('.current-user-id').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('基础服务已就绪')
     expect(wrapper.get('.hero-actions').text()).toContain('系统设置')
     expect(wrapper.get('.hero-actions a').attributes('data-to')).toBe('/m/settings')
     expect(wrapper.findAll('.mobile-step-nav button').map((button) => button.text())).toEqual([
@@ -789,7 +790,7 @@ describe('ReimburseView single-form OA flow', () => {
       useReimbursementSubmissionStore().oaSubmissionEnabled = false
     })
     expect(wrapper.text()).toContain('OA提交服务未开启，可继续填写')
-    expect(wrapper.text()).toContain('基础服务已就绪')
+    expect(wrapper.text()).not.toContain('基础服务已就绪')
     expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeDefined()
     expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
     expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toBe('')
@@ -1956,6 +1957,34 @@ describe('ReimburseView single-form OA flow', () => {
       paymentProofFileIds: ['payment-1'], itineraryFileIds: ['itinerary-1'], railType: 'unknown',
     })
     wrapper.unmount()
+  })
+
+  it.each([false, true])('autosaves receipt-only edits and restores manual attachments (mobile=%s)', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    delete serverDraft.input.items[0]!.sourceFileId
+    serverFiles = [{ ...activeFile, role: 'ATTACHMENT_ONLY', attachmentKind: 'other', ocrStatus: 'NOT_REQUESTED', ocrResult: null }]
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    await vi.advanceTimersByTimeAsync(650)
+    vi.mocked(updateReimbursementDraft).mockClear()
+    expense.items[0]!.receiptAttachmentFileIds = ['file-1']
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    await flushPromises()
+    expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    expect(serverDraft.input.items[0]?.receiptAttachmentFileIds).toEqual(['file-1'])
+    expect(serverDraft.input.items[0]?.amount).toBe('44.89')
+    wrapper.unmount()
+    const restored = await mountView(undefined, false, mobile)
+    expect(restored.expense.items[0]?.receiptAttachmentFileIds).toEqual(['file-1'])
+    vi.mocked(updateReimbursementDraft).mockClear()
+    restored.expense.items[0]!.receiptAttachmentFileIds = []
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    await flushPromises()
+    expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    expect(serverDraft.input.items[0]?.receiptAttachmentFileIds ?? []).toEqual([])
+    restored.wrapper.unmount()
   })
 
   it('keeps interactions locked during confirmation and reopens editing after cancellation', async () => {

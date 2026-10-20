@@ -38,6 +38,7 @@ class InvoiceQrEvidence:
 class ReceiptKeywordRule:
     keyword: str
     category: ExpenseCategory
+    transport_type: Literal["ride_hailing", "taxi"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
