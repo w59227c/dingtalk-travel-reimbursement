@@ -487,7 +487,7 @@ def test_review_submit_and_snapshot_order_enforce_new_payment_rule(
     assert accepted.status_code == 202, accepted.text
     with client.app.state.database_session_factory() as database:
         snapshot = json.loads(database.scalar(select(ReimbursementSubmission)).form_snapshot_json)
-        assert snapshot["snapshotVersion"] == 8
+        assert snapshot["snapshotVersion"] == 9
         assert [file["draftFileId"] for file in snapshot["originalFiles"]] == [
             sources[0],
             sources[1],

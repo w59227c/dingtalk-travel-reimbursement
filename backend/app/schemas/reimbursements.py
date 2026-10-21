@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.domain.categories import ExpenseCategory
 from app.domain.money import MAX_REIMBURSEMENT_AMOUNT, quantize_money
+from app.domain.subsidy import AdjustmentType
 from app.schemas.excel import ExcelGenerateRequest, ManualProjectInput, SelectedProjectInput
 from app.schemas.expenses import MAX_EXPENSE_ITEMS_HARD_LIMIT, TripPurpose
 from app.schemas.primitives import DecimalString, StrictCalendarDate
@@ -24,6 +25,11 @@ class BudgetProjectInput(ManualProjectInput):
 
 class ReimbursementEditingExcludedPeriodInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    adjustment_type: AdjustmentType = Field(
+        default=AdjustmentType.TEMPORARY_ABSENCE, alias="type",
+        exclude_if=lambda value: value == AdjustmentType.TEMPORARY_ABSENCE,
+    )
 
     start_date: str = Field(default="", alias="startDate", max_length=10)
     start_time: str = Field(default="", alias="startTime", max_length=5)

@@ -28,7 +28,13 @@ from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
 from app.domain.expenses import ExpenseTotals, calculate_expense_totals
 from app.domain.money import money_string
 from app.domain.reimbursement_proofs import payment_proof_required
-from app.domain.subsidy import SubsidyCalculation, TripType, calculate_subsidy
+from app.domain.subsidy import (
+    AdjustmentType,
+    SubsidyCalculation,
+    TripType,
+    calculate_subsidy,
+    validate_non_overlapping_exclusions,
+)
 from app.integrations.dingtalk.storage import ApprovalAttachment
 from app.integrations.dingtalk.workflow import (
     CreateProcessInstanceCommand,
@@ -83,10 +89,12 @@ from app.services.reimbursement_staging import (
 )
 from app.services.subsidy_calculation import (
     merge_overlapping_subsidy_trips,
+    request_trips,
     subsidy_purpose_for_travel_type,
 )
+from app.services.subsidy_description import subsidy_explanation
 
-SNAPSHOT_VERSION = 8
+SNAPSHOT_VERSION = 9
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _SIGNED_INT64_MAX = 9_223_372_036_854_775_807
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -194,14 +202,22 @@ class SnapshotProject(_SnapshotModel):
 
 
 class SnapshotExcludedPeriod(_SnapshotModel):
-    start_date: StrictCalendarDate
-    start_time: MinuteTime
-    end_date: StrictCalendarDate
-    end_time: MinuteTime
+    adjustment_type: AdjustmentType = Field(
+        default=AdjustmentType.TEMPORARY_ABSENCE, alias="type",
+        exclude_if=lambda value: value == AdjustmentType.TEMPORARY_ABSENCE,
+    )
+    start_date: StrictCalendarDate | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    start_time: MinuteTime | None = Field(default=None, exclude_if=lambda value: value is None)
+    end_date: StrictCalendarDate | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    end_time: MinuteTime | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_serializer("start_time", "end_time", when_used="json")
     def serialize_minute_time(self, value: object) -> str:
-        return value.strftime("%H:%M")
+        return value.strftime("%H:%M") if value is not None else None
 
 
 class SnapshotTrip(_SnapshotModel):
@@ -371,7 +387,7 @@ class SnapshotFormValue(_SnapshotModel):
 
 
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[6, 7, 8] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6, 7, 8, 9] = SNAPSHOT_VERSION
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
@@ -453,6 +469,7 @@ class ExcelGenerationInput:
     subsidy: SubsidyCalculation | None
     subsidies: tuple[SubsidyCalculation, ...]
     totals: ExpenseTotals
+    detailed_subsidies: bool = True
 
 
 def collect_snapshot_source(
@@ -701,6 +718,10 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
             subsidies=subsidies,
             totals=totals,
             related=related,
+            subsidy_trips=tuple(merge_overlapping_subsidy_trips(
+                request_trips(trip=source.draft_input.trip, trips=source.draft_input.trips)
+            )),
+            detailed_subsidies=True,
         )
         return ReimbursementSnapshot(
             draft_id=source.draft_id,
@@ -820,6 +841,7 @@ def snapshot_excel_input(snapshot: ReimbursementSnapshot) -> ExcelGenerationInpu
         subsidy=subsidy,
         subsidies=tuple(item for item in subsidies if item is not None),
         totals=totals,
+        detailed_subsidies=snapshot.snapshot_version >= 9,
     )
 
 
@@ -1336,6 +1358,8 @@ def _snapshot_form_values(
     subsidies: tuple[SnapshotSubsidy, ...] = (),
     totals: SnapshotTotals,
     related: tuple[SnapshotRelatedApproval, ...],
+    subsidy_trips: tuple[TripInput, ...] = (),
+    detailed_subsidies: bool = False,
 ) -> tuple[SnapshotFormValue, ...]:
     related_value = _canonical_json([item.process_instance_id for item in related])
     values = (
@@ -1345,7 +1369,8 @@ def _snapshot_form_values(
         start_date.isoformat(),
         end_date.isoformat(),
         str(duration_days),
-        _description_v1(items, subsidy, totals, subsidies),
+        _description_v2(items, subsidy, totals, subsidies, subsidy_trips)
+        if detailed_subsidies else _description_v1(items, subsidy, totals, subsidies),
         money_string(totals.total_amount),
         related_value,
     )
@@ -1377,6 +1402,21 @@ def _description_v1(
             f"出差补助：{format(item.effective_days, '.1f')}天 × "
             f"{money_string(item.daily_rate)} = {money_string(item.total)}{exclusion}"
         )
+    lines.append(f"合计：{money_string(totals.total_amount)}")
+    return "\n".join(lines)
+
+
+def _description_v2(items, subsidy, totals, subsidies, trips) -> str:
+    calculated = subsidies or ((subsidy,) if subsidy is not None else ())
+    if not any(trip.excluded_periods for trip in trips):
+        return _description_v1(items, subsidy, totals, subsidies)
+    lines = _description_v1(items, None, totals).splitlines()[:-1]
+    for trip, result in zip(trips, calculated, strict=True):
+        if trip.excluded_periods:
+            calculation = _subsidy_from_snapshot(result)
+            lines.extend(subsidy_explanation(trip, calculation))
+        else:
+            lines.extend(_description_v1((), result, totals).splitlines()[:-1])
     lines.append(f"合计：{money_string(totals.total_amount)}")
     return "\n".join(lines)
 
@@ -1618,6 +1658,15 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
     if len(calculated_subsidies) != len(output_trips):
         raise ValueError("trip input requires one subsidy calculation per merged period")
     for trip_item, subsidy_item in zip(output_trips, calculated_subsidies, strict=True):
+        if snapshot.snapshot_version < 9 and any(
+            item.adjustment_type != AdjustmentType.TEMPORARY_ABSENCE
+            for item in trip_item.excluded_periods
+        ):
+            raise ValueError("one-way subsidy adjustments require snapshot v9")
+        if snapshot.snapshot_version >= 9:
+            validate_non_overlapping_exclusions(
+                [item.as_period() for item in trip_item.excluded_periods], trip_item.as_period()
+            )
         if (
             subsidy_item.trip_type
             != trip_item.subsidy_trip_type(legacy=snapshot.snapshot_version == 6)
@@ -1707,6 +1756,8 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         subsidies=snapshot.subsidies,
         totals=snapshot.totals,
         related=snapshot.related_approvals,
+        subsidy_trips=tuple(output_trips),
+        detailed_subsidies=snapshot.snapshot_version >= 9,
     )
     if snapshot.form_values != expected_values:
         raise ValueError("stored form values mismatch")

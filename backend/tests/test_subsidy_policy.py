@@ -279,7 +279,10 @@ def test_exclusions_persist_in_drafts_and_unfinished_edits_block_preview(
 
 
 @pytest.mark.parametrize("historical_overlap", [False, True])
-def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(historical_overlap):
+@pytest.mark.parametrize("version", [7, 8])
+def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(
+    historical_overlap, version,
+):
     source = _source()
     period = excluded("2026-09-01", "2026-09-03")
     trip_input = TripInput.model_validate(
@@ -295,14 +298,49 @@ def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(his
     totals = calculate_expense_totals(source.draft_input.items, result).as_api_dict() | {
         "subsidy": result.as_api_dict()
     }
-    updated = replace(
-        source,
-        draft_input=source.draft_input.model_copy(update={"trip": trip_input}),
-        totals_data=totals,
+    # Reconstruct a genuine v7 payload: historical overlapping periods used the
+    # union rule and the original concise OA description. New v9 rejects them.
+    base = build_snapshot(source)
+    historical = json.loads(serialize_snapshot(base))
+    historical["snapshotVersion"] = version
+    historical["input"]["trip"]["excludedPeriods"] = (
+        [period, period] if historical_overlap else [period]
     )
-    snapshot = build_snapshot(updated)
-    raw = serialize_snapshot(snapshot)
+    historical["subsidy"].update(result.as_api_dict())
+    historical["totals"] = {
+        key: value for key, value in totals.items() if key not in {"subsidy", "subsidies"}
+    }
+    description = next(
+        item for item in historical["formValues"] if item["logicalKey"] == "description"
+    )
+    description["value"] = "\n".join(
+        "出差补助：1.0天 × 180.00 = 180.00（已扣除2.0天非补助时段）"
+        if line.startswith("出差补助：") else f"合计：{totals['totalAmount']}"
+        if line.startswith("合计：") else line
+        for line in description["value"].splitlines()
+    )
+    next(item for item in historical["formValues"] if item["logicalKey"] == "reimbursementAmount")[
+        "value"
+    ] = totals["totalAmount"]
+    raw = json.dumps(historical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     restored = parse_snapshot(raw)
+    assert serialize_snapshot(restored) == raw
+    excel_input = snapshot_excel_input(restored)
+    assert excel_input.detailed_subsidies is False
+    from app.services.excel_generator import _ordered_lines
+
+    excel_lines = _ordered_lines(
+        excel_input.items,
+        excel_input.trip,
+        excel_input.subsidy,
+        excel_input.trips,
+        excel_input.subsidies,
+        detailed_subsidies=excel_input.detailed_subsidies,
+    )
+    subsidy_lines = [line for line in excel_lines if line.subsidy]
+    assert len(subsidy_lines) == 1
+    assert "扣除2天非补助时段" in subsidy_lines[0].description
+    assert not any(line.continuation for line in excel_lines)
     assert restored.subsidy.excluded_days == Decimal("2.0")
     assert restored.subsidy.effective_days == Decimal("1.0")
     assert restored.input.trip.excluded_periods[0].start_date == date(2026, 9, 1)

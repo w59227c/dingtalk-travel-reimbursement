@@ -23,7 +23,8 @@ import { itineraryConfirmationWarnings, matchItineraries } from '@/utils/itinera
 import { centsToMoney, moneyToCents } from '@/utils/money'
 import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime } from '@/utils/tripPeriod'
-import { groupOverlappingSubsidyTrips, overlappingExcludedPeriods } from '@/utils/subsidyTripGroups'
+import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
+import { adjustmentPayload, adjustmentValidationError } from '@/utils/subsidyAdjustments'
 
 const SPECIAL_TRIP_TYPES = new Set<TripType>([
   'same_city_project',
@@ -137,23 +138,8 @@ export const useExpenseStore = defineStore('expense', () => {
       ? groupOverlappingSubsidyTrips(subsidyTrips.value)
       : [{ ...trip, excludedPeriods: trip.excludedPeriods }]
     for (const [groupIndex, group] of groups.entries()) {
-      for (const excluded of group.excludedPeriods) {
-        if (!isCalendarDate(excluded.startDate) || !isCalendarDate(excluded.endDate)
-          || !tripPeriodFromTime(excluded.startTime) || !tripPeriodFromTime(excluded.endTime)) {
-          return '请补齐每个非补助时段的日期和出发时段'
-        }
-        const start = `${excluded.startDate} ${excluded.startTime}`
-        const end = `${excluded.endDate} ${excluded.endTime}`
-        if (end < start) return '非补助时段的结束时间不能早于开始时间'
-        if (start < `${group.startDate} ${group.startTime}`
-          || end > `${group.endDate} ${group.endTime}`) {
-          return '非补助时段必须在本项出差时段内'
-        }
-      }
-      const overlap = overlappingExcludedPeriods(group.excludedPeriods)
-      if (overlap) {
-        return `补助 ${groupIndex + 1} 的非补助时段 ${overlap[0] + 1} 与时段 ${overlap[1] + 1} 重叠，请调整日期或出发时段`
-      }
+      const error = adjustmentValidationError(group)
+      if (error) return error.includes('重叠') ? `补助 ${groupIndex + 1} 的${error}` : error
     }
     return ''
   })
@@ -249,7 +235,7 @@ export const useExpenseStore = defineStore('expense', () => {
     if (['project', 'internal', 'overseas'].includes(trip.tripType)) return []
     if (excludedPeriodInputError.value) return []
     function exclusions(values: ExcludedPeriodInput[] | undefined): Pick<TripInput, 'excludedPeriods'> {
-      return values?.length ? { excludedPeriods: values.map((item) => ({ ...item })) } : {}
+      return values?.length ? { excludedPeriods: values.map(adjustmentPayload) } : {}
     }
     if (subsidyTrips.value.length) {
       return subsidyTrips.value.flatMap((item) => {

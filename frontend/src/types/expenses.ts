@@ -22,11 +22,15 @@ export type SubsidyRateType =
   | 'short_term_overseas'
   | 'long_term_overseas'
 
+export type SubsidyAdjustmentType = 'temporary_absence' | 'late_departure' | 'early_end'
+
 export interface ExcludedPeriodInput {
-  startDate: string
-  startTime: string
-  endDate: string
-  endTime: string
+  /** Missing on historical drafts: a temporary absence followed by a return. */
+  type?: SubsidyAdjustmentType
+  startDate?: string
+  startTime?: string
+  endDate?: string
+  endTime?: string
 }
 
 export interface TripInput {

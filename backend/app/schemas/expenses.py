@@ -16,7 +16,7 @@ from pydantic import (
 from app.core.errors import ApiError
 from app.domain.categories import ExpenseCategory
 from app.domain.money import MAX_REIMBURSEMENT_AMOUNT, quantize_money
-from app.domain.subsidy import TripPeriod, TripType
+from app.domain.subsidy import AdjustmentType, SubsidyAdjustment, TripPeriod, TripType
 from app.schemas.primitives import DecimalString, MinuteTime, StrictCalendarDate
 
 MAX_CONFIRMED_EFFECTIVE_DAYS = Decimal("366.0")
@@ -40,17 +40,50 @@ class TripPurpose(StrEnum):
 class ExcludedPeriodInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    start_date: StrictCalendarDate = Field(alias="startDate")
-    start_time: MinuteTime = Field(alias="startTime")
-    end_date: StrictCalendarDate = Field(alias="endDate")
-    end_time: MinuteTime = Field(alias="endTime")
+    adjustment_type: AdjustmentType = Field(
+        default=AdjustmentType.TEMPORARY_ABSENCE, alias="type",
+        exclude_if=lambda value: value == AdjustmentType.TEMPORARY_ABSENCE,
+    )
+    start_date: StrictCalendarDate | None = Field(
+        default=None, alias="startDate", exclude_if=lambda value: value is None,
+    )
+    start_time: MinuteTime | None = Field(
+        default=None, alias="startTime", exclude_if=lambda value: value is None,
+    )
+    end_date: StrictCalendarDate | None = Field(
+        default=None, alias="endDate", exclude_if=lambda value: value is None,
+    )
+    end_time: MinuteTime | None = Field(
+        default=None, alias="endTime", exclude_if=lambda value: value is None,
+    )
+
+    @field_validator("start_date", "start_time", "end_date", "end_time", mode="before")
+    @classmethod
+    def normalize_empty_endpoint(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def validate_endpoints(self) -> ExcludedPeriodInput:
+        start = self.start_date is not None and self.start_time is not None
+        end = self.end_date is not None and self.end_time is not None
+        if self.adjustment_type == AdjustmentType.LATE_DEPARTURE:
+            if not end or self.start_date is not None or self.start_time is not None:
+                raise ValueError("延后出发只需完整填写实际出发日期和时段")
+        elif self.adjustment_type == AdjustmentType.EARLY_END:
+            if not start or self.end_date is not None or self.end_time is not None:
+                raise ValueError("提前结束只需完整填写实际离开日期和时段")
+        elif not start or not end:
+            raise ValueError("请补齐中途离开的出发和返回日期、时段")
+        return self
 
     @field_serializer("start_time", "end_time", when_used="json")
     def serialize_minute_time(self, value: object) -> str:
-        return value.strftime("%H:%M")
+        return value.strftime("%H:%M") if value is not None else None
 
-    def as_period(self) -> TripPeriod:
-        return TripPeriod(self.start_date, self.start_time, self.end_date, self.end_time)
+    def as_period(self) -> SubsidyAdjustment:
+        return SubsidyAdjustment(
+            self.adjustment_type, self.start_date, self.start_time, self.end_date, self.end_time,
+        )
 
 
 class TripInput(BaseModel):

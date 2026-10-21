@@ -59,7 +59,7 @@ def calculate_trip_subsidies(
         # Validate after merging approvals: exclusions on different source rows
         # still belong to the same displayed subsidy period. Historical locked
         # snapshots retain their original union calculation in the domain layer.
-        validate_non_overlapping_exclusions(excluded_periods)
+        validate_non_overlapping_exclusions(excluded_periods, trip.as_period())
         results.append(
             calculate_subsidy(
                 trip_type=trip_type,

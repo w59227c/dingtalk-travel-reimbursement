@@ -278,6 +278,41 @@ describe('TripSubsidyCard', () => {
     expect(expense.subsidyTrips[0]?.excludedPeriods).toHaveLength(1)
   })
 
+  it.each([false, true])('edits one-way adjustments, retains data and locks the same controls, mobile=%s', async (mobile) => {
+    const selected = [{ ...approvals[0]!, endDate: '2026-09-10' }]
+    const expense = useExpenseStore()
+    const wrapper = mountCard('long_term_project', selected, false, mobile)
+    const add = wrapper.get('[aria-label="补助 1 添加非补助时段"]')
+    await add.trigger('click')
+    wrapper.findAllComponents({ name: 'ElSelect' })[0]!.vm.$emit('update:modelValue', 'late_departure')
+    await nextTick()
+    expect(wrapper.find('[aria-label="补助 1 非补助时段 1 出发日期"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="补助 1 非补助时段 1 实际出发日期"]').exists()).toBe(true)
+    wrapper.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-09-02')
+    await wrapper.get('[aria-label="补助 1 非补助时段 1 出发时段"] input[value="afternoon"]').setValue()
+    await add.trigger('click')
+    wrapper.findAllComponents({ name: 'ElSelect' })[1]!.vm.$emit('update:modelValue', 'early_end')
+    await nextTick()
+    wrapper.findAllComponents({ name: 'ElDatePicker' })[1]!.vm.$emit('update:modelValue', '2026-09-09')
+    await nextTick()
+    expect(wrapper.find('[aria-label="补助 1 非补助时段 2 返回日期"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="补助 1 非补助时段 2 实际离开日期"]').exists()).toBe(true)
+    expect(expense.policyInputError).toBe('')
+    expect(expense.tripPayloads()[0]?.excludedPeriods).toEqual([
+      { type: 'late_departure', endDate: '2026-09-02', endTime: '18:00' },
+      { type: 'early_end', startDate: '2026-09-09', startTime: '09:00' },
+    ])
+    const saved = JSON.parse(JSON.stringify(expense.subsidyTrips))
+    expense.setSubsidyIncluded(false)
+    expense.setSubsidyIncluded(true)
+    expect(expense.subsidyTrips).toEqual(saved)
+    const locked = mountCard('long_term_project', selected, true, mobile)
+    const before = JSON.parse(JSON.stringify(expense.subsidyTrips))
+    locked.findAllComponents({ name: 'ElSelect' })[0]!.vm.$emit('update:modelValue', 'early_end')
+    await nextTick()
+    expect(expense.subsidyTrips).toEqual(before)
+  })
+
   it.each([false, true])('blocks overlapping absences across merged approvals until repaired, mobile=%s', async (mobile) => {
     const selected = [approvals[0]!, { ...approvals[1]!, startDate: '2026-09-02' }]
     const expense = useExpenseStore()

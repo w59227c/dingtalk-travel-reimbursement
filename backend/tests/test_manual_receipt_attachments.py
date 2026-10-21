@@ -246,7 +246,7 @@ def test_manual_aggregate_review_submit_freezes_photo_order_and_retries_idempote
         snapshot = parse_snapshot(
             submissions[0].form_snapshot_json, expected_sha256=submissions[0].snapshot_sha256,
         )
-        assert snapshot.snapshot_version == 8
+        assert snapshot.snapshot_version == 9
         assert snapshot.input.items[0].receipt_attachment_file_ids == (files[1],)
         assert snapshot.input.items[0].receipt_count == 12
         assert not snapshot.input.items[0].payment_proof_file_ids

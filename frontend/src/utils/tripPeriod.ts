@@ -6,7 +6,7 @@ export const TRIP_PERIOD_TIME: Record<TripDayPeriod, string> = {
   afternoon: '18:00',
 }
 
-export function tripPeriodFromTime(time: string): TripDayPeriod | undefined {
-  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) return undefined
+export function tripPeriodFromTime(time: string | undefined): TripDayPeriod | undefined {
+  if (!time || !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) return undefined
   return time < '12:00' ? 'morning' : 'afternoon'
 }

@@ -2,7 +2,8 @@
 import { computed } from 'vue'
 
 import { useExpenseStore } from '@/stores/expense'
-import type { ExcludedPeriodInput, SubsidyResult, TripInput, TripType } from '@/types/expenses'
+import type { ExcludedPeriodInput, SubsidyAdjustmentType, SubsidyResult, TripInput, TripType } from '@/types/expenses'
+import { adjustmentType } from '@/utils/subsidyAdjustments'
 import { groupOverlappingSubsidyTrips, type SubsidyTripGroup } from '@/utils/subsidyTripGroups'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime, type TripDayPeriod } from '@/utils/tripPeriod'
 
@@ -55,7 +56,7 @@ function approvalFor(item: TripInput): SubsidyApproval | undefined {
   return props.approvals.find((approval) => approval.processInstanceId === item.relatedApprovalId)
 }
 
-function period(time: string): TripDayPeriod | undefined {
+function period(time: string | undefined): TripDayPeriod | undefined {
   return tripPeriodFromTime(time)
 }
 
@@ -98,6 +99,27 @@ function setExcludedPeriod(
 
 function setExcludedDate(excluded: ExcludedPeriodInput, field: 'startDate' | 'endDate', value: unknown): void {
   if (!props.readonly) excluded[field] = typeof value === 'string' ? value : ''
+}
+
+function setAdjustmentType(excluded: ExcludedPeriodInput, value: unknown): void {
+  if (props.readonly || !['temporary_absence', 'late_departure', 'early_end'].includes(String(value))) return
+  const type = value as SubsidyAdjustmentType
+  if (type === 'temporary_absence') delete excluded.type
+  else excluded.type = type
+  if (type === 'late_departure') {
+    excluded.startDate = ''
+    excluded.startTime = ''
+  } else excluded.startTime ||= '09:00'
+  if (type === 'early_end') {
+    excluded.endDate = ''
+    excluded.endTime = ''
+  } else excluded.endTime ||= '09:00'
+}
+
+function adjustmentRule(excluded: ExcludedPeriodInput): string {
+  if (adjustmentType(excluded) === 'late_departure') return '出发当日上午计 1 天，下午计 0.5 天；此前不计补助。'
+  if (adjustmentType(excluded) === 'early_end') return '离开当日上午计 0.5 天，下午计 1 天；之后不再返回、不计补助。'
+  return '离开日上午计 0.5 天、下午计 1 天；返回出发日上午计 1 天、下午计 0.5 天。中间完整日期不计补助。'
 }
 
 function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | null {
@@ -234,7 +256,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
             </div>
             <el-alert
               title="非补助时段计算规则"
-              description="出发日：上午计 0.5 天，下午计 1 天；返回日：上午计 1 天，下午计 0.5 天。中间完整日期不计补助，各段不能占用同一个上午或下午。"
+              description="选择调整类型后填写实际日期和时段，可组合使用；各段不能重叠，系统按半天计算扣除。"
               type="info"
               :closable="false"
               class="subsidy-rule"
@@ -255,57 +277,90 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                   删除
                 </el-button>
               </div>
+              <el-form-item
+                label="调整类型"
+                class="adjustment-type"
+              >
+                <el-select
+                  :model-value="adjustmentType(excluded)"
+                  :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 调整类型`"
+                  :disabled="props.readonly"
+                  @update:model-value="setAdjustmentType(excluded, $event)"
+                >
+                  <el-option
+                    label="中途离开"
+                    value="temporary_absence"
+                  />
+                  <el-option
+                    label="延后出发"
+                    value="late_departure"
+                    :disabled="group.excludedPeriods.some((item) => item !== excluded && adjustmentType(item) === 'late_departure')"
+                  />
+                  <el-option
+                    label="提前结束"
+                    value="early_end"
+                    :disabled="group.excludedPeriods.some((item) => item !== excluded && adjustmentType(item) === 'early_end')"
+                  />
+                </el-select>
+              </el-form-item>
+              <p class="adjustment-rule">
+                {{ adjustmentRule(excluded) }}
+              </p>
               <div class="trip-grid">
-                <el-form-item label="出发日期">
-                  <el-date-picker
-                    :model-value="excluded.startDate"
-                    type="date"
-                    :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
-                    value-format="YYYY-MM-DD"
-                    format="YYYY-MM-DD"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 出发日期`"
-                    @update:model-value="setExcludedDate(excluded, 'startDate', $event)"
-                  />
-                </el-form-item>
-                <el-form-item label="出发时段">
-                  <el-radio-group
-                    :model-value="period(excluded.startTime)"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 出发时段`"
-                    @update:model-value="setExcludedPeriod(excluded, 'startTime', $event)"
-                  >
-                    <el-radio-button value="morning">
-                      上午
-                    </el-radio-button>
-                    <el-radio-button value="afternoon">
-                      下午
-                    </el-radio-button>
-                  </el-radio-group>
-                </el-form-item>
-                <el-form-item label="返回日期">
-                  <el-date-picker
-                    :model-value="excluded.endDate"
-                    type="date"
-                    :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
-                    value-format="YYYY-MM-DD"
-                    format="YYYY-MM-DD"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回日期`"
-                    @update:model-value="setExcludedDate(excluded, 'endDate', $event)"
-                  />
-                </el-form-item>
-                <el-form-item label="返回时段">
-                  <el-radio-group
-                    :model-value="period(excluded.endTime)"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回时段`"
-                    @update:model-value="setExcludedPeriod(excluded, 'endTime', $event)"
-                  >
-                    <el-radio-button value="morning">
-                      上午
-                    </el-radio-button>
-                    <el-radio-button value="afternoon">
-                      下午
-                    </el-radio-button>
-                  </el-radio-group>
-                </el-form-item>
+                <template v-if="adjustmentType(excluded) !== 'late_departure'">
+                  <el-form-item :label="adjustmentType(excluded) === 'early_end' ? '实际离开日期' : '出发日期'">
+                    <el-date-picker
+                      :model-value="excluded.startDate"
+                      type="date"
+                      :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
+                      value-format="YYYY-MM-DD"
+                      format="YYYY-MM-DD"
+                      :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${adjustmentType(excluded) === 'early_end' ? '实际离开日期' : '出发日期'}`"
+                      @update:model-value="setExcludedDate(excluded, 'startDate', $event)"
+                    />
+                  </el-form-item>
+                  <el-form-item :label="adjustmentType(excluded) === 'early_end' ? '离开时段' : '出发时段'">
+                    <el-radio-group
+                      :model-value="period(excluded.startTime)"
+                      :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${adjustmentType(excluded) === 'early_end' ? '离开时段' : '出发时段'}`"
+                      @update:model-value="setExcludedPeriod(excluded, 'startTime', $event)"
+                    >
+                      <el-radio-button value="morning">
+                        上午
+                      </el-radio-button>
+                      <el-radio-button value="afternoon">
+                        下午
+                      </el-radio-button>
+                    </el-radio-group>
+                  </el-form-item>
+                </template>
+                <template v-if="adjustmentType(excluded) !== 'early_end'">
+                  <el-form-item :label="adjustmentType(excluded) === 'late_departure' ? '实际出发日期' : '返回日期'">
+                    <el-date-picker
+                      :model-value="excluded.endDate"
+                      type="date"
+                      :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
+                      value-format="YYYY-MM-DD"
+                      format="YYYY-MM-DD"
+                      :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${adjustmentType(excluded) === 'late_departure' ? '实际出发日期' : '返回日期'}`"
+                      @update:model-value="setExcludedDate(excluded, 'endDate', $event)"
+                    />
+                  </el-form-item>
+                  <el-form-item :label="adjustmentType(excluded) === 'late_departure' ? '出发时段' : '返回时段'">
+                    <el-radio-group
+                      :model-value="period(excluded.endTime)"
+                      :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${adjustmentType(excluded) === 'late_departure' ? '出发时段' : '返回时段'}`"
+                      @update:model-value="setExcludedPeriod(excluded, 'endTime', $event)"
+                    >
+                      <el-radio-button value="morning">
+                        上午
+                      </el-radio-button>
+                      <el-radio-button value="afternoon">
+                        下午
+                      </el-radio-button>
+                    </el-radio-group>
+                  </el-form-item>
+                </template>
               </div>
             </div>
           </section>
@@ -452,6 +507,8 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
 .excluded-periods > .subsidy-rule {
   margin-top: 12px;
 }
+.adjustment-type { margin: 16px 0 8px; }
+.adjustment-rule { color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; margin: 0 0 16px; }
 .excluded-period { margin-top: 12px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .excluded-period .trip-grid { margin-top: 12px; }
 .excluded-period :deep(.el-date-editor.el-input) { width: 100%; min-width: 0; }

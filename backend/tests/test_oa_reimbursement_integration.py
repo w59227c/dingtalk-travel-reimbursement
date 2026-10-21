@@ -1284,10 +1284,10 @@ def test_validation_splits_a_180_day_membership_window_before_querying_dingtalk(
     assert workflow.create_calls == 1
 
 
-@pytest.mark.parametrize("with_exclusions", [False, True])
+@pytest.mark.parametrize("exclusion_kind", ["none", "middle", "boundaries"])
 def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     enabled_manual_worker_client,
-    with_exclusions,
+    exclusion_kind,
 ) -> None:
     reimbursement_schema, _travel_schema, travel_type = _schemas()
     travel_schema = _itinerary_schema()
@@ -1295,6 +1295,7 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     storage = LocalStorageBoundary(auto_rename_first=True)
     client = enabled_manual_worker_client
     csrf = str(mock_login(client)["csrfToken"])
+    with_exclusions = exclusion_kind != "none"
     periods = (
         [
             {
@@ -1310,7 +1311,12 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
                 "endTime": "18:00",
             },
         ]
-        if with_exclusions
+        if exclusion_kind == "middle"
+        else [
+            {"type": "late_departure", "endDate": "2026-09-02", "endTime": "09:00"},
+            {"type": "early_end", "startDate": "2026-09-03", "startTime": "09:00"},
+        ]
+        if exclusion_kind == "boundaries"
         else []
     )
     draft_id, source_file_ids = _persist_ready_draft(
@@ -1376,12 +1382,27 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     workbook = load_workbook(io.BytesIO(storage.put_files[-1].content))
     subsidy_rows = [row for row in workbook.active.iter_rows() if row[1].value == "出差补助"]
     assert len(subsidy_rows) == 1
-    assert subsidy_rows[0][6].value == (200 if with_exclusions else 300)
+    assert subsidy_rows[0][6].value == {"none": 300, "middle": 200, "boundaries": 150}[
+        exclusion_kind
+    ]
     if with_exclusions:
-        assert "扣除1天非补助时段" in subsidy_rows[0][3].value
-        assert any(
-            "已扣除1.0天非补助时段" in item.value for item in workflow.created_command.form_values
-        )
+        if exclusion_kind == "middle":
+            assert "原补助3天，扣除1天，实际补助2天" in subsidy_rows[0][3].value
+            detail_lines = [
+                "中途离开：2026/9/1上午出发，2026/9/2上午出发返回（扣除0.5天）",
+                "中途离开：2026/9/2下午出发，2026/9/3下午出发返回（扣除0.5天）",
+            ]
+        else:
+            assert "原补助3天，扣除1.5天，实际补助1.5天" in subsidy_rows[0][3].value
+            detail_lines = [
+                "延后出发：2026/9/2上午，此前不计补助（扣除1天）",
+                "提前结束：2026/9/3上午，不再返回（扣除0.5天）",
+            ]
+        oa_descriptions = [item.value for item in workflow.created_command.form_values]
+        for detail in detail_lines:
+            assert detail in subsidy_rows[0][3].value
+            assert any(detail in description for description in oa_descriptions)
+        assert subsidy_rows[0][3].value.count("\n") == len(detail_lines)
 
     with client.app.state.database_session_factory() as database:
         submission = database.get(ReimbursementSubmission, submission_id)
@@ -1391,10 +1412,12 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
             .order_by(ReimbursementUpload.sort_order)
         ).all()
         assert submission is not None
-        assert submission.snapshot_version == 8
+        assert submission.snapshot_version == 9
         frozen = json.loads(submission.form_snapshot_json)
         if with_exclusions:
-            assert frozen["subsidy"]["excludedDays"] == "1.0"
+            assert frozen["subsidy"]["excludedDays"] == (
+                "1.0" if exclusion_kind == "middle" else "1.5"
+            )
             assert frozen["input"]["trip"]["excludedPeriods"] == periods
         assert submission.status == ReimbursementSubmissionStatus.SUBMITTED.value
         assert submission.approval_url.startswith("dingtalk://dingtalkclient/action/openapp?")

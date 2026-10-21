@@ -131,6 +131,31 @@ describe('expense store', () => {
     store.reset()
     expect(store.trip.excludedPeriods).toEqual([])
   })
+  it('restores typed and legacy adjustments, including unfinished edits while subsidy is off', () => {
+    setActivePinia(createPinia())
+    const store = useExpenseStore()
+    const draft = durableDraft([])
+    const trip = { ...draft.input.trip!, startDate: '2026-07-01', endDate: '2026-07-10', excludedPeriods: [
+      { type: 'late_departure' as const, endDate: '2026-07-02', endTime: '18:00' },
+      { type: 'early_end' as const, startDate: '2026-07-09', startTime: '09:00' },
+      { startDate: '2026-07-04', startTime: '09:00', endDate: '2026-07-06', endTime: '18:00' },
+    ] }
+    draft.input.trip = trip
+    store.hydrateFromDraft(draft, [])
+    expect(store.tripPayload()?.excludedPeriods).toEqual(trip.excludedPeriods)
+    store.trip.excludedPeriods[0]!.endDate = '2026-07-03'
+    expect(trip.excludedPeriods[0]!.endDate).toBe('2026-07-02')
+    draft.input.trip = null
+    trip.excludedPeriods[0]!.endDate = ''
+    draft.input.editingState = { includeSubsidy: false, trip }
+    store.hydrateFromDraft(draft, [])
+    expect(store.includeSubsidy).toBe(false)
+    expect(store.trip.excludedPeriods).toEqual(trip.excludedPeriods)
+    store.setSubsidyIncluded(true)
+    expect(store.policyInputError).toContain('请补齐')
+    expect(store.tripPayload()).toBeNull()
+  })
+
   it('creates a subsidy payload for the configured overseas category', () => {
     setActivePinia(createPinia())
     const store = useExpenseStore()

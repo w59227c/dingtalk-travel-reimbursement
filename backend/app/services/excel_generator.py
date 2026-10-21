@@ -5,7 +5,7 @@ import math
 import re
 import unicodedata
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
@@ -33,6 +33,7 @@ from app.excel.template_contract import (
 )
 from app.schemas.excel import ExcelExpenseItemInput
 from app.schemas.expenses import TripInput
+from app.services.subsidy_description import subsidy_explanation
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ TOTAL_AMOUNT_NUMBER_FORMAT = '_ \\¥* #,##0.00_ ;_ \\¥* \\-#,##0.00_ ;_ \\¥* "
 _ILLEGAL_XML_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _INVALID_FILENAME_CHARACTERS = re.compile(r"[\\/:*?\"<>|\x00-\x1f\x7f]")
 _DANGEROUS_FORMULA_PREFIXES = ("=", "+", "-", "@")
+_MAX_ROW_HEIGHT = 409.5
+_MAX_CELL_TEXT_LENGTH = 32_767
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +67,8 @@ class OutputLine:
     amount: Decimal
     receipt_count: int
     subsidy: bool = False
+    continuation: bool = False
+    detail_lines: tuple[str, ...] = ()
 
 
 def sanitize_external_text(value: str, *, max_length: int) -> str:
@@ -154,6 +159,7 @@ def _ordered_lines(
     subsidy: SubsidyCalculation | None,
     trips: list[TripInput] | tuple[TripInput, ...] = (),
     subsidies: list[SubsidyCalculation] | tuple[SubsidyCalculation, ...] = (),
+    detailed_subsidies: bool = True,
 ) -> list[OutputLine]:
     indexed_lines = [
         (
@@ -179,6 +185,10 @@ def _ordered_lines(
         # no subsidy line.
         subsidy_pairs = []
     for index, (subsidy_trip, subsidy_item) in enumerate(subsidy_pairs):
+        explanation = (
+            subsidy_explanation(subsidy_trip, subsidy_item)
+            if detailed_subsidies and subsidy_trip.excluded_periods else ()
+        )
         indexed_lines.append(
             (
                 subsidy_trip.end_date,
@@ -187,14 +197,56 @@ def _ordered_lines(
                     category=ExpenseCategory.SUBSIDY,
                     sort_date=subsidy_trip.end_date,
                     display_date=_compact_date(subsidy_trip.end_date),
-                    description=_subsidy_description(subsidy_trip, subsidy_item),
+                    description=explanation[0] if explanation else _subsidy_description(
+                        subsidy_trip, subsidy_item
+                    ),
                     amount=subsidy_item.total,
                     receipt_count=0,
                     subsidy=True,
+                    detail_lines=explanation[1:],
                 ),
             )
         )
     return [line for _, _, line in sorted(indexed_lines, key=lambda item: (item[0], item[1]))]
+
+
+def _description_height(text: str, width: float) -> float:
+    wrapped_lines = sum(
+        max(1, math.ceil(sum(
+            2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+            for char in paragraph
+        ) / max(1, width - 2)))
+        for paragraph in text.split("\n")
+    )
+    return max(30, wrapped_lines * 18 + 6)
+
+
+def _expand_subsidy_descriptions(lines: list[OutputLine], width: float) -> list[OutputLine]:
+    """Keep an adjustment summary in one cell; continue only past Excel's height limit."""
+    output = []
+    for line in lines:
+        if not line.detail_lines:
+            output.append(line)
+            continue
+        chunks: list[str] = []
+        current = line.description
+        for detail in line.detail_lines:
+            combined = f"{current}\n{detail}"
+            if _description_height(combined, width) > _MAX_ROW_HEIGHT:
+                chunks.append(current)
+                current = detail
+            else:
+                current = combined
+        chunks.append(current)
+        output.append(replace(line, description=chunks[0]))
+        output.extend(
+            replace(
+                line, description=chunk, display_date="", amount=Decimal(0), receipt_count=0,
+                continuation=True, detail_lines=(),
+            )
+            for chunk in chunks[1:]
+        )
+    return output
 
 
 def _copy_row(
@@ -286,6 +338,7 @@ def generate_expense_workbook(
     totals: ExpenseTotals,
     trips: list[TripInput] | tuple[TripInput, ...] = (),
     subsidies: list[SubsidyCalculation] | tuple[SubsidyCalculation, ...] = (),
+    detailed_subsidies: bool = True,
 ) -> WorkbookResult:
     workbook, worksheet = load_validated_template(template_path)
     try:
@@ -317,10 +370,39 @@ def generate_expense_workbook(
             409.5, max(worksheet.row_dimensions[project_cell.row].height or 35, header_height)
         )
 
-        lines = _ordered_lines(items, trip, subsidy, trips, subsidies)
+        description_width = sum(
+            worksheet.column_dimensions[key].width for key in ("D", "E", "F")
+        )
+        lines = _expand_subsidy_descriptions(
+            _ordered_lines(items, trip, subsidy, trips, subsidies, detailed_subsidies),
+            description_width,
+        )
         layout = _prepare_output_layout(worksheet, len(lines))
         for offset, line in enumerate(lines):
             row = EXCEL_TEMPLATE.detail_start_row + offset
+            if line.subsidy and detailed_subsidies and (line.continuation or line.detail_lines):
+                description_cell = worksheet[f"{EXCEL_TEMPLATE.description_column}{row}"]
+                alignment = copy(description_cell.alignment)
+                alignment.wrap_text = True
+                alignment.horizontal = "left"
+                alignment.vertical = "top"
+                description_cell.alignment = alignment
+                worksheet.row_dimensions[row].height = min(
+                    _MAX_ROW_HEIGHT, _description_height(line.description, description_width)
+                )
+            if line.continuation:
+                for column in (
+                    EXCEL_TEMPLATE.category_column, EXCEL_TEMPLATE.date_column,
+                    EXCEL_TEMPLATE.amount_column, EXCEL_TEMPLATE.currency_column,
+                    EXCEL_TEMPLATE.receipt_count_column,
+                ):
+                    worksheet[f"{column}{row}"] = None
+                write_safe_text(
+                    worksheet[f"{EXCEL_TEMPLATE.description_column}{row}"],
+                    line.description, max_length=_MAX_CELL_TEXT_LENGTH,
+                )
+                worksheet.row_dimensions[row].hidden = False
+                continue
             category_name = CATEGORY_BY_ID[line.category].name
             write_safe_text(
                 worksheet[f"{EXCEL_TEMPLATE.category_column}{row}"],
@@ -335,7 +417,7 @@ def generate_expense_workbook(
             write_safe_text(
                 worksheet[f"{EXCEL_TEMPLATE.description_column}{row}"],
                 line.description,
-                max_length=500,
+                max_length=_MAX_CELL_TEXT_LENGTH if line.detail_lines else 500,
             )
             worksheet[f"{EXCEL_TEMPLATE.amount_column}{row}"] = quantize_money(line.amount)
             write_safe_text(

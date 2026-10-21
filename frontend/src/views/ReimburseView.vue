@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { adjustmentPayload } from '@/utils/subsidyAdjustments'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
@@ -299,7 +300,7 @@ function tripSignature(trip: TripInput | null | undefined): object | null {
     policyConfirmed: trip.policyConfirmed ?? false,
     confirmedEffectiveDays: trip.confirmedEffectiveDays ?? '',
     noSubsidyException: trip.noSubsidyException ?? false,
-    excludedPeriods: trip.excludedPeriods ?? [],
+    excludedPeriods: (trip.excludedPeriods ?? []).map(adjustmentPayload),
   }
 }
 function inputSignature(input: ReimbursementDraftInput): string {
