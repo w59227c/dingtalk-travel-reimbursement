@@ -252,6 +252,15 @@ const materialSubmissionIssues = computed(() => drafts.files
   }))
   .filter((issue) => Boolean(issue.reason)))
 const subsidyInputError = computed(() => formReadOnly.value ? '' : expense.policyInputError)
+const hasValidSubsidy = computed(() => expense.includeSubsidy && !expense.policyInputError
+  && expense.calculationsCurrent && Number(expense.totals?.subsidyTotal ?? 0) > 0)
+const excelOnlySubmission = computed(() => !expense.items.length
+  && hasValidSubsidy.value && !drafts.files.some((file) => file.status === 'ACTIVE'))
+const attachmentSummary = computed(() => (drafts.currentDraft?.status === 'LOCKED'
+  ? drafts.currentDraft.attachmentMode === 'excel_only'
+  : excelOnlySubmission.value)
+  ? 'OA 附件为报销单.xlsx。'
+  : 'OA 附件为两个文件：票据汇总.pdf（含行程单、付款凭证）＋报销单.xlsx。')
 const submissionButtonReason = computed(() => formReadOnlyReason.value || subsidyInputError.value || submissionServiceReason.value
   || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (drafts.busy ? '请等待材料处理完成' : '')
@@ -265,6 +274,8 @@ const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({
   .filter((entry) => entry.missing.length))
 const previewDisabledReason = computed(() => expense.itemReadinessError
   || subsidyInputError.value
+  || (!formReadOnly.value && materialSubmissionIssues.value.length
+    ? '请先处理全部待确认或未完成的材料，再预览 Excel' : '')
   || (!budgetCodeValue.value ? '请先选择预算代码' : '')
   || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (props.mobile && !formReadOnly.value && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
@@ -606,15 +617,15 @@ function validateSubmission(): string {
   if (expense.includeSubsidy && expense.tripPayloads().length !== selectedRelatedApprovals.value.length) {
     return expense.policyInputError || '请完整确认每个补助项的出发和返回时段'
   }
-  if (expense.categoryLoadError || !expense.categories.length) return '请先加载费用类别'
-  if (!expense.items.length) return '请至少添加一条费用明细'
+  if (expense.items.length && (expense.categoryLoadError || !expense.categories.length)) return '请先加载费用类别'
+  if (!expense.items.length && !hasValidSubsidy.value) return '请添加费用明细或申请有效的出差补助'
   if (expense.itemReadinessError) return expense.itemReadinessError
   if (materialSubmissionIssues.value.length) {
     const issue = materialSubmissionIssues.value[0]!
     return `请先处理“${issue.file.name}”：${issue.reason}`
   }
   if (!selectedRelatedApprovals.value.length) return '请至少关联一张已通过的出差审批'
-  if (!drafts.files.some((file) => file.status === 'ACTIVE')) return '请上传报销材料'
+  if (!drafts.files.some((file) => file.status === 'ACTIVE') && !excelOnlySubmission.value) return '请上传报销材料'
   for (const item of expense.items) {
     if (item.category === 'lodging' && !item.hotelBillFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'hotel_bill')),
@@ -638,7 +649,9 @@ async function confirmAndSubmit(): Promise<void> {
   submitFlowPending.value = true
   try {
     await ElMessageBox.confirm(
-      '核对无误后将生成票据汇总 PDF 和报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。',
+      excelOnlySubmission.value
+        ? '核对无误后将生成报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。'
+        : '核对无误后将生成票据汇总 PDF 和报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。',
       '提交报销申请', { confirmButtonText: '确认提交', cancelButtonText: '返回检查', type: 'warning' },
     )
     await flushAutosave()
@@ -962,7 +975,7 @@ onBeforeUnmount(() => {
         <p class="summary">
           {{ props.mobile
             ? '关联审批、核对补助、整理材料，最后统一提交 OA。'
-            : '选预算、上传材料、核对费用，自动生成票据汇总和报销单并提交 OA。' }}
+            : '关联审批、核对补助和费用，自动生成报销单并提交 OA。' }}
         </p>
       </div>
       <div class="hero-actions">
@@ -1315,7 +1328,7 @@ onBeforeUnmount(() => {
                 class="mobile-step-heading"
               >
                 <h2>费用与材料</h2>
-                <p>可从文件管理器或系统相册添加，失败文件可以单独重试。</p>
+                <p>仅申请出差补助时无需添加费用或上传材料；其他费用可从文件管理器或系统相册添加。</p>
               </header>
               <ExpenseItemsCard
                 ref="expenseItemsCard"
@@ -1420,7 +1433,7 @@ onBeforeUnmount(() => {
                   </el-button>
                 </div>
                 <div class="primary-submit-area">
-                  <p>OA 附件为两个文件：票据汇总.pdf（含行程单、付款凭证）＋报销单.xlsx。</p>
+                  <p>{{ attachmentSummary }}</p>
                   <el-button
                     type="primary"
                     size="large"

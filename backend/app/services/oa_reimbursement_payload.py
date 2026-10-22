@@ -7,6 +7,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -52,6 +53,7 @@ from app.models.reimbursement import (
     ReimbursementDraftStatus,
     ReimbursementOcrStatus,
     ReimbursementSubmission,
+    ReimbursementUploadRole,
     utc_now,
 )
 from app.schemas.excel import ExcelExpenseItemInput
@@ -94,7 +96,7 @@ from app.services.subsidy_calculation import (
 )
 from app.services.subsidy_description import subsidy_explanation
 
-SNAPSHOT_VERSION = 9
+SNAPSHOT_VERSION = 10
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _SIGNED_INT64_MAX = 9_223_372_036_854_775_807
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -102,13 +104,6 @@ _POSITIVE_DECIMAL_IDENTIFIER = re.compile(r"^[1-9]\d{0,18}$")
 _OA_LOGICAL_KEYS = tuple(item.key for item in REIMBURSEMENT_LOGICAL_FIELD_SPECS)
 _OA_VALUE_KEYS = _OA_LOGICAL_KEYS[:-1]
 _ATTACHMENTS_KEY = _OA_LOGICAL_KEYS[-1]
-_TRANSITIONAL_FILE_STATUSES = frozenset(
-    {
-        ReimbursementDraftFileStatus.RESERVED.value,
-        ReimbursementDraftFileStatus.WRITING.value,
-        ReimbursementDraftFileStatus.DELETING.value,
-    }
-)
 
 ShortText = Annotated[str, StringConstraints(min_length=1, max_length=255)]
 LongText = Annotated[str, StringConstraints(min_length=1, max_length=2048)]
@@ -387,7 +382,7 @@ class SnapshotFormValue(_SnapshotModel):
 
 
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[6, 7, 8, 9] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6, 7, 8, 9, 10] = SNAPSHOT_VERSION
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
@@ -400,6 +395,9 @@ class ReimbursementSnapshot(_SnapshotModel):
     travel_period: SnapshotTravelPeriod
     related_approvals: tuple[SnapshotRelatedApproval, ...]
     original_files: tuple[SnapshotOriginalFile, ...]
+    attachment_mode: Literal["excel_only", "bundle_and_excel"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     excel: SnapshotExcel
     form_values: tuple[SnapshotFormValue, ...]
 
@@ -563,24 +561,6 @@ def collect_snapshot_source(
         .where(ReimbursementDraftFile.draft_id == draft.id)
         .order_by(ReimbursementDraftFile.sort_order, ReimbursementDraftFile.id)
     ).all()
-    if any(
-        item.file_status in _TRANSITIONAL_FILE_STATUSES
-        or (
-            item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
-            and item.ocr_status == ReimbursementOcrStatus.RUNNING.value
-        )
-        or (
-            item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
-            and item.processing_role == ReimbursementDraftFileRole.EXPENSE_SOURCE.value
-            and item.ocr_status == ReimbursementOcrStatus.NOT_REQUESTED.value
-        )
-        for item in all_files
-    ):
-        raise ApiError(
-            "REIMBURSEMENT_DRAFT_NOT_READY",
-            "附件仍在上传、删除或识别中，请稍后重试",
-            409,
-        )
     active_files = tuple(
         item for item in all_files if item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
     )
@@ -611,7 +591,9 @@ def collect_snapshot_source(
         _original_source(item, manifest_order=manifest_order)
         for manifest_order, item in enumerate(ordered_files)
     )
-    if not originals:
+    if not originals and (
+        draft_input.items or Decimal(calculation.totals_data["subsidyTotal"]) <= 0
+    ):
         raise ApiError(
             "REIMBURSEMENT_DRAFT_NOT_READY",
             "请先上传至少一个有效附件",
@@ -753,6 +735,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
             ),
             related_approvals=related,
             original_files=originals,
+            attachment_mode="bundle_and_excel" if originals else "excel_only",
             excel=excel,
             form_values=form_values,
         )
@@ -1421,6 +1404,18 @@ def _description_v2(items, subsidy, totals, subsidies, trips) -> str:
     return "\n".join(lines)
 
 
+def generated_upload_manifest(
+    snapshot: ReimbursementSnapshot,
+) -> tuple[tuple[ReimbursementUploadRole, int], ...]:
+    """The immutable snapshot chooses the exact roles and compact upload order."""
+    if snapshot.attachment_mode == "excel_only":
+        return ((ReimbursementUploadRole.GENERATED_EXCEL, 0),)
+    return (
+        (ReimbursementUploadRole.GENERATED_PDF, 0),
+        (ReimbursementUploadRole.GENERATED_EXCEL, 1),
+    )
+
+
 def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     if (
         not _POSITIVE_DECIMAL_IDENTIFIER.fullmatch(snapshot.identity.department_id)
@@ -1444,8 +1439,18 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     expected_ids = len(_OA_LOGICAL_KEYS) - (2 if range_bindings else 0)
     if len({item.component_id for item in snapshot.template.fields}) != expected_ids:
         raise ValueError("template component ids must be unique")
-    if not snapshot.related_approvals or not snapshot.original_files:
-        raise ValueError("related approvals and original files are required")
+    if not snapshot.related_approvals:
+        raise ValueError("related approvals are required")
+    if snapshot.snapshot_version < 10:
+        if snapshot.attachment_mode is not None or not snapshot.original_files:
+            raise ValueError("historical snapshots require original files and two attachments")
+    elif snapshot.attachment_mode == "excel_only":
+        if snapshot.original_files or snapshot.input.items or snapshot.totals.subsidy_total <= 0:
+            raise ValueError(
+                "Excel-only snapshots require positive subsidies without items or files"
+            )
+    elif snapshot.attachment_mode != "bundle_and_excel" or not snapshot.original_files:
+        raise ValueError("bundled snapshots require original files")
     if tuple(item.sort_order for item in snapshot.related_approvals) != tuple(
         sorted(item.sort_order for item in snapshot.related_approvals)
     ):
@@ -1645,6 +1650,8 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         complete_expense_items(request),
         calculated_subsidies,
     )
+    if snapshot.snapshot_version >= 10 and not request.items and expected_totals.subsidy_total <= 0:
+        raise ValueError("empty reimbursement requires a positive subsidy")
     if (
         money_string(expected_totals.expense_total) != money_string(totals.expense_total)
         or money_string(expected_totals.subsidy_total) != money_string(totals.subsidy_total)
@@ -1846,13 +1853,18 @@ def _validate_attachment_manifest(
     if not isinstance(attachments, Sequence) or isinstance(attachments, (str, bytes)):
         raise _snapshot_error("审批附件清单无效，请稍后重试")
     values = tuple(attachments)
-    if len(values) != 2 or any(not isinstance(item, ApprovalAttachment) for item in values):
+    manifest = generated_upload_manifest(snapshot)
+    if len(values) != len(manifest) or any(
+        not isinstance(item, ApprovalAttachment) for item in values
+    ):
         raise _snapshot_error("审批附件数量与提交快照不一致，请稍后重试")
     spaces = {item.space_id for item in values}
     identities = {(item.space_id, item.file_id) for item in values}
     if len(spaces) != 1 or len(identities) != len(values):
         raise _snapshot_error("审批附件标识不一致，请稍后重试")
-    if values[0].file_type.lower().removeprefix(".") != "pdf" or values[0].file_size <= 0:
+    if len(manifest) == 2 and (
+        values[0].file_type.lower().removeprefix(".") != "pdf" or values[0].file_size <= 0
+    ):
         raise _snapshot_error("票据汇总 PDF 必须位于附件清单首位")
     generated = values[-1]
     # DingTalk may safely de-duplicate the committed name (for example by

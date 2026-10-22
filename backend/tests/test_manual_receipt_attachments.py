@@ -170,8 +170,12 @@ def test_manual_receipt_is_frozen_in_v8_and_legacy_snapshots_still_roundtrip():
     assert parse_snapshot(encoded) == snapshot
     assert snapshot.input.items[0].receipt_count == 12
     with pytest.raises(ValidationError, match="receipt attachments"):
-        serialize_snapshot(snapshot.model_copy(update={"snapshot_version": 7}))
-    legacy = build_snapshot(source).model_copy(update={"snapshot_version": 7})
+        serialize_snapshot(snapshot.model_copy(update={
+            "snapshot_version": 7, "attachment_mode": None,
+        }))
+    legacy = build_snapshot(source).model_copy(update={
+        "snapshot_version": 7, "attachment_mode": None,
+    })
     assert parse_snapshot(serialize_snapshot(legacy)) == legacy
 
 
@@ -192,7 +196,9 @@ def test_v8_aggregate_payment_exemption_does_not_change_frozen_legacy_rules():
     assert parse_snapshot(serialize_snapshot(snapshot)) == snapshot
     for legacy_version in (6, 7):
         with pytest.raises(ValidationError, match="payment proof"):
-            serialize_snapshot(snapshot.model_copy(update={"snapshot_version": legacy_version}))
+            serialize_snapshot(snapshot.model_copy(update={
+                "snapshot_version": legacy_version, "attachment_mode": None,
+            }))
 
 
 def test_manual_aggregate_review_submit_freezes_photo_order_and_retries_idempotently(
@@ -246,7 +252,7 @@ def test_manual_aggregate_review_submit_freezes_photo_order_and_retries_idempote
         snapshot = parse_snapshot(
             submissions[0].form_snapshot_json, expected_sha256=submissions[0].snapshot_sha256,
         )
-        assert snapshot.snapshot_version == 9
+        assert snapshot.snapshot_version == 10
         assert snapshot.input.items[0].receipt_attachment_file_ids == (files[1],)
         assert snapshot.input.items[0].receipt_count == 12
         assert not snapshot.input.items[0].payment_proof_file_ids

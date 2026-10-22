@@ -73,6 +73,7 @@ class DraftCalculation:
     canonical_json: str
     input_data: dict[str, object]
     totals_data: dict[str, object]
+    attachment_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,12 +612,34 @@ def validate_draft_file_references(
     """Validate receipt provenance without revealing another draft's files."""
 
     reference_ids = _draft_file_reference_ids(draft_input)
-    files = database.scalars(
+    all_files = database.scalars(
         select(ReimbursementDraftFile).where(
             ReimbursementDraftFile.draft_id == draft_id,
-            ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,
         )
     ).all()
+    if require_terminal_disposition and any(
+        file.file_status in {
+            ReimbursementDraftFileStatus.RESERVED.value,
+            ReimbursementDraftFileStatus.WRITING.value,
+            ReimbursementDraftFileStatus.DELETING.value,
+        }
+        or (
+            file.file_status == ReimbursementDraftFileStatus.ACTIVE.value
+            and (
+                file.ocr_status == ReimbursementOcrStatus.RUNNING.value
+                or (
+                    file.processing_role == ReimbursementDraftFileRole.EXPENSE_SOURCE.value
+                    and file.ocr_status == ReimbursementOcrStatus.NOT_REQUESTED.value
+                )
+            )
+        )
+        for file in all_files
+    ):
+        raise _not_ready_error("票据尚未识别，或附件仍在上传、删除、识别中")
+    files = [
+        file for file in all_files
+        if file.file_status == ReimbursementDraftFileStatus.ACTIVE.value
+    ]
     files_by_id = {item.id: item for item in files}
     if require_submission_proofs or require_terminal_disposition:
         for file in files:
@@ -876,6 +899,8 @@ def _calculate_input(
             if not allow_partial:
                 raise
     totals = calculate_expense_totals(complete, subsidies).as_api_dict()
+    if not allow_partial and not draft_input.items and Decimal(totals["subsidyTotal"]) <= 0:
+        raise _not_ready_error("请添加费用明细或申请有效的出差补助")
     totals["subsidy"] = subsidies[0].as_api_dict() if len(subsidies) == 1 else None
     totals["subsidies"] = [item.as_api_dict() for item in subsidies]
     input_data = _canonical_input_data(draft_input)
@@ -918,6 +943,7 @@ def draft_data(
         },
         "input": calculation.input_data,
         "totals": calculation.totals_data,
+        **({"attachmentMode": calculation.attachment_mode} if calculation.attachment_mode else {}),
         "relatedApprovals": [_related_data(item) for item in related],
         "relatedApprovalSummary": _related_summary(related),
     }
@@ -953,6 +979,7 @@ def _locked_draft_calculation(
         canonical_json=draft.input_json,
         input_data=_canonical_input_data(stored_input),
         totals_data=totals,
+        attachment_mode=snapshot.attachment_mode or "bundle_and_excel",
     )
 
 
@@ -1295,27 +1322,12 @@ def _validate_file_snapshot(
     files = database.scalars(
         select(ReimbursementDraftFile).where(ReimbursementDraftFile.draft_id == draft_id)
     ).all()
-    if not any(item.file_status == ReimbursementDraftFileStatus.ACTIVE.value for item in files):
-        raise _not_ready_error("请先上传至少一个有效附件")
-    if any(
-        item.file_status
-        in {
-            ReimbursementDraftFileStatus.RESERVED.value,
-            ReimbursementDraftFileStatus.WRITING.value,
-            ReimbursementDraftFileStatus.DELETING.value,
-        }
-        or (
-            item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
-            and item.ocr_status == ReimbursementOcrStatus.RUNNING.value
-        )
-        or (
-            item.file_status == ReimbursementDraftFileStatus.ACTIVE.value
-            and item.processing_role == ReimbursementDraftFileRole.EXPENSE_SOURCE.value
-            and item.ocr_status == ReimbursementOcrStatus.NOT_REQUESTED.value
-        )
-        for item in files
+    # The caller has already required a complete input and a positive subsidy
+    # for an empty expense list. Ordinary expenses still need actual materials.
+    if draft_input.items and not any(
+        item.file_status == ReimbursementDraftFileStatus.ACTIVE.value for item in files
     ):
-        raise _not_ready_error("票据尚未识别，或附件仍在上传、删除、识别中")
+        raise _not_ready_error("请先上传至少一个有效附件")
     validate_draft_file_references(
         database,
         draft_id=draft_id,

@@ -56,7 +56,7 @@ def test_transport_keyword_migration_preserves_custom_rules_and_guards_downgrade
             }
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "20261020_0020"
+                == "20261022_0021"
             )
         assert rows["滴滴畅行"] == ("local_transport", "ride_hailing")
         assert rows["滴滴科技"] == ("local_transport", "ride_hailing")
@@ -75,8 +75,11 @@ def test_transport_keyword_migration_preserves_custom_rules_and_guards_downgrade
         assert rows["滴滴出行"] == (
             ("office", None) if old_database else ("local_transport", "ride_hailing")
         )
+        command.downgrade(config, "20261020_0020")
         with pytest.raises(RuntimeError, match="transport keyword groups"):
             command.downgrade(config, "20260915_0019")
+        assert not readiness._database_ready(engine)
+        command.upgrade(config, "head")
         assert readiness._database_ready(engine)
     finally:
         engine.dispose()

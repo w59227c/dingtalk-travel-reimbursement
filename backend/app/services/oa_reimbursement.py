@@ -52,6 +52,7 @@ from app.services.oa_reimbursement_payload import (
     build_create_command,
     create_command_sha256,
     draft_input_from_snapshot,
+    generated_upload_manifest,
     parse_create_command,
     parse_snapshot,
     serialize_create_command,
@@ -1083,21 +1084,15 @@ class DatabaseSubmissionState:
         job = self.load_job(lease)
         if job.snapshot_json != snapshot_json or job.snapshot_sha256 != snapshot_sha256:
             raise ReimbursementSubmissionConflict("submission snapshot changed")
-        parse_snapshot(snapshot_json, expected_sha256=snapshot_sha256)
-        self._ensure_generated_file(
-            lease,
-            job,
-            role=ReimbursementUploadRole.GENERATED_PDF,
-            sort_order=0,
-            generate=self._materializer.generate_bundle,
-        )
-        self._ensure_generated_file(
-            lease,
-            job,
-            role=ReimbursementUploadRole.GENERATED_EXCEL,
-            sort_order=1,
-            generate=self._materializer.generate_excel,
-        )
+        snapshot = parse_snapshot(snapshot_json, expected_sha256=snapshot_sha256)
+        _validate_original_manifest(snapshot, job.uploads)
+        for role, sort_order in generated_upload_manifest(snapshot):
+            self._ensure_generated_file(
+                lease, job, role=role, sort_order=sort_order,
+                generate=(self._materializer.generate_bundle
+                          if role == ReimbursementUploadRole.GENERATED_PDF
+                          else self._materializer.generate_excel),
+            )
         return lease
 
     def _ensure_generated_file(
@@ -2683,13 +2678,14 @@ def _validate_job_identity(
 
 
 def _validate_original_manifest(
-    _snapshot: ReimbursementSnapshot,
+    snapshot: ReimbursementSnapshot,
     uploads: Sequence[SubmissionUpload],
 ) -> None:
-    if any(item.role == ReimbursementUploadRole.ORIGINAL.value for item in uploads):
+    expected = {(role.value, order) for role, order in generated_upload_manifest(snapshot)}
+    if any((item.role, item.sort_order) not in expected for item in uploads):
         raise ApiError(
             "REIMBURSEMENT_ATTACHMENT_MANIFEST_CHANGED",
-            "票据汇总提交不应包含单独原始附件",
+            "附件清单与锁定的报销内容不一致，请联系管理员",
             409,
         )
 

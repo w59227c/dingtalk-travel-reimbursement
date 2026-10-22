@@ -433,15 +433,25 @@ class BundledSourceReleaseCandidate:
 
 
 def _require_bundle_manifest(
-    _submission: ReimbursementSubmission, uploads: list[ReimbursementUpload]
+    submission: ReimbursementSubmission, uploads: list[ReimbursementUpload]
 ) -> None:
-    if [
-        (item.role, item.sort_order) for item in sorted(uploads, key=lambda item: item.sort_order)
-    ] != [
+    expected = [
         (ReimbursementUploadRole.GENERATED_PDF.value, 0),
         (ReimbursementUploadRole.GENERATED_EXCEL.value, 1),
-    ]:
-        raise ReimbursementSubmissionConflict("submission requires exactly the PDF and Excel")
+    ]
+    if submission.snapshot_version >= 10:
+        from app.services.oa_reimbursement_payload import generated_upload_manifest, parse_snapshot
+
+        snapshot = parse_snapshot(
+            submission.form_snapshot_json, expected_sha256=submission.snapshot_sha256,
+        )
+        if snapshot.snapshot_version != submission.snapshot_version:
+            raise ReimbursementSubmissionConflict("submission snapshot version mismatch")
+        expected = [(role.value, order) for role, order in generated_upload_manifest(snapshot)]
+    if [
+        (item.role, item.sort_order) for item in sorted(uploads, key=lambda item: item.sort_order)
+    ] != expected:
+        raise ReimbursementSubmissionConflict("submission uploads must match its frozen manifest")
 
 
 def create_submission(
@@ -464,7 +474,7 @@ def create_submission(
     The caller must build ``form_snapshot_json`` from the same Session directly
     before this call. This function performs the draft CAS and submission insert
     in one transaction, then commits it. Source files remain draft records; only
-    the generated PDF and Excel become remote uploads.
+    generated files from the frozen manifest become remote uploads.
     """
 
     _require_actor(actor)
@@ -518,7 +528,18 @@ def create_submission(
         )
         .order_by(ReimbursementDraftFile.sort_order, ReimbursementDraftFile.id)
     ).all()
-    if not source_files:
+    excel_only = False
+    if snapshot_version >= 10:
+        from app.services.oa_reimbursement_payload import parse_snapshot
+
+        snapshot = parse_snapshot(canonical_snapshot, expected_sha256=snapshot_sha256)
+        if (snapshot.snapshot_version != snapshot_version or snapshot.draft_id != draft.id
+                or snapshot.draft_revision != expected_revision):
+            raise ReimbursementSubmissionConflict("submission snapshot identity mismatch")
+        excel_only = snapshot.attachment_mode == "excel_only"
+        if excel_only and source_files:
+            raise ReimbursementSubmissionConflict("Excel-only snapshot cannot omit source files")
+    if not source_files and not excel_only:
         raise ApiError(
             "REIMBURSEMENT_DRAFT_NOT_READY",
             "请先上传至少一个有效附件",

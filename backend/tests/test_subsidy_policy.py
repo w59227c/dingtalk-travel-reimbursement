@@ -303,6 +303,7 @@ def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(
     base = build_snapshot(source)
     historical = json.loads(serialize_snapshot(base))
     historical["snapshotVersion"] = version
+    historical.pop("attachmentMode", None)
     historical["input"]["trip"]["excludedPeriods"] = (
         [period, period] if historical_overlap else [period]
     )
@@ -355,6 +356,7 @@ def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(
         )
     legacy = json.loads(serialize_snapshot(build_snapshot(source)))
     legacy["snapshotVersion"] = 6
+    legacy.pop("attachmentMode", None)
     legacy["input"]["trip"]["tripType"] = "project"
     raw_legacy = json.dumps(legacy, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     old_snapshot = parse_snapshot(raw_legacy)

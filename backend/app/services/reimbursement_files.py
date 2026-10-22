@@ -73,6 +73,7 @@ from app.services.reimbursement_drafts import (
     require_complete_draft_input,
     require_owned_draft,
     validate_and_calculate_input,
+    validate_draft_file_references,
 )
 from app.services.reimbursement_ocr_state import (
     failed_ocr_payload,
@@ -1174,6 +1175,12 @@ def _workbook_preview_snapshot(
         max_items=settings.expense_max_items,
     )
     draft_input = ReimbursementDraftInput.model_validate(calculation.input_data)
+    validate_draft_file_references(
+        database,
+        draft_id=draft.id,
+        draft_input=draft_input,
+        require_terminal_disposition=True,
+    )
     project = ResolvedProject(
         display_text=draft_input.project.text, filename_component=draft_input.project.text
     )

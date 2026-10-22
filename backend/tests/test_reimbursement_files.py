@@ -1152,7 +1152,7 @@ def test_excel_preview_recalculates_from_saved_draft_without_submission_side_eff
         assert database.scalar(select(func.count()).select_from(ReimbursementUpload)) == 0
 
 
-def test_excel_preview_recovers_stale_running_ocr_without_blocking(
+def test_excel_preview_recovers_stale_ocr_and_requires_explicit_disposition(
     client_factory,
     monkeypatch,
 ) -> None:
@@ -1184,11 +1184,24 @@ def test_excel_preview_recovers_stale_running_ocr_without_blocking(
         json={"expectedRevision": 2},
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_NOT_READY"
     with client.app.state.database_session_factory() as database:
         file = database.get(ReimbursementDraftFile, file_id)
         assert file.ocr_status == "FAILED"
         assert json.loads(file.ocr_result_json)["error"]["code"] == "OCR_INTERRUPTED"
+        draft = database.get(ReimbursementDraft, draft_id)
+        value = json.loads(draft.input_json)
+        value["dismissedOcrFileIds"] = [file_id]
+        draft.input_json = json.dumps(value)
+        draft.revision += 1
+        database.commit()
+    resolved = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+        headers={"X-CSRF-Token": csrf},
+        json={"expectedRevision": 3},
+    )
+    assert resolved.status_code == 200
 
 
 def test_excel_preview_native_ticket_survives_external_download_without_session_cookie(

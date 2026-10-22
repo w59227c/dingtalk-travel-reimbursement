@@ -92,6 +92,7 @@ def new_submission(
         template_process_code=draft.template_process_code,
         template_config_version=draft.template_config_version,
         schema_fingerprint=draft.schema_fingerprint,
+        snapshot_version=9,
         form_snapshot_json=draft.input_json,
         related_instance_ids_json=draft.related_instance_ids_json,
         snapshot_sha256=_HASH_B,

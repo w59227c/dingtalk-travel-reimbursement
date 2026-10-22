@@ -509,6 +509,8 @@ def _persist_ready_draft(
     *,
     travel_instance_ids: tuple[str, ...] = (TRAVEL_INSTANCE_ID,),
     excluded_periods: list | None = None,
+    subsidy_only: bool = False,
+    with_materials: bool = True,
 ):
     client.app.state.dingtalk_workflow = workflow
     settings = client.app.state.settings
@@ -560,7 +562,9 @@ def _persist_ready_draft(
             database,
             catalog=catalog,
             draft_input=_draft_input(excluded_periods=excluded_periods).model_copy(
-                update={"accounting_source_verified": True}
+                update={
+                    "accounting_source_verified": True, **({"items": []} if subsidy_only else {}),
+                }
             ),
             max_items=settings.expense_max_items,
         )
@@ -610,6 +614,8 @@ def _persist_ready_draft(
             (3, "EXPENSE_SOURCE", "发票.pdf", "pdf", "application/pdf", pdf_bytes("Invoice")),
             (8, "ATTACHMENT_ONLY", "行程单.png", "png", "image/png", image_bytes()),
         ):
+            if not with_materials or (subsidy_only and role == "EXPENSE_SOURCE"):
+                continue
             reservation = client.app.state.reimbursement_staging.new_reservation(
                 StagingArea.DRAFTS,
                 draft.id,
@@ -653,8 +659,10 @@ def _persist_ready_draft(
             database,
             catalog=catalog,
             draft_input=_draft_input(
-                source_file_id=files[0].id, excluded_periods=excluded_periods
-            ).model_copy(update={"accounting_source_verified": True}),
+                source_file_id=files[0].id if files else None, excluded_periods=excluded_periods
+            ).model_copy(update={
+                "accounting_source_verified": True, **({"items": []} if subsidy_only else {}),
+            }),
             max_items=settings.expense_max_items,
         )
         draft.input_json = linked_calculation.canonical_json
@@ -707,6 +715,209 @@ def _worker(
         poll_interval_seconds=0.01,
         clock=clock,
     )
+
+
+@pytest.mark.parametrize("with_materials", [False, True])
+@pytest.mark.parametrize("retry_put", [False, True])
+def test_subsidy_only_submission_manifest_readback_retry_and_cleanup(
+    enabled_manual_worker_client, with_materials, retry_put,
+):
+    reimbursement, travel, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement, travel)
+    storage = LocalStorageBoundary(reject_put_at=1 if retry_put else None)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, source_ids = _persist_ready_draft(
+        client, workflow, travel_type, subsidy_only=True, with_materials=with_materials,
+    )
+    headers = {"X-CSRF-Token": csrf, "Idempotency-Key": "39393939-3939-4939-8939-393939393939"}
+    reviewed = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/review",
+        json={"expectedRevision": 4}, headers=headers,
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["data"]["totals"]["receiptCount"] == 0
+    revision = reviewed.json()["data"]["revision"]
+    preview = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+        json={"expectedRevision": revision}, headers=headers,
+    )
+    assert preview.status_code == 200, preview.text
+    submitted = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": revision}, headers=headers,
+    )
+    assert submitted.status_code == 202, submitted.text
+    submission_id = submitted.json()["data"]["submissionId"]
+    tick = [utc_now()]
+    worker = _worker(client, workflow, storage, clock=lambda: tick[0])
+    assert asyncio.run(worker.run_once())
+    if retry_put:
+        status = client.get(f"/api/oa/reimbursements/submissions/{submission_id}").json()["data"]
+        assert status["status"] == "FAILED_RETRYABLE"
+        assert workflow.create_calls == 0
+        tick[0] += timedelta(minutes=2)
+        assert asyncio.run(worker.run_once())
+    status = client.get(f"/api/oa/reimbursements/submissions/{submission_id}").json()["data"]
+    assert status["status"] == "SUBMITTED", status
+    assert workflow.create_calls == 1
+    attachments = json.loads(workflow.created_command.form_values[-1].value)
+    assert [item["fileType"] for item in attachments] == (
+        ["pdf", "xlsx"] if with_materials else ["xlsx"]
+    )
+    if not with_materials:
+        assert all(file.file_name.endswith(".xlsx") for file in storage.put_files)
+    workbook = load_workbook(io.BytesIO(storage.put_files[-1].content))
+    assert workbook.active["G4"].value == workbook.active["G55"].value == 300
+    assert workbook.active["I55"].value == 0
+    workbook.close()
+    assert not asyncio.run(worker.run_once())
+    restored = client.get(f"/api/reimbursements/drafts/{draft_id}")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["data"]["attachmentMode"] == (
+        "bundle_and_excel" if with_materials else "excel_only"
+    )
+    with client.app.state.database_session_factory() as database:
+        submission = database.get(ReimbursementSubmission, submission_id)
+        snapshot = json.loads(submission.form_snapshot_json)
+        assert snapshot["snapshotVersion"] == 10
+        assert snapshot["attachmentMode"] == (
+            "bundle_and_excel" if with_materials else "excel_only"
+        )
+        uploads = database.scalars(select(ReimbursementUpload).where(
+            ReimbursementUpload.submission_id == submission_id,
+        ).order_by(ReimbursementUpload.sort_order)).all()
+        assert [(row.role, row.sort_order) for row in uploads] == (
+            [("GENERATED_PDF", 0), ("GENERATED_EXCEL", 1)]
+            if with_materials else [("GENERATED_EXCEL", 0)]
+        )
+        assert all(
+            row.upload_status == "LINKED" and row.local_status == "DELETED" for row in uploads
+        )
+        assert all(
+            database.get(ReimbursementDraftFile, file_id).file_status == "PURGED"
+            for file_id in source_ids
+        )
+    repeated = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 999}, headers=headers,
+    )
+    assert repeated.json()["data"]["submissionId"] == submission_id
+    assert workflow.create_calls == 1
+
+
+@pytest.mark.parametrize("invalid", [
+    "no_subsidy", "incomplete_expense", "pending_material",
+    "unassigned_material", "unconfirmed_purpose",
+])
+def test_subsidy_does_not_bypass_invalid_content_or_lock_rejected_drafts(
+    enabled_manual_worker_client, invalid,
+):
+    reimbursement, travel, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement, travel)
+    client = enabled_manual_worker_client
+    headers = {
+        "X-CSRF-Token": str(mock_login(client)["csrfToken"]),
+        "Idempotency-Key": "59595959-5959-4959-8959-595959595959",
+    }
+    draft_id, source_ids = _persist_ready_draft(
+        client, workflow, travel_type, subsidy_only=True,
+        with_materials=invalid in {
+            "pending_material", "unassigned_material", "unconfirmed_purpose",
+        },
+    )
+    current = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
+    value = current["input"]
+    if invalid == "no_subsidy":
+        value.update(trip=None, trips=[])
+    elif invalid == "incomplete_expense":
+        value["items"] = [{
+            **_draft_input().model_dump(mode="json", by_alias=True)["items"][0],
+            "amount": None,
+        }]
+    else:
+        with client.app.state.database_session_factory() as database:
+            file = database.get(ReimbursementDraftFile, source_ids[0])
+            if invalid == "unconfirmed_purpose":
+                file.ocr_result_json = json.dumps({"_materialClassification": {
+                    "status": "needs_confirmation", "kind": "unknown",
+                }})
+            else:
+                file.processing_role = "EXPENSE_SOURCE"
+                file.ocr_status = (
+                    "COMPLETE" if invalid == "unassigned_material" else "NOT_REQUESTED"
+                )
+            database.commit()
+    saved = client.put(
+        f"/api/reimbursements/drafts/{draft_id}",
+        json={"expectedRevision": current["revision"], "input": value}, headers=headers,
+    )
+    assert saved.status_code == 200, saved.text
+    revision = saved.json()["data"]["revision"]
+    rejected_paths = [
+        f"/api/reimbursements/drafts/{draft_id}/review",
+        f"/api/oa/reimbursements/{draft_id}/submit",
+    ]
+    rejected_paths.append(f"/api/reimbursements/drafts/{draft_id}/excel-preview")
+    for path in rejected_paths:
+        rejected = client.post(path, json={"expectedRevision": revision}, headers=headers)
+        assert rejected.status_code == 409, rejected.headers.get("content-type")
+    direct_preview = client.get(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+        params={"expectedRevision": revision},
+    )
+    assert direct_preview.status_code == 409
+    ticket = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview-ticket",
+        json={"expectedRevision": revision}, headers=headers,
+    )
+    assert ticket.status_code == 200
+    native_preview = client.get(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview/native",
+        headers={"X-Reimbursement-Download-Token": ticket.json()["data"]["downloadToken"]},
+    )
+    assert native_preview.status_code == 409
+    restored = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
+    assert restored["status"] == "DRAFT" and restored["lockedAt"] is None
+    assert restored["revision"] == revision
+    with client.app.state.database_session_factory() as database:
+        assert database.scalar(select(ReimbursementSubmission).where(
+            ReimbursementSubmission.draft_id == draft_id,
+        )) is None
+    assert workflow.create_calls == 0
+
+
+def test_subsidy_only_unknown_commit_retains_excel_and_never_recreates_oa(
+    enabled_manual_worker_client,
+):
+    reimbursement, travel, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement, travel)
+    storage = LocalStorageBoundary(unknown_commit_at=1)
+    client = enabled_manual_worker_client
+    csrf = str(mock_login(client)["csrfToken"])
+    draft_id, _ = _persist_ready_draft(
+        client, workflow, travel_type, subsidy_only=True, with_materials=False,
+    )
+    submitted = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit", json={"expectedRevision": 4},
+        headers={"X-CSRF-Token": csrf, "Idempotency-Key": "49494949-4949-4949-8949-494949494949"},
+    )
+    assert submitted.status_code == 202, submitted.text
+    assert asyncio.run(_worker(client, workflow, storage).run_once())
+    submission_id = submitted.json()["data"]["submissionId"]
+    status = client.get(f"/api/oa/reimbursements/submissions/{submission_id}").json()["data"]
+    assert status["status"] == "MANUAL_REVIEW"
+    assert workflow.create_calls == 0
+    assert storage.commit_calls == 1
+    with client.app.state.database_session_factory() as database:
+        uploads = database.scalars(select(ReimbursementUpload).where(
+            ReimbursementUpload.submission_id == submission_id,
+        )).all()
+        assert len(uploads) == 1
+        assert uploads[0].role == "GENERATED_EXCEL"
+        assert uploads[0].local_status == "READY"
+    assert not asyncio.run(_worker(client, workflow, storage).run_once())
+    assert storage.commit_calls == 1
 
 
 def test_disabled_worker_rejects_new_submission_without_locking_draft(
@@ -1412,7 +1623,7 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
             .order_by(ReimbursementUpload.sort_order)
         ).all()
         assert submission is not None
-        assert submission.snapshot_version == 9
+        assert submission.snapshot_version == 10
         frozen = json.loads(submission.form_snapshot_json)
         if with_exclusions:
             assert frozen["subsidy"]["excludedDays"] == (

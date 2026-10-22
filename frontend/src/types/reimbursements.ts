@@ -98,6 +98,7 @@ export interface ReimbursementDraft extends ReimbursementDraftSummary {
   template: ReimbursementDraftTemplateBinding
   input: ReimbursementDraftInput
   totals: ExpenseTotals
+  attachmentMode?: 'excel_only' | 'bundle_and_excel'
   relatedApprovals: ReimbursementRelatedApproval[]
   relatedApprovalSummary: ReimbursementRelatedApprovalSummary | null
 }

@@ -169,7 +169,7 @@ def test_v9_freezes_typed_adjustments_and_oa_explanation_rejecting_tampering():
     from app.services.oa_reimbursement_payload import parse_snapshot, serialize_snapshot
 
     snapshot = _adjusted_snapshot()
-    assert snapshot.snapshot_version == 9
+    assert snapshot.snapshot_version == 10
     encoded = serialize_snapshot(snapshot)
     assert serialize_snapshot(parse_snapshot(encoded)) == encoded
     description = next(
