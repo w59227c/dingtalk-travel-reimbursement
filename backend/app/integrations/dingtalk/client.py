@@ -53,13 +53,14 @@ logger = logging.getLogger(__name__)
 class DingTalkOpenAPIError(ApiError):
     """Sanitized DingTalk failure with machine-readable upstream classification."""
 
-    __slots__ = ("http_status", "upstream_code")
+    __slots__ = ("http_status", "upstream_code", "failure_kind")
 
     def __init__(
         self,
         *,
         http_status: int | None,
         upstream_code: object = None,
+        failure_kind: str | None = None,
     ) -> None:
         self.http_status = (
             http_status
@@ -69,6 +70,7 @@ class DingTalkOpenAPIError(ApiError):
             else None
         )
         self.upstream_code = _sanitized_upstream_code(upstream_code)
+        self.failure_kind = failure_kind if failure_kind in {"timeout", "transport"} else None
         super().__init__(
             "DINGTALK_OPENAPI_FAILED",
             "钉钉服务暂时不可用，请稍后重试",
@@ -289,8 +291,10 @@ class DingTalkOpenAPIClient:
                     json=json,
                     headers=headers,
                 )
-            except (httpx.TimeoutException, httpx.TransportError):
-                error = DingTalkOpenAPIError(http_status=None)
+            except httpx.TimeoutException:
+                error = DingTalkOpenAPIError(http_status=None, failure_kind="timeout")
+            except httpx.TransportError:
+                error = DingTalkOpenAPIError(http_status=None, failure_kind="transport")
 
             if response is not None:
                 if not 200 <= response.status_code < 300:
@@ -444,6 +448,7 @@ def _log_openapi_failure(
             "upstream_operation": _openapi_operation(method, path),
             "upstream_http_status": error.http_status,
             "upstream_error_code": error.upstream_code,
+            **({"failure_kind": error.failure_kind} if error.failure_kind else {}),
         },
     )
 

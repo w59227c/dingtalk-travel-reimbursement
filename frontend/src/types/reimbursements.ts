@@ -155,6 +155,7 @@ export interface OaTravelApproval {
 }
 
 export interface OaTravelApprovalList {
+  requestId?: string
   templateConfigVersion: number
   queryWindow: OaTravelApprovalQueryWindow
   items: OaTravelApproval[]

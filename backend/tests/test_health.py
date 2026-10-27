@@ -208,6 +208,7 @@ def test_unexpected_error_keeps_request_id_and_resets_context(tmp_path: Path) ->
         "message": "Unexpected request error",
         "requestId": response_body["requestId"],
         "exceptionType": "RuntimeError",
+        "errorCode": "INTERNAL_ERROR",
     }
     assert "sensitive implementation detail" not in response.text
     assert "sensitive implementation detail" not in log_output.getvalue()

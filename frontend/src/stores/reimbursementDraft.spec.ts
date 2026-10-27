@@ -195,6 +195,7 @@ describe('persistent reimbursement draft store', () => {
     const stale = store.loadTravelApprovals({ query: '旧查询' })
     const current = store.loadTravelApprovals({ query: '新查询' })
     second.resolve({
+      requestId: 'synthetic-new-request',
       templateConfigVersion: 2,
       queryWindow: { from: '2026-08-01', to: '2026-09-04' },
       items: [{
@@ -213,6 +214,7 @@ describe('persistent reimbursement draft store', () => {
     })
     await current
     first.resolve({
+      requestId: 'synthetic-old-request',
       templateConfigVersion: 1,
       queryWindow: { from: '2026-07-01', to: '2026-08-01' },
       items: [],
@@ -228,6 +230,26 @@ describe('persistent reimbursement draft store', () => {
       .toEqual(['new-instance'])
     expect(store.travelApprovalTemplateConfigVersion).toBe(2)
     expect(store.loadingTravelApprovals).toBe(false)
+    expect(store.travelApprovalsRequestId).toBe('synthetic-new-request')
+  })
+
+  it('keeps the failed query request id and clears it on the next query and reset', async () => {
+    const store = useReimbursementDraftStore()
+    vi.mocked(listOaTravelApprovals).mockRejectedValueOnce(Object.assign(new Error('synthetic'), {
+      isAxiosError: true, response: { status: 429, data: { requestId: 'synthetic-failed-request', error: { code: 'DINGTALK_RATE_LIMITED', message: '合成限流' } } },
+    }))
+    await store.loadTravelApprovals()
+    expect(store.travelApprovalsRequestId).toBe('synthetic-failed-request')
+    expect(store.travelApprovalsError).toBe('合成限流')
+    const next = deferred<Awaited<ReturnType<typeof listOaTravelApprovals>>>()
+    vi.mocked(listOaTravelApprovals).mockReturnValueOnce(next.promise)
+    const loading = store.loadTravelApprovals()
+    expect(store.travelApprovalsRequestId).toBe('')
+    next.resolve({ requestId: 'synthetic-empty-request', templateConfigVersion: 1, queryWindow: { from: '2026-10-01', to: '2026-10-27' }, items: [] })
+    await loading
+    expect(store.travelApprovalsRequestId).toBe('synthetic-empty-request')
+    store.reset()
+    expect(store.travelApprovalsRequestId).toBe('')
   })
 
   it('keeps only the authoritative server file record after upload', async () => {

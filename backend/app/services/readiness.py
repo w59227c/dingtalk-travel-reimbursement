@@ -22,8 +22,18 @@ class ReadinessReport:
     checks: dict[str, str]
 
 
-_EXPECTED_ALEMBIC_REVISION = "20261022_0021"
+_EXPECTED_ALEMBIC_REVISION = "20261027_0022"
 _REQUIRED_COLUMNS = {
+    "runtime_events": {
+        "id",
+        "occurred_at",
+        "module",
+        "event",
+        "result",
+        "request_id",
+        "details_json",
+        "byte_size",
+    },
     "oa_template_profiles": {
         "profile_key",
         "process_code",

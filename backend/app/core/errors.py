@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.request_id import request_id_for
+from app.core.runtime_events import http_event_context, record_runtime_event
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ def error_body(code: str, message: str, request_id: str) -> dict[str, object]:
 
 
 def error_response(request: Request, code: str, message: str, status_code: int) -> JSONResponse:
+    request.state.runtime_error_code = code
+    request.state.runtime_status_code = status_code
     request_id = request_id_for(request)
     return JSONResponse(
         status_code=status_code,
@@ -62,11 +65,26 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         request_id = request_id_for(request)
+        route = request.scope.get("route")
+        context = http_event_context(getattr(route, "path", ""))
+        if context is not None:
+            module, operation = context
+            record_runtime_event(
+                getattr(request.app.state, "runtime_events", None),
+                request_id,
+                module,
+                "internal_failure",
+                "failed",
+                operation=operation,
+                errorCode="INTERNAL_ERROR",
+                exceptionType=type(exc).__name__,
+            )
         logger.error(
             "Unexpected request error",
             extra={
                 "exception_type": type(exc).__name__,
                 "request_id": request_id,
+                "error_code": "INTERNAL_ERROR",
             },
         )
         return error_response(

@@ -1,10 +1,16 @@
 import axios from 'axios'
 
 interface ErrorEnvelope {
+  requestId?: unknown
   error?: {
     code?: unknown
     message?: unknown
   }
+}
+
+export function apiRequestId(error: unknown): string {
+  const value = errorEnvelope(error)?.requestId
+  return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : ''
 }
 
 function errorEnvelope(error: unknown): ErrorEnvelope | null {

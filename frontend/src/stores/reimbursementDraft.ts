@@ -2,7 +2,7 @@ import axios from 'axios'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
-import { apiErrorCode, apiErrorMessage } from '@/api/errors'
+import { apiErrorCode, apiErrorMessage, apiRequestId } from '@/api/errors'
 import {
   createReimbursementDraft,
   deleteReimbursementDraft,
@@ -113,6 +113,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   const loadError = ref('')
   const reimbursementOptionsError = ref('')
   const travelApprovalsError = ref('')
+  const travelApprovalsRequestId = ref('')
   const mutationError = ref('')
   const revisionConflict = ref(false)
 
@@ -417,6 +418,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   }
 
   function clearTravelApprovals(): void {
+    travelApprovalsRequestId.value = ''
     travelApprovals.value = []
     travelApprovalQueryWindow.value = null
     travelApprovalTemplateConfigVersion.value = null
@@ -473,6 +475,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     activeTravelApprovalsController = context.controller
     loadingTravelApprovals.value = true
     travelApprovalsError.value = ''
+    travelApprovalsRequestId.value = ''
     try {
       const result = await listOaTravelApprovals({
         ...query,
@@ -487,10 +490,12 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && result.templateConfigVersion !== reimbursementOptions.value.templateConfigVersion
       ) {
         clearTravelApprovals()
+        travelApprovalsRequestId.value = result.requestId ?? ''
         travelApprovalsError.value = '审批模板配置已更新，请重新加载报销选项和出差审批'
         return
       }
       travelApprovals.value = result.items
+      travelApprovalsRequestId.value = result.requestId ?? ''
       travelApprovalQueryWindow.value = result.queryWindow
       travelApprovalTemplateConfigVersion.value = result.templateConfigVersion
     } catch (error) {
@@ -503,6 +508,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
           error,
           '出差审批加载失败，请重试',
         )
+        travelApprovalsRequestId.value = apiRequestId(error)
       }
     } finally {
       releaseRequest(context)
@@ -1356,6 +1362,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadError,
     reimbursementOptionsError,
     travelApprovalsError,
+    travelApprovalsRequestId,
     mutationError,
     revisionConflict,
     busy,
