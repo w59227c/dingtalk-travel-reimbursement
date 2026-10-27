@@ -247,7 +247,7 @@ async def list_current_user_travel_approvals(
     eligible = tuple(
         candidate
         for candidate in resolved
-        if candidate is not None and _matches_query(candidate, query)
+        if candidate is not None and matches_travel_approval_query(candidate, query)
     )
     return tuple(
         sorted(
@@ -416,27 +416,42 @@ async def _list_approval_references(
                         )
                     if len(listed) >= _MAX_LISTED_IDS:
                         raise _result_limit_error()
-                    listed[instance_id] = ListedTravelApproval(
+                    listed[instance_id] = travel_approval_reference(
+                        profile,
                         instance_id=instance_id,
-                        expected_originator_user_id=current_user_id,
-                        profile_key=profile.profile_key,
-                        profile_display_name=profile.display_name,
-                        source_process_code=profile.process_code,
-                        schema_fingerprint=profile.schema.fingerprint,
-                        travel_type_option=profile.travel_type_option,
-                        start_date_component_id=profile.start_date_component_id,
-                        end_date_component_id=profile.end_date_component_id,
+                        current_user_id=current_user_id,
                         query_window=query_window,
-                        source_schema=profile.schema,
-                        company_component_id=travel_source_component_id(profile, "company"),
-                        budget_code_component_id=travel_source_component_id(profile, "budgetCode"),
-                        travel_type_component_id=getattr(profile, "travel_type_component_id", None),
-                        travel_type_mappings=getattr(profile, "travel_type_mappings", None),
                     )
                 if page.next_token is None:
                     break
                 next_token = page.next_token
     return listed
+
+
+def travel_approval_reference(
+    profile: TravelTemplateLike,
+    *,
+    instance_id: str,
+    current_user_id: str,
+    query_window: TravelApprovalQueryWindow,
+) -> ListedTravelApproval:
+    return ListedTravelApproval(
+        instance_id=instance_id,
+        expected_originator_user_id=current_user_id,
+        profile_key=profile.profile_key,
+        profile_display_name=profile.display_name,
+        source_process_code=profile.process_code,
+        schema_fingerprint=profile.schema.fingerprint,
+        travel_type_option=profile.travel_type_option,
+        start_date_component_id=profile.start_date_component_id,
+        end_date_component_id=profile.end_date_component_id,
+        query_window=query_window,
+        source_schema=profile.schema,
+        company_component_id=travel_source_component_id(profile, "company"),
+        budget_code_component_id=travel_source_component_id(profile, "budgetCode"),
+        travel_type_component_id=getattr(profile, "travel_type_component_id", None),
+        travel_type_mappings=getattr(profile, "travel_type_mappings", None),
+    )
 
 
 def _dingtalk_query_windows(
@@ -487,35 +502,7 @@ async def _resolve_details(
     async def resolve(reference: ListedTravelApproval) -> TravelApprovalCandidate | None:
         async with semaphore:
             instance = await workflow.get_process_instance(reference.instance_id)
-        candidate = _eligible_candidate(reference, instance)
-        if candidate is None:
-            return None
-        company, budget, reason = travel_accounting_options(
-            instance,
-            source_schema=reference.source_schema,
-            company_component_id=reference.company_component_id,
-            budget_code_component_id=reference.budget_code_component_id,
-            company_options=_mapped_options(catalog.reimbursement, "company"),
-            budget_options=_mapped_options(catalog.reimbursement, "budgetCode"),
-        )
-        option, source_value, type_reason = travel_instance_type_option(
-            instance,
-            source_schema=reference.source_schema,
-            component_id=reference.travel_type_component_id,
-            mappings=reference.travel_type_mappings,
-            fixed_option=reference.travel_type_option,
-        )
-        return replace(
-            candidate,
-            listed=replace(
-                reference,
-                travel_type_option=option or reference.travel_type_option,
-                source_travel_type_value=source_value,
-            ),
-            company_option=company,
-            budget_code_option=budget,
-            unavailable_reason=reason or type_reason,
-        )
+        return evaluate_travel_approval_candidate(reference, instance, catalog)[0]
 
     tasks = [asyncio.create_task(resolve(reference)) for reference in listed]
     try:
@@ -538,30 +525,58 @@ async def _resolve_details(
         raise
 
 
-def _eligible_candidate(
+def evaluate_travel_approval_candidate(
     listed: ListedTravelApproval,
     instance: WorkflowProcessInstance,
-) -> TravelApprovalCandidate | None:
-    if (
-        instance.instance_id != listed.instance_id
-        or instance.originator_user_id != listed.expected_originator_user_id
-        or instance.status != "COMPLETED"
-        or instance.result != "agree"
-    ):
-        return None
+    catalog: OaTemplateCatalogLike,
+) -> tuple[TravelApprovalCandidate | None, str | None]:
+    """One policy for employee candidates and administrator diagnostic explanations."""
+    if instance.instance_id != listed.instance_id:
+        return None, "INSTANCE_ID_MISMATCH"
+    if instance.originator_user_id != listed.expected_originator_user_id:
+        return None, "ORIGINATOR_MISMATCH"
+    if instance.status != "COMPLETED":
+        return None, "NOT_COMPLETED"
+    if instance.result != "agree":
+        return None, "NOT_AGREED"
     dates = travel_approval_dates(
         instance,
         start_date_component_id=listed.start_date_component_id,
         end_date_component_id=listed.end_date_component_id,
     )
     if dates is None:
-        return None
+        return None, "DATE_FIELDS_INVALID"
     start_date, end_date = dates
-    return TravelApprovalCandidate(
-        listed=listed,
-        instance=instance,
-        start_date=start_date,
-        end_date=end_date,
+    company, budget, reason = travel_accounting_options(
+        instance,
+        source_schema=listed.source_schema,
+        company_component_id=listed.company_component_id,
+        budget_code_component_id=listed.budget_code_component_id,
+        company_options=_mapped_options(catalog.reimbursement, "company"),
+        budget_options=_mapped_options(catalog.reimbursement, "budgetCode"),
+    )
+    option, source_value, type_reason = travel_instance_type_option(
+        instance,
+        source_schema=listed.source_schema,
+        component_id=listed.travel_type_component_id,
+        mappings=listed.travel_type_mappings,
+        fixed_option=listed.travel_type_option,
+    )
+    return (
+        TravelApprovalCandidate(
+            listed=replace(
+                listed,
+                travel_type_option=option or listed.travel_type_option,
+                source_travel_type_value=source_value,
+            ),
+            instance=instance,
+            start_date=start_date,
+            end_date=end_date,
+            company_option=company,
+            budget_code_option=budget,
+            unavailable_reason=reason or type_reason,
+        ),
+        None,
     )
 
 
@@ -820,7 +835,7 @@ def _validate_window(query_window: TravelApprovalQueryWindow) -> None:
         )
 
 
-def _matches_query(candidate: TravelApprovalCandidate, query: str) -> bool:
+def matches_travel_approval_query(candidate: TravelApprovalCandidate, query: str) -> bool:
     normalized = query.strip().casefold()
     if not normalized:
         return True

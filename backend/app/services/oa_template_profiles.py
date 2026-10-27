@@ -547,15 +547,7 @@ async def load_fresh_submission_catalog(
                 profile.process_code for profile in contract.travel_profiles
             )
 
-        reimbursement_schema = await workflow.get_form_schema(reimbursement_process_code)
-        travel_schemas = [
-            await workflow.get_form_schema(process_code) for process_code in travel_process_codes
-        ]
-        refreshed = _compatible_refreshed_catalog(
-            contract,
-            reimbursement_schema=reimbursement_schema,
-            travel_schemas=travel_schemas,
-        )
+        refreshed = await _observe_submission_catalog(contract, workflow)
         compatible = refreshed is not None
         with database_session_factory() as observation_database:
             observed = (
@@ -586,6 +578,49 @@ async def load_fresh_submission_catalog(
             ):
                 return current
     raise _configuration_changed_error()
+
+
+async def load_readonly_submission_catalog(
+    database_session_factory: sessionmaker[Session],
+    workflow: DingTalkWorkflowClient,
+) -> OaTemplateCatalogContract:
+    """Apply normal freshness checks without persisting schemas or drift observations."""
+    with database_session_factory() as database:
+        profile = _fresh_profile(database)
+        if profile is None:
+            raise ApiError(
+                "OA_TEMPLATE_NOT_CONFIGURED",
+                "报销审批模板目录尚未配置，请先在系统设置中确认模板",
+                409,
+            )
+        try:
+            contract = _validated_persisted_catalog(profile, require_compatible_status=False)
+        except ApiError:
+            raise _confirmation_required_error() from None
+        expected_state = _catalog_cas_state(profile)
+    refreshed = await _observe_submission_catalog(contract, workflow)
+    if refreshed is None:
+        raise _confirmation_required_error()
+    with database_session_factory() as database:
+        observed = _fresh_profile(database)
+        if observed is None or _catalog_cas_state(observed) != expected_state:
+            raise _configuration_changed_error()
+    return refreshed
+
+
+async def _observe_submission_catalog(
+    contract: OaTemplateCatalogContract,
+    workflow: DingTalkWorkflowClient,
+) -> OaTemplateCatalogContract | None:
+    reimbursement_schema = await workflow.get_form_schema(contract.reimbursement.process_code)
+    travel_schemas = [
+        await workflow.get_form_schema(profile.process_code) for profile in contract.travel_profiles
+    ]
+    return _compatible_refreshed_catalog(
+        contract,
+        reimbursement_schema=reimbursement_schema,
+        travel_schemas=travel_schemas,
+    )
 
 
 def _compatible_refreshed_catalog(
@@ -672,16 +707,12 @@ def _refresh_travel_contract(
     if configured.travel_type_mappings is not None:
         source_component_id = mapping.get("travelType")
         source_component = next(
-            (
-                item
-                for item in observed.components
-                if item.component_id == source_component_id
-            ),
+            (item for item in observed.components if item.component_id == source_component_id),
             None,
         )
-        if source_component is None or {
-            item.value for item in source_component.options
-        } != set(configured.travel_type_mappings):
+        if source_component is None or {item.value for item in source_component.options} != set(
+            configured.travel_type_mappings
+        ):
             raise _mapping_error(f"{configured.display_name}的出差类别来源选项已变化")
         travel_type_mappings = {
             source_value: _option_with_current_display(

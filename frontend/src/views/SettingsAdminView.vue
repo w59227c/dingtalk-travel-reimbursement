@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ApprovalDiagnosticsCard from '@/components/settings/ApprovalDiagnosticsCard.vue'
 import OaTemplateSettingsCard from '@/components/settings/OaTemplateSettingsCard.vue'
 import ReceiptKeywordSettingsCard from '@/components/settings/ReceiptKeywordSettingsCard.vue'
 import SubmissionRecoveryCard from '@/components/settings/SubmissionRecoveryCard.vue'
@@ -31,6 +32,7 @@ const props = withDefaults(defineProps<{
           >
             系统设置
           </RouterLink>
+          <a href="#approval-diagnostics">审批诊断</a>
         </nav>
         <h1>系统设置</h1>
       </div>
@@ -39,6 +41,7 @@ const props = withDefaults(defineProps<{
     <ReceiptKeywordSettingsCard />
     <SubsidyRateSettingsCard />
     <SubmissionRecoveryCard />
+    <ApprovalDiagnosticsCard :mobile="props.mobile" />
     <OaTemplateSettingsCard />
   </main>
 </template>

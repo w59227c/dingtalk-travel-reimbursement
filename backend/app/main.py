@@ -12,6 +12,7 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, Request, Response
 
+from app.api.approval_diagnostics import router as approval_diagnostics_router
 from app.api.auth import router as auth_router
 from app.api.calculations import router as calculations_router
 from app.api.health import router as health_router
@@ -267,6 +268,7 @@ def create_app(
     application.state.dingtalk_service = dingtalk_service
     application.state.dingtalk_client = dingtalk_client
     application.state.dingtalk_workflow = dingtalk_workflow
+    application.state.approval_diagnostics_lock = asyncio.Lock()
     application.state.dingtalk_storage = dingtalk_storage
     application.state.reimbursement_staging = reimbursement_staging
     application.state.reimbursement_quota = reimbursement_quota
@@ -349,6 +351,7 @@ def create_app(
     application.include_router(calculations_router, prefix="/api")
     application.include_router(oa_templates_router, prefix="/api")
     application.include_router(oa_reimbursements_router, prefix="/api")
+    application.include_router(approval_diagnostics_router, prefix="/api")
     application.include_router(reimbursements_router, prefix="/api")
     application.include_router(reimbursement_files_router, prefix="/api")
     application.include_router(reimbursement_submissions_router, prefix="/api")

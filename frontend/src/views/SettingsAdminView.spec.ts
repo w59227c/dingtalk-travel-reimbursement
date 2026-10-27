@@ -118,6 +118,16 @@ describe('SettingsAdminView receipt keywords', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('includes approval diagnostics in both settings modes, mobile=%s', (mobile) => {
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile },
+      global: { plugins: [createPinia(), ElementPlus], stubs: { RouterLink: true } },
+    })
+    expect(wrapper.get('#approval-diagnostics').text()).toContain('出差审批诊断')
+    expect(wrapper.get('a[href="#approval-diagnostics"]').text()).toBe('审批诊断')
+    wrapper.unmount()
+  })
+
   it.each([false, true])('edits and saves all eight independent subsidy rates, mobile=%s', async (mobile) => {
     vi.mocked(updateExpenseSettings).mockImplementation(async (input) => input)
     const wrapper = mount(SettingsAdminView, {

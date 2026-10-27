@@ -267,6 +267,35 @@ class DingTalkWorkflowClient:
             user_ids=user_ids,
             statuses=statuses,
         )
+        return await self._read_instance_id_page(request_body, next_token)
+
+    async def list_process_instance_ids_for_diagnostics(
+        self,
+        *,
+        process_code: str,
+        start_time: int,
+        end_time: int,
+        next_token: int,
+        max_results: int,
+    ) -> WorkflowInstanceIdPage:
+        """Admin discovery only; at most ten minutes, including unfinished instances."""
+        body = _instance_query_body(
+            process_code=process_code,
+            start_time=start_time,
+            end_time=end_time,
+            next_token=next_token,
+            max_results=max_results,
+            statuses=("COMPLETED", "RUNNING", "TERMINATED"),
+        )
+        if end_time - start_time >= 10 * 60 * 1000:
+            raise ValueError("diagnostic discovery window must not exceed ten minutes")
+        return await self._read_instance_id_page(body, next_token)
+
+    async def _read_instance_id_page(
+        self,
+        request_body: dict[str, object],
+        next_token: int,
+    ) -> WorkflowInstanceIdPage:
         try:
             payload = await self._client.request_openapi_json(
                 "POST",
@@ -490,6 +519,26 @@ def _instance_id_query_body(
     user_ids: tuple[str, ...],
     statuses: tuple[str, ...],
 ) -> dict[str, object]:
+    normalized_user_ids = _identifier_tuple(user_ids, field_name="user_id", maximum=10)
+    return _instance_query_body(
+        process_code=process_code,
+        start_time=start_time,
+        end_time=end_time,
+        next_token=next_token,
+        max_results=max_results,
+        statuses=statuses,
+    ) | {"userIds": list(normalized_user_ids)}
+
+
+def _instance_query_body(
+    *,
+    process_code: str,
+    start_time: int,
+    end_time: int,
+    next_token: int,
+    max_results: int,
+    statuses: tuple[str, ...],
+) -> dict[str, object]:
     normalized_process_code = _required_process_code(process_code)
     for name, value in (
         ("start_time", start_time),
@@ -509,7 +558,6 @@ def _instance_id_query_body(
         raise ValueError("next_token must be a non-negative signed int64")
     if not 1 <= max_results <= 20:
         raise ValueError("max_results must be between 1 and 20")
-    normalized_user_ids = _identifier_tuple(user_ids, field_name="user_id", maximum=10)
     normalized_statuses = tuple(
         item.upper() for item in _identifier_tuple(statuses, field_name="status", maximum=3)
     )
@@ -521,7 +569,6 @@ def _instance_id_query_body(
         "endTime": end_time,
         "nextToken": next_token,
         "maxResults": max_results,
-        "userIds": list(normalized_user_ids),
         "statuses": list(normalized_statuses),
     }
 
