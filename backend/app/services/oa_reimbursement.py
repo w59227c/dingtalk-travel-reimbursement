@@ -14,7 +14,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.errors import ApiError
-from app.core.runtime_events import runtime_event_module
 from app.integrations.dingtalk.client import DingTalkOpenAPIError
 from app.integrations.dingtalk.storage import (
     ApprovalAttachment,
@@ -455,7 +454,9 @@ class SnapshotSubmissionMaterializer:
             heartbeat,
             lambda: self._workflow.get_form_schema(snapshot.template.process_code),
         )
-        stored_schema = form_schema_from_dict(json.loads(snapshot.template.schema_canonical_json))
+        stored_schema = form_schema_from_dict(
+            json.loads(snapshot.template.schema_canonical_json)
+        )
         fields = {field.logical_key: field.component_id for field in snapshot.template.fields}
         if (
             classify_schema_change(
@@ -521,13 +522,10 @@ class SnapshotSubmissionMaterializer:
             }
             try:
                 if profile.schema_contract_fingerprint is not None:
-                    if (
-                        schema_contract_fingerprint(
-                            travel_schema,
-                            mapped_component_ids=set(travel_mapping.values()),
-                        )
-                        != profile.schema_contract_fingerprint
-                    ):
+                    if schema_contract_fingerprint(
+                        travel_schema,
+                        mapped_component_ids=set(travel_mapping.values()),
+                    ) != profile.schema_contract_fingerprint:
                         raise ValueError
                 elif travel_schema.fingerprint != profile.schema_fingerprint:
                     # Snapshots created before structural compatibility metadata
@@ -614,7 +612,8 @@ class SnapshotSubmissionMaterializer:
                 )
             if (
                 related.originator_department_id is not None
-                and instance.originator_department_id != related.originator_department_id
+                and instance.originator_department_id
+                != related.originator_department_id
             ):
                 raise ApiError(
                     "TRAVEL_APPROVAL_DEPARTMENT_CHANGED",
@@ -1089,15 +1088,10 @@ class DatabaseSubmissionState:
         _validate_original_manifest(snapshot, job.uploads)
         for role, sort_order in generated_upload_manifest(snapshot):
             self._ensure_generated_file(
-                lease,
-                job,
-                role=role,
-                sort_order=sort_order,
-                generate=(
-                    self._materializer.generate_bundle
-                    if role == ReimbursementUploadRole.GENERATED_PDF
-                    else self._materializer.generate_excel
-                ),
+                lease, job, role=role, sort_order=sort_order,
+                generate=(self._materializer.generate_bundle
+                          if role == ReimbursementUploadRole.GENERATED_PDF
+                          else self._materializer.generate_excel),
             )
         return lease
 
@@ -1666,49 +1660,48 @@ class OAReimbursementProcessor:
         self._clock = clock or _utc_now
 
     async def process(self, lease: SubmissionLease) -> None:
-        with runtime_event_module("submission"):
+        job = await self._state_call(self._state.load_job, lease)
+        if job.status is ReimbursementSubmissionStatus.QUEUED:
+            lease = await self._transition(
+                lease,
+                to_status=ReimbursementSubmissionStatus.VALIDATING,
+            )
             job = await self._state_call(self._state.load_job, lease)
-            if job.status is ReimbursementSubmissionStatus.QUEUED:
-                lease = await self._transition(
-                    lease,
-                    to_status=ReimbursementSubmissionStatus.VALIDATING,
-                )
-                job = await self._state_call(self._state.load_job, lease)
 
-            if job.status is ReimbursementSubmissionStatus.FAILED_RETRYABLE:
-                if lease.status is not ReimbursementSubmissionStatus.FAILED_RETRYABLE:
-                    raise RuntimeError("lease and persisted submission status diverged")
-                resume = _required_resume_status(job)
-                lease = await self._transition(lease, to_status=resume)
-                job = await self._state_call(self._state.load_job, lease)
+        if job.status is ReimbursementSubmissionStatus.FAILED_RETRYABLE:
+            if lease.status is not ReimbursementSubmissionStatus.FAILED_RETRYABLE:
+                raise RuntimeError("lease and persisted submission status diverged")
+            resume = _required_resume_status(job)
+            lease = await self._transition(lease, to_status=resume)
+            job = await self._state_call(self._state.load_job, lease)
 
-            if job.status is ReimbursementSubmissionStatus.VALIDATING:
-                await self._run_validation(lease, job)
-                return
-            if job.status is ReimbursementSubmissionStatus.GENERATING_EXCEL:
-                await self._run_excel_generation(lease, job)
-                return
-            if job.status is ReimbursementSubmissionStatus.UPLOADING:
-                await self._run_uploads_and_create(lease, job)
-                return
-            if job.status is ReimbursementSubmissionStatus.OA_CREATING:
-                # A newly claimed OA_CREATING row means the previous owner crossed
-                # the create checkpoint and disappeared. Replaying create is unsafe.
-                await self._transition(
-                    lease,
-                    to_status=ReimbursementSubmissionStatus.RECONCILING,
-                    error_code="OA_CREATE_OUTCOME_UNKNOWN",
-                    error_message="审批创建结果需要核对",
-                )
-                return
-            if job.status is ReimbursementSubmissionStatus.RECONCILING:
-                await self._run_reconciliation(lease, job)
-                return
-            if job.status is ReimbursementSubmissionStatus.VERIFYING:
-                await self._run_verification(lease, job)
-                return
-            if job.status is ReimbursementSubmissionStatus.ORPHAN_CLEANUP:
-                await self._run_orphan_cleanup(lease, job)
+        if job.status is ReimbursementSubmissionStatus.VALIDATING:
+            await self._run_validation(lease, job)
+            return
+        if job.status is ReimbursementSubmissionStatus.GENERATING_EXCEL:
+            await self._run_excel_generation(lease, job)
+            return
+        if job.status is ReimbursementSubmissionStatus.UPLOADING:
+            await self._run_uploads_and_create(lease, job)
+            return
+        if job.status is ReimbursementSubmissionStatus.OA_CREATING:
+            # A newly claimed OA_CREATING row means the previous owner crossed
+            # the create checkpoint and disappeared. Replaying create is unsafe.
+            await self._transition(
+                lease,
+                to_status=ReimbursementSubmissionStatus.RECONCILING,
+                error_code="OA_CREATE_OUTCOME_UNKNOWN",
+                error_message="审批创建结果需要核对",
+            )
+            return
+        if job.status is ReimbursementSubmissionStatus.RECONCILING:
+            await self._run_reconciliation(lease, job)
+            return
+        if job.status is ReimbursementSubmissionStatus.VERIFYING:
+            await self._run_verification(lease, job)
+            return
+        if job.status is ReimbursementSubmissionStatus.ORPHAN_CLEANUP:
+            await self._run_orphan_cleanup(lease, job)
 
     async def _run_validation(self, lease: SubmissionLease, job: SubmissionJob) -> None:
         lease = await self._renew(lease)

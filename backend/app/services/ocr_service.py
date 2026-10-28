@@ -186,6 +186,7 @@ class OcrService:
         *,
         reference_year: int | None,
         keyword_rules: tuple[ReceiptKeywordRule, ...] | None = None,
+        diagnostics: bool = False,
     ) -> dict[str, object]:
         """Classify and parse from the same bounded extraction, never from a filename."""
         if not self._settings.ocr_enabled:
@@ -209,6 +210,7 @@ class OcrService:
                 self._engine if self._engine is not None and self._engine.is_fake else None,
                 True,
                 keyword_rules,
+                diagnostics,
                 timeout_seconds=self._settings.ocr_timeout_seconds,
             )
         except ProcessJobBusy as exc:
@@ -237,6 +239,8 @@ class OcrService:
             "reason": result.get("reason"),
             "pageCount": result.get("pageCount"),
         }
+        if diagnostics and isinstance(result.get("diagnostic"), dict):
+            payload["diagnostic"] = result["diagnostic"]
         return payload
 
     async def recognize_itinerary_file(

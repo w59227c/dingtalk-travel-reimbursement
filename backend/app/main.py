@@ -18,21 +18,16 @@ from app.api.calculations import router as calculations_router
 from app.api.health import router as health_router
 from app.api.oa_reimbursements import router as oa_reimbursements_router
 from app.api.oa_templates import router as oa_templates_router
+from app.api.receipt_diagnostics import router as receipt_diagnostics_router
 from app.api.receipt_keywords import router as receipt_keywords_router
 from app.api.reimbursement_files import router as reimbursement_files_router
 from app.api.reimbursement_submissions import router as reimbursement_submissions_router
 from app.api.reimbursements import router as reimbursements_router
-from app.api.runtime_events import router as runtime_events_router
 from app.api.settings import router as settings_router
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError, error_response, install_error_handlers
 from app.core.logging import configure_logging
 from app.core.request_id import bind_request_id, request_id_from_header, reset_request_id
-from app.core.runtime_events import (
-    bind_runtime_recorder,
-    record_http_request,
-    reset_runtime_recorder,
-)
 from app.database.session import create_database_engine, create_session_factory
 from app.integrations.dingtalk.client import DingTalkOpenAPIClient
 from app.integrations.dingtalk.storage import DingTalkStorageClient
@@ -53,7 +48,6 @@ from app.services.ocr_service import OcrService
 from app.services.process_jobs import KillableProcessRunner
 from app.services.reimbursement_quota import ReimbursementQuotaCoordinator
 from app.services.reimbursement_staging import ReimbursementStaging
-from app.services.runtime_events import RuntimeEventStore
 from app.services.sessions import SessionCleanupGate, purge_expired_sessions
 from app.services.temp_files import cleanup_expired_temp_files
 from app.services.warm_ocr_process import WarmOcrProcess
@@ -78,7 +72,6 @@ def create_app(
     )
     database_engine = create_database_engine(runtime_settings.database_url)
     database_session_factory = create_session_factory(database_engine)
-    runtime_events = RuntimeEventStore(database_session_factory)
     reimbursement_quota = ReimbursementQuotaCoordinator(
         database_engine,
         reimbursement_staging,
@@ -229,10 +222,6 @@ def create_app(
     async def lifespan(_app: FastAPI):
         async with AsyncExitStack() as resources:
             resources.callback(database_engine.dispose)
-            runtime_events.start()
-            resources.callback(runtime_events.close)
-            event_token = bind_runtime_recorder(runtime_events)
-            resources.callback(reset_runtime_recorder, event_token)
             resources.push_async_callback(dingtalk_client.close)
             resources.push_async_callback(dingtalk_storage.close)
             resources.push_async_callback(warm_ocr_process.close)
@@ -277,7 +266,6 @@ def create_app(
     application.state.settings = runtime_settings
     application.state.database_engine = database_engine
     application.state.database_session_factory = database_session_factory
-    application.state.runtime_events = runtime_events
     application.state.dingtalk_service = dingtalk_service
     application.state.dingtalk_client = dingtalk_client
     application.state.dingtalk_workflow = dingtalk_workflow
@@ -301,9 +289,7 @@ def create_app(
         request_id = request_id_from_header(request.headers.get("X-Request-ID"))
         request.state.request_id = request_id
         token = bind_request_id(request_id)
-        event_token = bind_runtime_recorder(runtime_events)
         started_at = perf_counter()
-        response_status = 500
         try:
             path_parts = request.url.path.split("/")
             is_reimbursement_file_upload = (
@@ -312,7 +298,10 @@ def create_app(
                 and bool(path_parts[4])
                 and path_parts[5] == "files"
             )
-            if request.method == "POST" and is_reimbursement_file_upload:
+            is_file_upload = is_reimbursement_file_upload or (
+                request.url.path == "/api/admin/receipts/diagnose"
+            )
+            if request.method == "POST" and is_file_upload:
                 declared_length = request.headers.get("Content-Length")
                 if declared_length:
                     try:
@@ -344,7 +333,6 @@ def create_app(
 
                 request._receive = limited_receive
             response = await call_next(request)
-            response_status = response.status_code
             response.headers["X-Request-ID"] = request_id
             logger.info(
                 "Request completed",
@@ -356,32 +344,19 @@ def create_app(
                 },
             )
             return response
-        except Exception:
-            # Starlette invokes its outer catch-all after this context is reset.
-            request.state.runtime_error_code = "INTERNAL_ERROR"
-            request.state.runtime_status_code = 500
-            raise
         finally:
-            route = request.scope.get("route")
-            record_http_request(
-                getattr(route, "path", ""),
-                getattr(request.state, "runtime_status_code", response_status),
-                (perf_counter() - started_at) * 1000,
-                getattr(request.state, "runtime_error_code", None),
-            )
-            reset_runtime_recorder(event_token)
             reset_request_id(token)
 
     install_error_handlers(application)
     application.include_router(health_router, prefix="/api")
     application.include_router(auth_router, prefix="/api")
     application.include_router(receipt_keywords_router, prefix="/api")
+    application.include_router(receipt_diagnostics_router, prefix="/api")
     application.include_router(settings_router, prefix="/api")
     application.include_router(calculations_router, prefix="/api")
     application.include_router(oa_templates_router, prefix="/api")
     application.include_router(oa_reimbursements_router, prefix="/api")
     application.include_router(approval_diagnostics_router, prefix="/api")
-    application.include_router(runtime_events_router, prefix="/api")
     application.include_router(reimbursements_router, prefix="/api")
     application.include_router(reimbursement_files_router, prefix="/api")
     application.include_router(reimbursement_submissions_router, prefix="/api")

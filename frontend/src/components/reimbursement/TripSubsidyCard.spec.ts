@@ -51,7 +51,10 @@ describe('TripSubsidyCard', () => {
     expect(wrapper.text()).toContain('补助 2')
     expect(wrapper.text()).toContain('南京出差')
     expect(wrapper.text()).toContain('审批日期：2026-09-01 至 2026-09-03')
-    expect(wrapper.findComponent({ name: 'ElDatePicker' }).exists()).toBe(false)
+    expect(wrapper.findAllComponents({ name: 'ElDatePicker' })).toHaveLength(4)
+    expect(wrapper.findAll('details.subsidy-help')).toHaveLength(1)
+    expect(wrapper.find('.subsidy-help').attributes('open')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('中间完整日期不计补助')
     expect(wrapper.findAll('input[type="radio"]')).toHaveLength(8)
   })
 
@@ -59,7 +62,7 @@ describe('TripSubsidyCard', () => {
     const expense = useExpenseStore()
     const selected = [{
       processInstanceId: 'approval-long',
-      title: '王广硕提交的境内出差申请',
+      title: '合成员工提交的境内出差申请',
       startDate: '2026-09-01',
       endDate: '2026-09-03',
     }]
@@ -72,7 +75,7 @@ describe('TripSubsidyCard', () => {
     })
 
     expect(wrapper.get('.subsidy-item__heading').classes()).toContain('subsidy-item__heading--mobile')
-    expect(wrapper.get('.subsidy-approval-title').text()).toBe('王广硕提交的境内出差申请')
+    expect(wrapper.get('.subsidy-approval-title').text()).toBe('合成员工提交的境内出差申请')
   })
 
   it('merges overlapping approvals into one subsidy editor and keeps gaps separate', () => {
@@ -255,7 +258,7 @@ describe('TripSubsidyCard', () => {
     await wrapper.get('[aria-label="补助 1 非补助时段 1 返回时段"] input[value="afternoon"]').setValue()
     expect(first.startTime).toBe('18:00')
     expect(first.endTime).toBe('18:00')
-    const dates = wrapper.findAllComponents({ name: 'ElDatePicker' })
+    const dates = wrapper.findAllComponents({ name: 'ElDatePicker' }).slice(2, 4)
     dates[0]!.vm.$emit('update:modelValue', null)
     await nextTick()
     expect(first.startDate).toBe('')
@@ -282,33 +285,35 @@ describe('TripSubsidyCard', () => {
     const selected = [{ ...approvals[0]!, endDate: '2026-09-10' }]
     const expense = useExpenseStore()
     const wrapper = mountCard('long_term_project', selected, false, mobile)
-    const add = wrapper.get('[aria-label="补助 1 添加非补助时段"]')
-    await add.trigger('click')
-    wrapper.findAllComponents({ name: 'ElSelect' })[0]!.vm.$emit('update:modelValue', 'late_departure')
+    const dates = wrapper.findAllComponents({ name: 'ElDatePicker' })
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-02')
     await nextTick()
-    expect(wrapper.find('[aria-label="补助 1 非补助时段 1 出发日期"]').exists()).toBe(false)
-    expect(wrapper.find('[aria-label="补助 1 非补助时段 1 实际出发日期"]').exists()).toBe(true)
-    wrapper.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-09-02')
-    await wrapper.get('[aria-label="补助 1 非补助时段 1 出发时段"] input[value="afternoon"]').setValue()
-    await add.trigger('click')
-    wrapper.findAllComponents({ name: 'ElSelect' })[1]!.vm.$emit('update:modelValue', 'early_end')
+    await wrapper.get('[aria-label="补助 1 出发时段"] input[value="afternoon"]').setValue()
+    dates[1]!.vm.$emit('update:modelValue', '2026-09-09')
     await nextTick()
-    wrapper.findAllComponents({ name: 'ElDatePicker' })[1]!.vm.$emit('update:modelValue', '2026-09-09')
-    await nextTick()
-    expect(wrapper.find('[aria-label="补助 1 非补助时段 2 返回日期"]').exists()).toBe(false)
-    expect(wrapper.find('[aria-label="补助 1 非补助时段 2 实际离开日期"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="补助 1 返回时段"] input[value="morning"]').setValue()
+    expect(wrapper.findAll('.excluded-period')).toHaveLength(0)
+    expect(wrapper.text()).toContain('审批日期：2026-09-01 至 2026-09-10')
     expect(expense.policyInputError).toBe('')
     expect(expense.tripPayloads()[0]?.excludedPeriods).toEqual([
       { type: 'late_departure', endDate: '2026-09-02', endTime: '18:00' },
       { type: 'early_end', startDate: '2026-09-09', startTime: '09:00' },
     ])
+    const beforeInvalid = JSON.stringify(expense.subsidyTrips)
+    dates[0]!.vm.$emit('update:modelValue', '2026-08-31')
+    await nextTick()
+    expect(wrapper.text()).toContain('补助日期必须在审批日期范围内')
+    expect(JSON.stringify(expense.subsidyTrips)).toBe(beforeInvalid)
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-02')
+    await nextTick()
+    expect(wrapper.text()).not.toContain('补助日期必须在审批日期范围内')
     const saved = JSON.parse(JSON.stringify(expense.subsidyTrips))
     expense.setSubsidyIncluded(false)
     expense.setSubsidyIncluded(true)
     expect(expense.subsidyTrips).toEqual(saved)
     const locked = mountCard('long_term_project', selected, true, mobile)
     const before = JSON.parse(JSON.stringify(expense.subsidyTrips))
-    locked.findAllComponents({ name: 'ElSelect' })[0]!.vm.$emit('update:modelValue', 'early_end')
+    locked.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-09-03')
     await nextTick()
     expect(expense.subsidyTrips).toEqual(before)
   })
@@ -421,4 +426,45 @@ describe('TripSubsidyCard', () => {
     await toggle.trigger('click')
     expect(expense.includeSubsidy).toBe(true)
   })
+  it.each([false, true])('repairs an invalid saved window and protects locked boundaries, mobile=%s', async (mobile) => {
+    const selected = [{ ...approvals[0]!, endDate: '2026-09-06' }]
+    const expense = useExpenseStore()
+    const wrapper = mountCard('business', selected, false, mobile)
+    expense.subsidyTrips[0]!.excludedPeriods = [
+      { type: 'late_departure', endDate: '2026-08-31', endTime: '09:00' },
+      { type: 'early_end', startDate: '2026-09-07', startTime: '18:00' },
+    ]
+    await nextTick()
+    expect(expense.tripPayloads()).toEqual([])
+    const dates = wrapper.findAllComponents({ name: 'ElDatePicker' })
+    expect(dates[0]!.props('popperClass')).toBe(mobile ? 'excluded-period-picker--mobile' : undefined)
+    expect(dates[1]!.props('popperClass')).toBe(mobile ? 'excluded-period-picker--mobile' : undefined)
+    await wrapper.get('[aria-label="补助 1 恢复审批日期"]').trigger('click')
+    expect(expense.tripPayloads()).toHaveLength(1)
+    expect(expense.subsidyTrips[0]!.excludedPeriods).toEqual([])
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-02')
+    await nextTick()
+    expect(expense.tripPayloads()[0]!.excludedPeriods![0]!.endDate).toBe('2026-09-02')
+    const locked = mountCard('business', selected, true, mobile)
+    const saved = JSON.stringify(expense.subsidyTrips)
+    locked.findAllComponents({ name: 'ElButton' }).find((button) => button.text() === '恢复审批日期')!.vm.$emit('click')
+    expect(JSON.stringify(expense.subsidyTrips)).toBe(saved)
+  })
+
+  it.each([false, true])('groups dates and periods by boundary in both presentations, mobile=%s', (mobile) => {
+    const wrapper = mountCard('business', approvals, false, mobile)
+    const item = wrapper.findAll('.subsidy-item')[0]!
+    const heading = item.get('.subsidy-item__heading')
+    expect(item.findAllComponents({ name: 'ElDatePicker' })).toHaveLength(2)
+    expect(item.findAll('input[type="radio"]')).toHaveLength(4)
+    expect(heading.findComponent({ name: 'ElDatePicker' }).exists()).toBe(false)
+    expect(heading.text()).toContain('审批日期：2026-09-01 至 2026-09-03')
+    const start = item.get('[aria-label="补助 1 补助开始"]')
+    const end = item.get('[aria-label="补助 1 补助结束"]')
+    expect(start.findComponent({ name: 'ElDatePicker' }).props('modelValue')).toBe('2026-09-01')
+    expect(start.find('[aria-label="补助 1 出发时段"]').exists()).toBe(true)
+    expect(end.findComponent({ name: 'ElDatePicker' }).props('modelValue')).toBe('2026-09-03')
+    expect(end.find('[aria-label="补助 1 返回时段"]').exists()).toBe(true)
+  })
+
 })

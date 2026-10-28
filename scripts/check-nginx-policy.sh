@@ -20,12 +20,20 @@ do
     grep -F "$required" "$config" >/dev/null
 done
 
-if [ "$(grep -Fc 'proxy_request_buffering off' "$config")" -ne 1 ]; then
-    echo "The persistent upload route must disable request buffering." >&2
-    exit 1
-fi
-
-grep -F 'location ~ ^/api/reimbursements/drafts/[^/]+/files$' "$config" >/dev/null
+for location in \
+    'location ~ ^/api/reimbursements/drafts/[^/]+/files$ {' \
+    'location = /api/admin/receipts/diagnose {'
+do
+    if ! awk -v marker="$location" '
+        index($0, marker) { inside = 1; matched = 1 }
+        inside && /^[[:space:]]*proxy_request_buffering[[:space:]]+off;/ { streaming = 1 }
+        inside && /^[[:space:]]*}/ { inside = 0 }
+        END { if (!matched || !streaming) exit 1 }
+    ' "$config"; then
+        echo "Each upload location must disable request buffering: $location" >&2
+        exit 1
+    fi
+done
 
 for required in \
     "proxy_pass http://backend:8000" \

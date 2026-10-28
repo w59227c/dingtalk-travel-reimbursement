@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -23,38 +23,6 @@ _MAX_PAGES_PER_PROFILE = 50
 _DETAIL_CONCURRENCY = 5
 _MAX_WINDOW_DAYS = 180
 _DINGTALK_MAX_QUERY_DAYS = 120
-
-
-@dataclass
-class TravelApprovalQueryObservation:
-    stage: str = "catalog"
-    templates: int = 0
-    list_requests: int = 0
-    listed: int = 0
-    details_read: int = 0
-    evaluated: int = 0
-    exclusions: dict[str, int] = field(default_factory=dict)
-    returned: int | None = None
-    unselectable: int | None = None
-
-    def rejected(self, reason: str) -> None:
-        self.exclusions[reason] = self.exclusions.get(reason, 0) + 1
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "stage": self.stage,
-            "templates": self.templates,
-            "listRequests": self.list_requests,
-            "listed": self.listed,
-            "detailsRead": self.details_read,
-            "evaluated": self.evaluated,
-            "excluded": sum(self.exclusions.values()),
-            "returned": self.returned,
-            "unselectable": self.unselectable,
-            "exclusions": [
-                {"code": code, "count": count} for code, count in sorted(self.exclusions.items())
-            ],
-        }
 
 
 class ReimbursementTemplateLike(Protocol):
@@ -266,7 +234,6 @@ async def list_current_user_travel_approvals(
     current_user_id: str,
     query_window: TravelApprovalQueryWindow,
     query: str = "",
-    observation: TravelApprovalQueryObservation | None = None,
 ) -> tuple[TravelApprovalCandidate, ...]:
     user_id = _required_text(current_user_id, field="current_user_id")
     _validate_window(query_window)
@@ -275,23 +242,13 @@ async def list_current_user_travel_approvals(
         catalog.travel_profiles,
         current_user_id=user_id,
         query_window=query_window,
-        observation=observation,
     )
-    resolved = await _resolve_details(
-        workflow, tuple(listed.values()), catalog, observation=observation
+    resolved = await _resolve_details(workflow, tuple(listed.values()), catalog)
+    eligible = tuple(
+        candidate
+        for candidate in resolved
+        if candidate is not None and matches_travel_approval_query(candidate, query)
     )
-    eligible = []
-    for candidate in resolved:
-        if candidate is None:
-            continue
-        if matches_travel_approval_query(candidate, query):
-            eligible.append(candidate)
-        elif observation:
-            observation.rejected("KEYWORD_MISMATCH")
-    if observation:
-        observation.stage = "complete"
-        observation.returned = len(eligible)
-        observation.unselectable = sum(bool(item.unavailable_reason) for item in eligible)
     return tuple(
         sorted(
             eligible,
@@ -425,11 +382,7 @@ async def _list_approval_references(
     *,
     current_user_id: str,
     query_window: TravelApprovalQueryWindow,
-    observation: TravelApprovalQueryObservation | None = None,
 ) -> dict[str, ListedTravelApproval]:
-    if observation:
-        observation.stage = "list"
-        observation.templates = len(profiles)
     listed: dict[str, ListedTravelApproval] = {}
     for profile in profiles:
         page_count = 0
@@ -439,8 +392,6 @@ async def _list_approval_references(
                 if page_count >= _MAX_PAGES_PER_PROFILE:
                     raise _result_limit_error()
                 page_count += 1
-                if observation:
-                    observation.list_requests += 1
                 page = await workflow.list_process_instance_ids(
                     process_code=profile.process_code,
                     start_time=upstream_window.start_time_ms,
@@ -471,8 +422,6 @@ async def _list_approval_references(
                         current_user_id=current_user_id,
                         query_window=query_window,
                     )
-                    if observation:
-                        observation.listed = len(listed)
                 if page.next_token is None:
                     break
                 next_token = page.next_token
@@ -545,11 +494,7 @@ async def _resolve_details(
     workflow: DingTalkWorkflowClient,
     listed: tuple[ListedTravelApproval, ...],
     catalog: OaTemplateCatalogLike,
-    *,
-    observation: TravelApprovalQueryObservation | None = None,
 ) -> tuple[TravelApprovalCandidate | None, ...]:
-    if observation:
-        observation.stage = "details"
     if not listed:
         return ()
     semaphore = asyncio.Semaphore(_DETAIL_CONCURRENCY)
@@ -557,14 +502,7 @@ async def _resolve_details(
     async def resolve(reference: ListedTravelApproval) -> TravelApprovalCandidate | None:
         async with semaphore:
             instance = await workflow.get_process_instance(reference.instance_id)
-        if observation:
-            observation.details_read += 1
-        candidate, reason = evaluate_travel_approval_candidate(reference, instance, catalog)
-        if observation:
-            observation.evaluated += 1
-            if reason:
-                observation.rejected(reason)
-        return candidate
+        return evaluate_travel_approval_candidate(reference, instance, catalog)[0]
 
     tasks = [asyncio.create_task(resolve(reference)) for reference in listed]
     try:

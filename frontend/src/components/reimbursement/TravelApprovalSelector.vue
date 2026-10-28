@@ -48,25 +48,7 @@ const fromDate = ref('')
 const toDate = ref('')
 const keyword = ref('')
 const localError = ref('')
-const copyMessage = ref('')
-const manualCopy = ref(false)
 const candidateCache = new Map<string, OaTravelApproval>()
-
-watch(() => drafts.travelApprovalsRequestId, () => { copyMessage.value = ''; manualCopy.value = false })
-
-async function copyRequestId(): Promise<void> {
-  const id = drafts.travelApprovalsRequestId
-  if (!id) return
-  try {
-    await navigator.clipboard.writeText(id)
-    if (drafts.travelApprovalsRequestId === id) copyMessage.value = '排查编号已复制，可发给管理员查看运行记录'
-  } catch {
-    if (drafts.travelApprovalsRequestId === id) {
-      manualCopy.value = true
-      copyMessage.value = '请选中下方排查编号手动复制'
-    }
-  }
-}
 
 const selectedIds = computed(() => new Set(
   props.modelValue.map((selection) => selection.processInstanceId),
@@ -335,32 +317,6 @@ function accountingLabel(row: ApprovalRow): string {
       </template>
     </el-alert>
 
-    <div
-      v-if="!readonly && !drafts.loadingTravelApprovals && drafts.travelApprovalsRequestId && (drafts.travelApprovalsError || drafts.travelApprovals.length === 0)"
-      class="travel-query-alert"
-      data-testid="travel-query-support"
-    >
-      <el-button
-        link
-        type="primary"
-        @click="copyRequestId"
-      >
-        复制排查编号
-      </el-button>
-      <p
-        v-if="copyMessage"
-        role="status"
-      >
-        {{ copyMessage }}
-      </p>
-      <el-input
-        v-if="manualCopy"
-        :model-value="drafts.travelApprovalsRequestId"
-        readonly
-        aria-label="手动复制审批查询排查编号"
-      />
-    </div>
-
     <el-skeleton
       v-if="drafts.loadingTravelApprovals && rows.length === 0"
       :rows="3"
@@ -369,7 +325,9 @@ function accountingLabel(row: ApprovalRow): string {
     />
     <el-empty
       v-else-if="rows.length === 0"
-      :description="drafts.travelApprovalsError ? '审批查询未完成，请重试或提供排查编号' : '当前查询范围内没有已通过的出差审批'"
+      :description="localError || drafts.travelApprovalsError
+        ? '审批查询未完成，请重试'
+        : '当前查询范围内没有已通过的出差审批'"
       :image-size="72"
     >
       <el-button

@@ -12,41 +12,6 @@ import type {
 } from '@/types/reimbursements'
 import TravelApprovalSelector from './TravelApprovalSelector.vue'
 
-describe.each([false, true])('Travel approval support request id mobile=%s', (mobile) => {
-  beforeEach(() => {
-    setActivePinia(createPinia())
-    window.ResizeObserver = class ResizeObserver { observe(): void {} unobserve(): void {} disconnect(): void {} }
-  })
-  it('offers copying for a successful empty query and falls back on HTTP', async () => {
-    const drafts = useReimbursementDraftStore()
-    vi.spyOn(drafts, 'loadTravelApprovals').mockResolvedValue()
-    drafts.travelApprovalsRequestId = 'synthetic-empty-request'
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error('unavailable')) } })
-    const wrapper = mount(TravelApprovalSelector, { props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] } })
-    await wrapper.findAll('button').find((button) => button.text() === '复制排查编号')!.trigger('click')
-    await nextTick(); await nextTick()
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith('synthetic-empty-request')
-    expect(wrapper.get('[aria-label="手动复制审批查询排查编号"]').element).toHaveProperty('value', 'synthetic-empty-request')
-    drafts.travelApprovalsRequestId = ''
-    await nextTick()
-    expect(wrapper.find('[data-testid="travel-query-support"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-  it('distinguishes a failed query from a successful empty query and hides support details while loading', async () => {
-    const drafts = useReimbursementDraftStore()
-    drafts.travelApprovalsRequestId = 'synthetic-failed-request'
-    drafts.travelApprovalsError = '合成限流'
-    const wrapper = mount(TravelApprovalSelector, { props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] } })
-    expect(wrapper.text()).toContain('审批查询未完成')
-    expect(wrapper.text()).not.toContain('当前查询范围内没有已通过')
-    expect(wrapper.find('[data-testid="travel-query-support"]').exists()).toBe(true)
-    drafts.loadingTravelApprovals = true
-    await nextTick()
-    expect(wrapper.find('[data-testid="travel-query-support"]').exists()).toBe(false)
-    wrapper.unmount()
-  })
-})
-
 const candidate: OaTravelApproval = {
   processInstanceId: 'travel-1',
   profileKey: 'business',
@@ -342,4 +307,18 @@ describe('TravelApprovalSelector', () => {
     expect(wrapper.text()).toContain('出差类别与已选审批不同')
     wrapper.unmount()
   })
+  it.each([false, true])('distinguishes a failed approval query from an empty result, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.travelApprovalsError = '合成上游查询超时'
+    const wrapper = mount(TravelApprovalSelector, {
+      props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] },
+    })
+    expect(wrapper.text()).toContain('合成上游查询超时')
+    expect(wrapper.findComponent({ name: 'ElEmpty' }).props('description')).toBe('审批查询未完成，请重试')
+    drafts.travelApprovalsError = ''
+    await nextTick()
+    expect(wrapper.findComponent({ name: 'ElEmpty' }).props('description')).toBe('当前查询范围内没有已通过的出差审批')
+    wrapper.unmount()
+  })
+
 })

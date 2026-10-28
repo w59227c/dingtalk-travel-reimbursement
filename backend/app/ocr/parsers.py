@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
-from app.domain.categories import ExpenseCategory
+from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
 from app.ocr.document_evidence import extract_document_numbers, extract_rail_type
 from app.ocr.extractors import (
     PASSENGER_OCCURRENCE_DATE_PREFIX,
@@ -328,15 +328,59 @@ class ReceiptParserRegistry:
         )
         return replace(parsed, category=category, warnings=warnings)
 
-    def parse(self, lines: list[OcrLine], context: ParseContext) -> ParsedExpense:
+    def parse(
+        self, lines: list[OcrLine], context: ParseContext, *, trace: dict[str, object] | None = None
+    ) -> ParsedExpense:
         parser = max(self._parsers, key=lambda candidate: candidate.match(lines))
-        if parser.match(lines) < 0.2:
-            parsed = self._fallback.parse(lines, context)
-        else:
-            parsed = parser.parse(lines, context)
+        selected = self._fallback if parser.match(lines) < 0.2 else parser
+        parsed = selected.parse(lines, context)
+        base_category = parsed.category
         parsed = _with_transport_evidence(
             self._apply_keyword_fallback(parsed, lines), lines, self._keyword_rules
         )
+        if trace is not None:
+            matches = GenericInvoiceParser(keyword_rules=self._keyword_rules).matching_rules(lines)
+            keyword_text = "\n".join(line.text for line in invoice_keyword_lines(lines))
+            categories = {rule.category for rule in matches}
+            policy = (
+                "keyword_match"
+                if base_category is not ExpenseCategory.OTHER
+                and isinstance(selected, GenericInvoiceParser)
+                else "specialized_parser"
+                if base_category is not ExpenseCategory.OTHER
+                else "keyword_fallback"
+                if parsed.category is not ExpenseCategory.OTHER
+                else "keyword_conflict"
+                if len(categories) > 1
+                else "passenger_guard"
+                if is_passenger_transport_text(keyword_text)
+                else "no_keyword_match"
+            )
+            trace.update(
+                {
+                    "parser": type(selected).__name__,
+                    "parserScores": [
+                        {"parser": type(item).__name__, "score": round(item.match(lines), 4)}
+                        for item in self._parsers
+                    ],
+                    "selectionThreshold": 0.2,
+                    "baseCategory": base_category.value,
+                    "finalCategory": parsed.category.value,
+                    "policy": policy,
+                    "configuredKeywordCount": len(self._keyword_rules),
+                    "matchedRules": [
+                        {
+                            "keyword": rule.keyword,
+                            "category": rule.category.value,
+                            "categoryName": CATEGORY_BY_ID[rule.category].name,
+                            "transportType": rule.transport_type,
+                        }
+                        for rule in matches
+                    ],
+                    "classificationText": keyword_text[:100000],
+                    "classificationTextTruncated": len(keyword_text) > 100000,
+                }
+            )
         invoice_numbers, order_numbers = extract_document_numbers(lines)
         return replace(
             parsed,

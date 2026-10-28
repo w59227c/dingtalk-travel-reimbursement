@@ -5,7 +5,6 @@ import logging
 from datetime import UTC, datetime
 
 from app.core.request_id import current_request_id
-from app.core.runtime_events import RuntimeEventHandler
 
 
 class JsonFormatter(logging.Formatter):
@@ -46,7 +45,6 @@ def configure_logging(level: str) -> None:
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
-    root.addHandler(RuntimeEventHandler())
     root.setLevel(level)
 
     # httpx logs full request URLs at INFO. DingTalk's legacy OAPI carries the

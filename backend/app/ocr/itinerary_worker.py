@@ -11,6 +11,7 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 from app.core.errors import ApiError
+from app.ocr.diagnostics import RecognitionDiagnostics
 from app.ocr.engine import OcrRuntimeError
 from app.ocr.extractors import normalized_lines
 from app.ocr.itinerary import ItineraryPage, parse_itinerary_pages
@@ -51,8 +52,9 @@ def recognize_itinerary_worker(
     fake_engine: LocalOcrEngine | None = None,
     classify: bool = False,
     keyword_rules: tuple[ReceiptKeywordRule, ...] | None = None,
+    diagnostics: bool = False,
 ) -> dict[str, object]:
-    """One bounded process for the entire document; raw text never leaves it."""
+    """One bounded process; raw text leaves only for explicit admin diagnostics."""
 
     try:
         apply_worker_limits(raw_worker_limits)
@@ -70,6 +72,7 @@ def recognize_itinerary_worker(
         characters = 0
         engine = fake_engine
         receipt_context: ParseContext | None = None
+        diagnostic_capture = RecognitionDiagnostics() if diagnostics and classify else None
 
         def expense_context() -> ParseContext:
             nonlocal receipt_context
@@ -128,6 +131,7 @@ def recognize_itinerary_worker(
 
         for index in range(page_count):
             text, layout = "", ""
+            scanned_text: str | None = None
             native_receipt_lines: list[OcrLine] = []
             if reader is not None:
                 pdf_logger = logging.getLogger("pypdf")
@@ -197,12 +201,21 @@ def recognize_itinerary_worker(
                     )
                     if candidate_kind == "expense":
                         candidate_lines = [(line.text, line.confidence) for line in candidate.lines]
+                        before = (
+                            [value for value, _score in candidate_lines]
+                            if diagnostic_capture
+                            else []
+                        )
                         _append_passenger_fields(
                             candidate_lines,
                             text,
                             layout,
                             pdf_path=path if page_count == 1 else None,
                         )
+                        if diagnostic_capture is not None:
+                            diagnostic_capture.record_derived(
+                                index + 1, before, (value for value, _score in candidate_lines)
+                            )
                         native_receipt_lines = normalized_lines(
                             [OcrLine(value, score) for value, score in candidate_lines]
                         )
@@ -276,6 +289,8 @@ def recognize_itinerary_worker(
                 source = "paddle"
                 try:
                     lines, layout = scan_page(index)
+                    if diagnostic_capture is not None:
+                        scanned_text = "\n".join(line.text for line in lines)
                 except (OcrRuntimeError, ApiError, OSError, ValueError):
                     if not native_receipt_lines:
                         raise
@@ -290,6 +305,21 @@ def recognize_itinerary_worker(
                 problems.append("ITINERARY_TEXT_LIMIT")
                 break
             pages.append(ItineraryPage(index + 1, lines, layout, source))
+            if diagnostic_capture is not None:
+                if reader is not None:
+                    diagnostic_capture.record_extraction(
+                        index + 1,
+                        "pdf_text",
+                        text,
+                        used_for_parsing=native_enough or bool(native_receipt_lines),
+                    )
+                if scanned_text is not None:
+                    diagnostic_capture.record_extraction(
+                        index + 1,
+                        "paddle",
+                        scanned_text,
+                        used_for_parsing=True,
+                    )
         if classify:
             from app.ocr.materials import classify_material
             from app.ocr.parsers import ReceiptParserRegistry
@@ -303,17 +333,24 @@ def recognize_itinerary_worker(
                 "reason": reason,
                 "pageCount": page_count,
             }
+            trace: dict[str, object] | None = {} if diagnostic_capture is not None else None
             if kind == "expense":
                 raw_lines = [(line.text, line.confidence) for line in pages[0].lines]
+                before = [value for value, _score in raw_lines] if diagnostic_capture else []
                 _append_passenger_fields(
                     raw_lines,
                     "\n".join(line.text for line in pages[0].lines),
                     pages[0].layout_text,
                     pdf_path=path if extension == "pdf" and page_count == 1 else None,
                 )
+                if diagnostic_capture is not None:
+                    diagnostic_capture.record_derived(
+                        1, before, (value for value, _score in raw_lines)
+                    )
                 result["expense"] = ReceiptParserRegistry(keyword_rules=keyword_rules).parse(
                     normalized_lines([OcrLine(text, score) for text, score in raw_lines]),
                     expense_context(),
+                    trace=trace,
                 )
             elif kind == "itinerary":
                 result["parsed"] = parse_itinerary_pages(
@@ -332,6 +369,13 @@ def recognize_itinerary_worker(
                 from app.ocr.hotel_bills import hotel_bill_details
 
                 result["hotelBillDetails"] = hotel_bill_details(pages)
+            if trace is not None and diagnostic_capture is not None:
+                trace.update(
+                    diagnostic_capture.as_dict(
+                        complete=not problems and len(pages) == page_count,
+                    )
+                )
+                result["diagnostic"] = trace
             return result
         return {
             "ok": True,

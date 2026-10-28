@@ -1,23 +1,52 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { recoverReimbursementSubmission } from '@/api/submissionRecovery'
+import { useAuthStore } from '@/stores/auth'
 import type { ReimbursementSubmission } from '@/types/reimbursements'
 
+const props = withDefaults(defineProps<{ mobile?: boolean }>(), { mobile: false })
+const auth = useAuthStore()
+let generation = 0
 const submissionId = ref('')
 const processInstanceId = ref('')
 const verificationNote = ref('')
 const recovering = ref(false)
 const result = ref<ReimbursementSubmission | null>(null)
-const resultStatusLabel = computed(() => result.value?.status === 'VERIFYING'
-  ? '正在重新核对审批'
-  : result.value?.status === 'ORPHAN_CLEANUP'
-    ? '正在清理未关联附件'
-    : '处理状态已更新')
+const resultStatusLabel = computed(() => {
+  switch (result.value?.status) {
+    case 'VERIFYING': return '正在重新核对审批'
+    case 'ORPHAN_CLEANUP': return '正在清理未关联附件'
+    case 'SUBMITTED': return '已完成回读确认'
+    case 'MANUAL_REVIEW': return '仍需人工核对'
+    case 'FAILED_FINAL': return '处理失败，请核对错误提示'
+    case 'FAILED_RETRYABLE': return '等待系统重试'
+    default: return '处理状态已更新，请继续核对'
+  }
+})
+
+function invalidate(): void {
+  generation += 1
+  result.value = null
+  recovering.value = false
+}
+watch([submissionId, processInstanceId, verificationNote], () => {
+  generation += 1
+  result.value = null
+}, { flush: 'sync' })
+watch(() => [auth.session?.user.userId, auth.isAdmin], () => {
+  invalidate()
+  submissionId.value = ''
+  processInstanceId.value = ''
+  verificationNote.value = ''
+}, { flush: 'sync' })
+onBeforeUnmount(invalidate)
 
 async function attachInstance(): Promise<void> {
+  if (recovering.value) return
+  const version = generation
   const submission = submissionId.value.trim()
   const instance = processInstanceId.value.trim()
   const note = verificationNote.value.trim()
@@ -27,26 +56,32 @@ async function attachInstance(): Promise<void> {
   }
   recovering.value = true
   try {
-    result.value = await recoverReimbursementSubmission(submission, {
+    const recovered = await recoverReimbursementSubmission(submission, {
       action: 'ATTACH_INSTANCE',
       processInstanceId: instance,
       verificationNote: note,
     })
+    if (version !== generation) return
+    result.value = recovered
     ElMessage.success('已恢复审批回读，系统将继续核对')
   } catch (error) {
+    if (version !== generation) return
     ElMessage.error(apiErrorMessage(error, '恢复审批核对失败'))
   } finally {
-    recovering.value = false
+    if (version === generation) recovering.value = false
   }
 }
 
 async function confirmNotCreated(): Promise<void> {
+  if (recovering.value) return
+  const version = generation
   const submission = submissionId.value.trim()
   const note = verificationNote.value.trim()
   if (!submission || !note) {
     ElMessage.error('请填写提交记录 ID 和核对依据')
     return
   }
+  recovering.value = true
   try {
     await ElMessageBox.confirm(
       '仅在钉钉中确认这次 OA 确实没有创建时继续。系统会清理已上传但未关联的附件。',
@@ -60,30 +95,34 @@ async function confirmNotCreated(): Promise<void> {
       },
     )
   } catch {
+    if (version === generation) recovering.value = false
     return
   }
-  await recoverNotCreated(submission, note, false)
+  if (version === generation) await recoverNotCreated(submission, note, false, version)
 }
 
 async function recoverNotCreated(
   submission: string,
   note: string,
   confirmUncertainUploadsAbsent: boolean,
+  version: number,
 ): Promise<void> {
   recovering.value = true
   try {
-    result.value = await recoverReimbursementSubmission(submission, {
+    const recovered = await recoverReimbursementSubmission(submission, {
       action: 'CONFIRM_NOT_CREATED',
       verificationNote: note,
       confirmUncertainUploadsAbsent,
     })
+    if (version !== generation) return
+    result.value = recovered
     ElMessage.success('已进入自动清理流程')
   } catch (error) {
+    if (version !== generation) return
     if (
       !confirmUncertainUploadsAbsent
       && apiErrorCode(error) === 'OA_REMOTE_FILE_CONFIRMATION_REQUIRED'
     ) {
-      recovering.value = false
       try {
         await ElMessageBox.confirm(
           '有附件的提交结果未知。请先在钉钉文件中确认这些附件也不存在；确认后系统才会放弃未知记录并继续清理。',
@@ -99,12 +138,12 @@ async function recoverNotCreated(
       } catch {
         return
       }
-      await recoverNotCreated(submission, note, true)
+      if (version === generation) await recoverNotCreated(submission, note, true, version)
       return
     }
     ElMessage.error(apiErrorMessage(error, '异常提交恢复失败'))
   } finally {
-    recovering.value = false
+    if (version === generation) recovering.value = false
   }
 }
 </script>
@@ -122,61 +161,77 @@ async function recoverNotCreated(
         </el-tag>
       </div>
     </template>
-    <el-alert
-      title="仅处理停在“需要人工核对”的报销提交；普通失败会由系统自动重试。"
-      type="info"
-      :closable="false"
-      show-icon
-    />
-    <el-form label-position="top">
-      <el-form-item label="提交记录 ID">
-        <el-input
-          v-model="submissionId"
-          maxlength="36"
-          placeholder="由报销人页面上的异常信息提供"
-        />
-      </el-form-item>
-      <el-form-item label="已找到的钉钉审批实例 ID（可选）">
-        <el-input
-          v-model="processInstanceId"
-          maxlength="128"
-          placeholder="确认 OA 已创建时填写"
-        />
-      </el-form-item>
-      <el-form-item label="核对依据">
-        <el-input
-          v-model="verificationNote"
-          data-testid="verification-note"
-          maxlength="500"
-          show-word-limit
-          placeholder="简要记录核对位置、时间范围和判断依据"
-        />
-      </el-form-item>
-      <div class="submission-recovery-actions">
-        <el-button
-          type="primary"
-          :loading="recovering"
-          @click="attachInstance"
+    <details class="recovery-details">
+      <summary>展开人工核对与恢复</summary><p class="field-help">
+        先按提交记录核对钉钉审批，再选择处理方式。只有回读核对或附件清理，不会重新创建 OA。
+      </p>
+      <el-alert
+        title="仅处理停在“需要人工核对”的报销提交；普通失败会由系统自动重试。"
+        type="info"
+        :closable="false"
+        show-icon
+      />
+      <el-form
+        label-position="top"
+        :disabled="recovering"
+      >
+        <el-form-item label="提交记录 ID">
+          <el-input
+            v-model="submissionId"
+            maxlength="36"
+            placeholder="由报销人页面上的异常信息提供"
+          />
+        </el-form-item>
+        <el-form-item label="已找到的钉钉审批实例 ID（可选）">
+          <el-input
+            v-model="processInstanceId"
+            maxlength="128"
+            placeholder="确认 OA 已创建时填写"
+          />
+        </el-form-item>
+        <el-form-item label="核对依据">
+          <el-input
+            v-model="verificationNote"
+            type="textarea"
+            :rows="3"
+            data-testid="verification-note"
+            maxlength="500"
+            show-word-limit
+            placeholder="简要记录核对位置、时间范围和判断依据"
+          />
+        </el-form-item>
+        <p class="field-help">
+          已找到 OA：填写实例 ID 后继续回读；确认 OA 未创建：记录核对依据后进入附件清理。
+        </p>
+        <div
+          class="submission-recovery-actions"
+          :class="{ 'submission-recovery-actions--mobile': props.mobile }"
         >
-          绑定审批并继续核对
-        </el-button>
-        <el-button
-          type="danger"
-          plain
-          :disabled="recovering"
-          @click="confirmNotCreated"
-        >
-          确认未创建并清理
-        </el-button>
-      </div>
-    </el-form>
+          <el-button
+            type="primary"
+            :loading="recovering"
+            @click="attachInstance"
+          >
+            绑定审批并继续核对
+          </el-button>
+          <el-button
+            type="danger"
+            plain
+            :disabled="recovering"
+            @click="confirmNotCreated"
+          >
+            确认未创建并清理
+          </el-button>
+        </div>
+      </el-form>
+    </details>
     <el-alert
       v-if="result"
       class="submission-recovery-result"
-      type="success"
+      :type="result.status === 'SUBMITTED' ? 'success' : result.status === 'MANUAL_REVIEW' || result.status === 'FAILED_FINAL' ? 'warning' : 'info'"
       :closable="false"
       :title="resultStatusLabel"
-      :description="result.processInstanceId ? `审批实例：${result.processInstanceId}` : '系统正在清理未关联附件'"
+      :description="result.error?.message || (result.processInstanceId ? `审批实例：${result.processInstanceId}` : '请稍后刷新报销单查看最新状态')"
       show-icon
     />
   </el-card>
@@ -203,4 +258,10 @@ async function recoverNotCreated(
   margin-top: 18px;
   margin-bottom: 0 !important;
 }
+</style>
+
+<style scoped>
+.recovery-details summary { cursor: pointer; color: var(--el-color-primary); }
+.submission-recovery-actions--mobile { align-items: stretch; flex-direction: column; }
+.submission-recovery-actions--mobile :deep(.el-button + .el-button) { margin-left: 0; }
 </style>

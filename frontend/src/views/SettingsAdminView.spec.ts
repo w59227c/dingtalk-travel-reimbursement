@@ -14,10 +14,9 @@ import {
 } from '@/api/receiptKeywords'
 import { getAdminExpenseSettings, updateExpenseSettings } from '@/api/settings'
 import SettingsAdminView from './SettingsAdminView.vue'
-import RuntimeEventsCard from '@/components/settings/RuntimeEventsCard.vue'
+import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
 
 vi.mock('@/api/expenses', () => ({ getExpenseCategories: vi.fn() }))
-vi.mock('@/api/runtimeEvents', () => ({ listRuntimeEvents: vi.fn().mockResolvedValue({ items: [], nextCursor: null, coverage: { records: 0, oldestAt: null, newestAt: null }, limits: { retentionDays: 7, maxRecords: 10000, maxBytes: 16777216 }, collector: { pending: 0, droppedSinceStart: 0, writeError: false } }) }))
 vi.mock('@/api/oaTemplates', () => ({
   confirmOaTemplateCatalog: vi.fn(),
   getOaTemplateCatalog: vi.fn(),
@@ -127,9 +126,6 @@ describe('SettingsAdminView receipt keywords', () => {
     })
     expect(wrapper.get('#approval-diagnostics').text()).toContain('出差审批诊断')
     expect(wrapper.get('a[href="#approval-diagnostics"]').text()).toBe('审批诊断')
-    expect(wrapper.get('a[href="#runtime-events"]').text()).toBe('运行记录')
-    expect(wrapper.findComponent(RuntimeEventsCard).exists()).toBe(true)
-    expect(wrapper.get('.runtime-filters').classes().includes('runtime-filters--mobile')).toBe(mobile)
     wrapper.unmount()
   })
 
@@ -216,6 +212,9 @@ describe('SettingsAdminView receipt keywords', () => {
       global: { plugins: [createPinia(), ElementPlus], stubs: { RouterLink: true } },
     })
     await flushPromises()
+    expect(wrapper.text()).toContain('出差审批诊断')
+    expect(wrapper.text()).not.toContain('运行记录')
+    expect(wrapper.getComponent(ReceiptDiagnosticsCard).props()).toMatchObject({ mobile })
     expect(wrapper.get('[aria-label="市内交通费通用关键词"]').text()).toContain('客运服务费')
     expect(wrapper.get('[aria-label="市内交通费出租车关键词"]').text()).toContain('出租车')
     const rideGroup = wrapper.get('[aria-label="市内交通费网约车关键词"]')

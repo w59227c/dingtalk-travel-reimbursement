@@ -8,7 +8,6 @@ from app.models.reimbursement import (
     ReimbursementSubmissionRecoveryAudit,
     ReimbursementUpload,
 )
-from app.models.runtime_event import RuntimeEventRecord
 from app.models.session import UserSession
 from app.models.setting import Setting
 
@@ -22,6 +21,5 @@ __all__ = [
     "ReimbursementSubmissionRecoveryAudit",
     "ReimbursementUpload",
     "Setting",
-    "RuntimeEventRecord",
     "UserSession",
 ]

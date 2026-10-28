@@ -44,14 +44,14 @@
 ## 鉴权、隐私与安全
 
 - 所有业务 API 都要求已认证 Session；所有写操作都要求 CSRF 校验；管理员权限必须由后端强制执行。
-- 钉钉密钥只能保存在后端。不得暴露 staging 目录或原始 OCR 文本，不得在日志中记录凭据、原始 OCR 内容、真实员工数据、审批标识、项目、票据或生产文件哈希。
+- 钉钉密钥只能保存在后端。不得暴露 staging 目录；原始 OCR 文本仅允许管理员在票据诊断中临时查看自己本次上传材料的结果，不得持久化诊断原文，不得在日志中记录凭据、原始 OCR 内容、真实员工数据、审批标识、项目、票据或生产文件哈希。
 - 测试只能使用合成或彻底脱敏的 fixture。私密导出和诊断文件必须使用仓库已忽略的私密文件名规范。
 - 不得为了让测试通过而放宽模板校验、文件校验、归属检查、迁移保护、readiness 检查或 OA 回读。
 - 工作区有未提交修改时要保留无关内容。除非用户明确要求，不得 commit、push、部署或修改真实钉钉/OA 环境。
 
 ## 数据库迁移
 
-- 始终保持唯一 Alembic head。当前记录的 head 为 `20261027_0022`；实际值应执行 `cd backend && uv run --frozen --extra dev alembic heads` 获取，不得只信任本句。
+- 始终保持唯一 Alembic head。当前记录的 head 为 `20261028_0023`；实际值应执行 `cd backend && uv run --frozen --extra dev alembic heads` 获取，不得只信任本句。
 - 数据库结构变更通常需要同步更新 SQLAlchemy model、必要的 model export、Alembic revision、迁移测试、readiness 的 revision/table/column 预期、测试数据库 revision 初始化，以及 `README.md` 和 `docs/DINGTALK_OA_INTEGRATION_DESIGN.md` 中的当前迁移说明。
 - 同时测试受支持旧数据的升级路径和空数据库升级路径。若降级会静默丢失业务记录、审计证据、锁定快照或文件关系，必须拒绝降级。
 - 生产迁移前必须对同一时点的 SQLite 和 staging 一致性备份。
