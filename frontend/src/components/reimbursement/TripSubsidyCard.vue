@@ -39,6 +39,16 @@ const excludedEndpoints = [
 
 const expense = useExpenseStore()
 const subsidyGroups = computed(() => groupOverlappingSubsidyTrips(expense.subsidyTrips))
+// Element Plus resets an open calendar when its default Date reference changes.
+const subsidyCalendarStarts = computed<Map<string, Date | undefined>>((previous) => {
+  const starts = new Map<string, Date | undefined>()
+  for (const group of subsidyGroups.value) {
+    const startDate = subsidyWindow(group).startDate
+    const existing = previous?.get(group.key)
+    starts.set(group.key, existing && calendarDay(existing) === startDate ? existing : parseCalendarDay(startDate))
+  }
+  return starts
+})
 const subsidyCalculationError = computed(() => {
   if (!expense.includeSubsidy || !expense.calculationError || expense.itemReadinessError) return ''
   if (expense.calculationError === expense.policyInputError) return ''
@@ -89,9 +99,24 @@ function setWindow(group: SubsidyTripGroup, field: 'startDate' | 'endDate' | 'st
   windowErrors.value[group.key] = updateSubsidyWindow(group, field, normalized)
 }
 
-function disabledDate(group: SubsidyTripGroup, date: Date): boolean {
-  const day = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-  return day < group.startDate || day > group.endDate
+function calendarDay(date: Date): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function parseCalendarDay(value: string): Date | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined
+  const date = new Date(`${value}T00:00:00`)
+  return Number.isFinite(date.getTime()) && calendarDay(date) === value ? date : undefined
+}
+
+function disabledDate(bounds: Pick<TripInput, 'startDate' | 'endDate'>, date: Date): boolean {
+  const day = calendarDay(date)
+  return !parseCalendarDay(bounds.startDate) || !parseCalendarDay(bounds.endDate)
+    || day < bounds.startDate || day > bounds.endDate
+}
+
+function disabledExcludedDate(group: SubsidyTripGroup, date: Date): boolean {
+  return disabledDate(group, date) || disabledDate(subsidyWindow(group), date)
 }
 
 function setPolicyConfirmed(group: SubsidyTripGroup, value: boolean): void {
@@ -314,6 +339,8 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                         :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
                         value-format="YYYY-MM-DD"
                         format="YYYY-MM-DD"
+                        :default-value="subsidyCalendarStarts.get(group.key)"
+                        :disabled-date="(date: Date) => disabledExcludedDate(group, date)"
                         :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${endpoint.label}日期`"
                         @update:model-value="setExcludedDate(excluded, endpoint.dateField, $event)"
                       />
