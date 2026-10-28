@@ -39,14 +39,36 @@ describe.each([false, true])('receipt diagnostic card mobile=%s', (mobile) => {
     await picker.trigger('change')
   }
 
+  it('opens the native file picker from the styled button and displays the selected filename', async () => {
+    const wrapper = card()
+    const picker = wrapper.get<HTMLInputElement>('input[type=file]')
+    const open = vi.spyOn(picker.element, 'click')
+    const button = wrapper.get('[aria-label="选择诊断票据"]')
+    expect(picker.element.hidden).toBe(true)
+    expect(button.element.tagName).toBe('BUTTON')
+    expect(button.attributes('type')).toBe('button')
+    expect(button.text()).toBe('选择票据')
+    await button.trigger('click')
+    expect(open).toHaveBeenCalledOnce()
+    expect(diagnoseReceipt).not.toHaveBeenCalled()
+    const filename = 'synthetic-receipt-with-a-long-filename.png'
+    await choose(wrapper, filename)
+    expect(wrapper.get('.receipt-diagnostic-filename').text()).toBe(filename)
+    expect(button.text()).toBe('更换票据')
+    await wrapper.findAll('button').find((item) => item.text() === '清空')!.trigger('click')
+    expect(wrapper.get('.receipt-diagnostic-filename').text()).toBe('尚未选择票据')
+    expect(button.text()).toBe('选择票据')
+  })
+
   it('shows escaped OCR text, matching evidence and actual classification on explicit request', async () => {
     const wrapper = card()
     await choose(wrapper)
-    await wrapper.get('[aria-label="诊断参考年份"]').setValue('2026')
+    expect(wrapper.find('input[type="number"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('参考年份')
     expect(diagnoseReceipt).not.toHaveBeenCalled()
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(diagnoseReceipt).toHaveBeenCalledWith(expect.any(File), 2026, expect.any(AbortSignal))
+    expect(diagnoseReceipt).toHaveBeenCalledWith(expect.any(File), expect.any(AbortSignal))
     expect(wrapper.get('[aria-label="诊断识别原文"]').text()).toBe('<script>合成文具</script>')
     expect(wrapper.find('script').exists()).toBe(false)
     expect(wrapper.text()).toContain('“合成文具” → 办公费')
@@ -64,11 +86,7 @@ describe.each([false, true])('receipt diagnostic card mobile=%s', (mobile) => {
     await choose(wrapper, 'test.txt')
     expect(wrapper.text()).toContain('请选择 JPG、PNG 或单页 PDF')
     await choose(wrapper)
-    await wrapper.get('[aria-label="诊断参考年份"]').setValue('1800')
-    await wrapper.get('form').trigger('submit')
-    expect(wrapper.text()).toContain('参考年份应在')
     expect(diagnoseReceipt).not.toHaveBeenCalled()
-    await wrapper.get('[aria-label="诊断参考年份"]').setValue('2026')
     vi.mocked(diagnoseReceipt).mockRejectedValueOnce(new Error('timeout'))
     await wrapper.get('form').trigger('submit')
     await flushPromises()
@@ -76,16 +94,15 @@ describe.each([false, true])('receipt diagnostic card mobile=%s', (mobile) => {
     expect(wrapper.find('[aria-label="票据诊断结果"]').exists()).toBe(false)
   })
 
-  it.each(['clear', 'file', 'year', 'identity', 'unmount'])('invalidates a pending response after %s', async (action) => {
+  it.each(['clear', 'file', 'identity', 'unmount'])('invalidates a pending response after %s', async (action) => {
     let finish!: (data: ReceiptDiagnostic) => void
     vi.mocked(diagnoseReceipt).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
     const wrapper = card()
     await choose(wrapper)
     await wrapper.get('form').trigger('submit')
-    const signal = vi.mocked(diagnoseReceipt).mock.calls[0]![2]!
+    const signal = vi.mocked(diagnoseReceipt).mock.calls[0]![1]!
     if (action === 'clear') await wrapper.findAll('button').find((button) => button.text() === '取消并清空')!.trigger('click')
     if (action === 'file') await choose(wrapper, 'other.png')
-    if (action === 'year') await wrapper.get('[aria-label="诊断参考年份"]').setValue('2026')
     if (action === 'identity') useAuthStore().$patch({ session: { user: { userId: 'changed' }, isAdmin: true } })
     if (action === 'unmount') wrapper.unmount()
     expect(signal.aborted).toBe(true)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, Request, Response
 
 from app.core.errors import ApiError
 from app.core.request_id import request_id_for
@@ -32,7 +32,6 @@ async def diagnose_receipt(
     request: Request,
     response: Response,
     current: Annotated[CurrentSession, Depends(require_admin_csrf)],
-    trip_year: Annotated[int | None, Query(alias="tripYear", ge=2000, le=2100)] = None,
 ) -> dict[str, object]:
     state = request.app.state
     settings = state.settings
@@ -62,7 +61,7 @@ async def diagnose_receipt(
             revalidate()
             payload = await state.ocr_service.recognize_material_file(
                 stored,
-                reference_year=trip_year,
+                reference_year=None,
                 keyword_rules=rules,
                 diagnostics=True,
             )

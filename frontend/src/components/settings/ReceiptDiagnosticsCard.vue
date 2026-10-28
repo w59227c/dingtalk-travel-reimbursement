@@ -5,11 +5,10 @@ import { apiErrorMessage } from '@/api/errors'
 import { diagnoseReceipt, type ReceiptDiagnostic } from '@/api/receiptDiagnostics'
 import { useAuthStore } from '@/stores/auth'
 
-const props = withDefaults(defineProps<{ mobile?: boolean }>(), { mobile: false })
+withDefaults(defineProps<{ mobile?: boolean }>(), { mobile: false })
 const auth = useAuthStore()
 const file = ref<File | null>(null)
 const input = ref<HTMLInputElement | null>(null)
-const year = ref('')
 const loading = ref(false)
 const report = ref<ReceiptDiagnostic | null>(null)
 const error = ref('')
@@ -68,7 +67,6 @@ function choose(event: Event): void {
   file.value = selected
   if (/\.(jpe?g|png)$/i.test(selected.name)) preview.value = URL.createObjectURL(selected)
 }
-watch(year, invalidate)
 watch(() => [auth.session?.user.userId, auth.isAdmin], clear, { flush: 'sync' })
 onBeforeUnmount(clear)
 
@@ -80,16 +78,12 @@ async function run(): Promise<void> {
     error.value = '请先选择一张票据'
     return
   }
-  if (year.value && (!/^\d{4}$/.test(year.value) || Number(year.value) < 2000 || Number(year.value) > 2100)) {
-    error.value = '参考年份应在 2000—2100 年之间'
-    return
-  }
   const active = new AbortController()
   controller = active
   const version = generation
   loading.value = true
   try {
-    const data = await diagnoseReceipt(selected, year.value ? Number(year.value) : undefined, active.signal)
+    const data = await diagnoseReceipt(selected, active.signal)
     if (version === generation && !active.signal.aborted) report.value = data
   } catch (failure) {
     if (version === generation && !active.signal.aborted) {
@@ -118,28 +112,31 @@ async function run(): Promise<void> {
       上传一张识别不准确的票据，核对识别文字与分类依据。使用当前关键词和正式识别流程；识别原文仅在本页临时显示，不写入报销单或日志；诊断文件在本次处理结束后清理。
     </p>
     <form @submit.prevent="run">
-      <div
-        class="receipt-diagnostic-inputs"
-        :class="{ 'receipt-diagnostic-inputs--mobile': props.mobile }"
-      >
-        <label>诊断票据<input
+      <div class="receipt-diagnostic-upload">
+        <input
           ref="input"
           type="file"
           accept=".jpg,.jpeg,.png,.pdf"
           aria-label="诊断票据文件"
+          hidden
           @change="choose"
-        ></label>
-        <label>参考年份（可选）<input
-          v-model="year"
-          type="number"
-          min="2000"
-          max="2100"
-          aria-label="诊断参考年份"
-          placeholder="无年份日期的解析依据"
-        ></label>
+        >
+        <el-button
+          type="primary"
+          plain
+          native-type="button"
+          aria-label="选择诊断票据"
+          @click="input?.click()"
+        >
+          {{ file ? '更换票据' : '选择票据' }}
+        </el-button>
+        <span
+          class="receipt-diagnostic-filename"
+          role="status"
+        >{{ file?.name || '尚未选择票据' }}</span>
       </div>
-      <p v-if="file">
-        {{ file.name }}
+      <p class="receipt-diagnostic-upload-help">
+        支持 JPG、PNG 或单页 PDF，每次选择一张。
       </p>
       <img
         v-if="preview"
@@ -268,10 +265,10 @@ async function run(): Promise<void> {
 
 <style scoped>
 .receipt-diagnostics-card { overflow-wrap: anywhere; }
-.receipt-diagnostic-inputs { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
-.receipt-diagnostic-inputs--mobile { grid-template-columns: 1fr; }
-.receipt-diagnostic-inputs label { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-.receipt-diagnostic-inputs input { min-width: 0; max-width: 100%; }
+.receipt-diagnostic-upload { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 12px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; background: var(--el-fill-color-extra-light); }
+.receipt-diagnostic-upload :deep(.el-button) { flex: 0 0 auto; margin: 0; }
+.receipt-diagnostic-filename { flex: 1 1 140px; min-width: 0; font-size: 13px; color: var(--el-text-color-regular); }
+.receipt-diagnostic-upload-help { margin: 6px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
 .receipt-diagnostic-preview { display: block; max-width: 100%; max-height: 240px; object-fit: contain; margin: 12px 0; }
 .receipt-diagnostic-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 16px 0; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; background: var(--el-fill-color-light); padding: 12px; }

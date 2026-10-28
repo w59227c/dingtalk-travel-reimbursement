@@ -35,7 +35,7 @@ def setup(client_factory):
 
 def post(client, token, **kwargs):
     return client.post(
-        PATH + "?tripYear=2026",
+        PATH,
         headers={"X-CSRF-Token": token},
         files={"files[]": ("synthetic.png", _image_bytes(), "image/png")},
         **kwargs,
@@ -57,8 +57,18 @@ def test_requires_session_live_admin_and_csrf(client_factory):
     no_uploads(client)
 
 
-def test_uses_current_rules_and_shared_worker_without_persisting_raw_text(client_factory, capsys):
+def test_uses_current_rules_and_shared_worker_without_persisting_raw_text(
+    client_factory, capsys, monkeypatch
+):
     client, token = setup(client_factory)
+    original = client.app.state.ocr_service.recognize_material_file
+    calls = []
+
+    async def observe(*args, **kwargs):
+        calls.append(kwargs)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(client.app.state.ocr_service, "recognize_material_file", observe)
     with client.app.state.database_session_factory() as database:
         database.add(
             ReceiptKeywordMapping(
@@ -68,12 +78,16 @@ def test_uses_current_rules_and_shared_worker_without_persisting_raw_text(client
         database.commit()
     response = post(client, token)
     assert response.status_code == 200, response.text
+    assert len(calls) == 1
+    assert calls[0]["reference_year"] is None
+    assert calls[0]["diagnostics"] is True
     assert response.headers["cache-control"] == "no-store"
     report = response.json()["data"]
     assert report["requestId"] and report["checkedAt"]
     recognized = report["recognition"]
     assert "fileId" not in recognized
     assert recognized["amount"] == "12.30"
+    assert recognized["date"] == "2026-09-03"
     assert recognized["categoryId"] == "office"
     trace = recognized["diagnostic"]
     assert trace["recognizedText"] == TEXT
@@ -143,7 +157,7 @@ def test_diagnostic_admission_uses_the_existing_global_ocr_slot(client_factory, 
     no_uploads(client)
 
 
-@pytest.mark.parametrize("kind", ["mismatch", "multiple", "multipage", "year"])
+@pytest.mark.parametrize("kind", ["mismatch", "multiple", "multipage"])
 def test_rejects_invalid_diagnostic_uploads_before_ocr(client_factory, monkeypatch, kind):
     client, token = setup(client_factory)
     called = False
@@ -167,7 +181,7 @@ def test_rejects_invalid_diagnostic_uploads_before_ocr(client_factory, monkeypat
         writer.write(buffer)
         files = [("files[]", ("test.pdf", buffer.getvalue(), "application/pdf"))]
     response = client.post(
-        PATH + ("?tripYear=1800" if kind == "year" else ""),
+        PATH,
         headers={"X-CSRF-Token": token},
         files=files,
     )

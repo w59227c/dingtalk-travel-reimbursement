@@ -45,11 +45,11 @@ export interface ReceiptDiagnostic {
   }
 }
 
-export async function diagnoseReceipt(file: File, tripYear?: number, signal?: AbortSignal): Promise<ReceiptDiagnostic> {
+export async function diagnoseReceipt(file: File, signal?: AbortSignal): Promise<ReceiptDiagnostic> {
   const form = new FormData()
   form.append('files[]', file)
   const response = await http.post<ApiEnvelope<ReceiptDiagnostic>>('/admin/receipts/diagnose', form, {
-    params: tripYear ? { tripYear } : {}, signal, timeout: 330_000,
+    signal, timeout: 330_000,
   })
   return response.data.data
 }
