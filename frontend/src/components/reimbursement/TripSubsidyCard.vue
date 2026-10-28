@@ -32,6 +32,11 @@ const subsidyEndpoints = [
   { key: 'end', label: '补助结束', dateField: 'endDate', timeField: 'endTime', dateLabel: '结束日期', periodLabel: '返回时段' },
 ] as const
 
+const excludedEndpoints = [
+  { key: 'start', label: '离开', dateField: 'startDate', timeField: 'startTime' },
+  { key: 'end', label: '返回', dateField: 'endDate', timeField: 'endTime' },
+] as const
+
 const expense = useExpenseStore()
 const subsidyGroups = computed(() => groupOverlappingSubsidyTrips(expense.subsidyTrips))
 const subsidyCalculationError = computed(() => {
@@ -293,57 +298,40 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                   删除
                 </el-button>
               </div>
-              <div class="trip-grid">
-                <el-form-item label="出发日期">
-                  <el-date-picker
-                    :model-value="excluded.startDate"
-                    type="date"
-                    :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
-                    value-format="YYYY-MM-DD"
-                    format="YYYY-MM-DD"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 出发日期`"
-                    @update:model-value="setExcludedDate(excluded, 'startDate', $event)"
-                  />
-                </el-form-item>
-                <el-form-item label="出发时段">
-                  <el-radio-group
-                    :model-value="period(excluded.startTime)"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 出发时段`"
-                    @update:model-value="setExcludedPeriod(excluded, 'startTime', $event)"
-                  >
-                    <el-radio-button value="morning">
-                      上午
-                    </el-radio-button>
-                    <el-radio-button value="afternoon">
-                      下午
-                    </el-radio-button>
-                  </el-radio-group>
-                </el-form-item>
-                <el-form-item label="返回日期">
-                  <el-date-picker
-                    :model-value="excluded.endDate"
-                    type="date"
-                    :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
-                    value-format="YYYY-MM-DD"
-                    format="YYYY-MM-DD"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回日期`"
-                    @update:model-value="setExcludedDate(excluded, 'endDate', $event)"
-                  />
-                </el-form-item>
-                <el-form-item label="返回时段">
-                  <el-radio-group
-                    :model-value="period(excluded.endTime)"
-                    :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} 返回时段`"
-                    @update:model-value="setExcludedPeriod(excluded, 'endTime', $event)"
-                  >
-                    <el-radio-button value="morning">
-                      上午
-                    </el-radio-button>
-                    <el-radio-button value="afternoon">
-                      下午
-                    </el-radio-button>
-                  </el-radio-group>
-                </el-form-item>
+              <div class="subsidy-date-editor excluded-period-editor">
+                <div
+                  v-for="endpoint in excludedEndpoints"
+                  :key="endpoint.key"
+                  class="subsidy-endpoint"
+                  role="group"
+                  :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${endpoint.label}`"
+                >
+                  <el-form-item :label="endpoint.label">
+                    <div class="subsidy-endpoint-controls">
+                      <el-date-picker
+                        :model-value="excluded[endpoint.dateField]"
+                        type="date"
+                        :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
+                        value-format="YYYY-MM-DD"
+                        format="YYYY-MM-DD"
+                        :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${endpoint.label}日期`"
+                        @update:model-value="setExcludedDate(excluded, endpoint.dateField, $event)"
+                      />
+                      <el-radio-group
+                        :model-value="period(excluded[endpoint.timeField])"
+                        :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${endpoint.label}时段`"
+                        @update:model-value="setExcludedPeriod(excluded, endpoint.timeField, $event)"
+                      >
+                        <el-radio-button value="morning">
+                          上午
+                        </el-radio-button>
+                        <el-radio-button value="afternoon">
+                          下午
+                        </el-radio-button>
+                      </el-radio-group>
+                    </div>
+                  </el-form-item>
+                </div>
               </div>
             </div>
           </section>
@@ -532,34 +520,11 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
   color: var(--el-color-danger);
 }
 
-.trip-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 24px;
-}
-
 .excluded-periods { margin-top: 16px; }
 .excluded-periods__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.excluded-period { margin-top: 12px; padding: 12px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
-.excluded-period .trip-grid { margin-top: 12px; }
-.excluded-period :deep(.el-date-editor.el-input) { width: 100%; min-width: 0; }
-.excluded-periods--mobile .trip-grid {
-  grid-template-columns: minmax(0, 1fr) max-content;
-  column-gap: 8px;
-}
-
-.excluded-periods--mobile .el-form-item {
-  min-width: 0;
-}
-
-.excluded-periods--mobile :deep(.el-radio-button__inner) {
-  padding-inline: 8px;
-}
-
-.excluded-periods--mobile :deep(.el-input__wrapper) {
-  padding-inline: 8px;
-}
-
+.excluded-period { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--el-border-color-light); }
+.excluded-period-editor { margin-top: 12px; row-gap: 16px; }
+.excluded-period-editor :deep(.el-form-item) { margin-bottom: 0; }
 .excluded-periods--mobile .excluded-periods__heading { flex-wrap: wrap; }
 
 :global(.excluded-period-picker--mobile .el-date-picker) {
@@ -600,10 +565,6 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .trip-grid {
-    grid-template-columns: 1fr;
-  }
-
   .subsidy-item__heading {
     display: block;
   }
@@ -620,11 +581,6 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
   }
 }
 
-@media (max-width: 359px) {
-  .excluded-periods--mobile .trip-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
 </style>
 
 <style scoped>
