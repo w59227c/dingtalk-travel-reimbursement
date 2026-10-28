@@ -65,21 +65,16 @@ def test_date_range_rejects_reverse_time_and_date() -> None:
         )
 
 
-def test_same_city_requires_confirmation_but_uses_automatic_days() -> None:
+@pytest.mark.parametrize("legacy_confirmation", [False, True])
+def test_same_city_does_not_require_confirmation_and_keeps_legacy_input_compatible(
+    legacy_confirmation: bool,
+) -> None:
     trip_period = period(date(2026, 6, 30), time(9), date(2026, 7, 1), time(18))
-    with pytest.raises(ApiError) as error:
-        calculate_subsidy(
-            trip_type=TripType.SAME_CITY_PROJECT,
-            period=trip_period,
-            configured_daily_rate=Decimal("50.00"),
-        )
-    assert error.value.code == "POLICY_CONFIRMATION_REQUIRED"
-
     result = calculate_subsidy(
         trip_type=TripType.SAME_CITY_PROJECT,
         period=trip_period,
         configured_daily_rate=Decimal("50.00"),
-        policy_confirmed=True,
+        policy_confirmed=legacy_confirmation,
     )
     assert result.effective_days == Decimal("2.0")
     assert result.daily_rate == Decimal("50.00")

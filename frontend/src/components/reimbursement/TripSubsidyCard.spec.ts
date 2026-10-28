@@ -214,18 +214,83 @@ describe('TripSubsidyCard', () => {
     expect(expense.subsidyTrips[1]?.startTime).toBe('09:00')
   })
 
-  it('uses only a per-approval policy checkbox for same-city projects', async () => {
+  it.each([false, true])('does not require a policy acknowledgement for same-city projects, mobile=%s', (mobile) => {
     const expense = useExpenseStore()
-    const wrapper = mountCard('same_city_project')
+    const wrapper = mountCard('same_city_project', approvals, false, mobile)
     expect(wrapper.text()).not.toContain('确认有效天数')
-    const confirmations = wrapper.findAllComponents({ name: 'ElCheckbox' })
-    expect(confirmations).toHaveLength(2)
-    expect(expense.policyInputError).toContain('逐项勾选')
-
-    expense.subsidyTrips[0]!.policyConfirmed = true
-    expense.subsidyTrips[1]!.policyConfirmed = true
+    expect(wrapper.findComponent({ name: 'ElCheckbox' }).exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('我已按公司现行制度确认本项补助')
+    expect(expense.policyInputError).toBe('')
     expect(expense.tripPayloads()).toHaveLength(2)
-    expect(expense.tripPayloads().every((trip) => trip.policyConfirmed)).toBe(true)
+    expect(expense.tripPayloads().every((trip) => trip.policyConfirmed === false)).toBe(true)
+  })
+
+  it.each([false, true])('uses attendance dates for city travel and retains outside selections for manual correction, mobile=%s', async (mobile) => {
+    const selected = [{ ...approvals[0]!, endDate: '2026-09-07' }]
+    const wrapper = mountCard('same_city_project', selected, false, mobile)
+    const expense = useExpenseStore()
+    expect(wrapper.find('input[type=radio]').exists()).toBe(false)
+    expect(wrapper.find('.excluded-periods').exists()).toBe(false)
+    expect(expense.subsidyTrips[0]!.attendanceDates).toEqual(['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-07'])
+    await wrapper.get('[aria-label="补助 1 出勤日期 2026-09-05"]').trigger('click')
+    expect(expense.tripPayloads()[0]!.attendanceDates).toContain('2026-09-05')
+    await wrapper.get('[aria-label="补助 1 出勤日期 2026-09-01"]').trigger('click')
+    expect(expense.tripPayloads()[0]!.attendanceDates).not.toContain('2026-09-01')
+    wrapper.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-09-03')
+    await nextTick()
+    expect(expense.subsidyTrips[0]!.attendanceDates).toContain('2026-09-02')
+    expect(expense.tripPayloads()).toEqual([])
+    expect(wrapper.text()).toContain('以下已选日期需调整')
+    await wrapper.get('[aria-label="补助 1 出勤日期 取消 2026-09-02"]').trigger('click')
+    expect(expense.policyInputError).toBe('')
+    expect(expense.tripPayloads()[0]!.attendanceDates).toContain('2026-09-05')
+    const locked = mountCard('same_city_project', selected, true, mobile)
+    const saved = JSON.stringify(expense.subsidyTrips)
+    await locked.get('[aria-label="补助 1 出勤日期 2026-09-06"]').trigger('click')
+    expect(JSON.stringify(expense.subsidyTrips)).toBe(saved)
+  })
+
+  it.each([false, true])('preserves the half-day presentation of locked legacy city snapshots, mobile=%s', async (mobile) => {
+    const wrapper = mountCard('same_city_project', approvals, true, mobile)
+    const expense = useExpenseStore()
+    for (const trip of expense.subsidyTrips) trip.attendanceDates = undefined
+    await nextTick()
+    const saved = JSON.stringify(expense.subsidyTrips)
+    expect(wrapper.find('.attendance-picker').exists()).toBe(false)
+    expect(wrapper.find('input[type=radio]').exists()).toBe(true)
+    expect(wrapper.find('.excluded-period__issue').exists()).toBe(false)
+    wrapper.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-09-02')
+    await nextTick()
+    expect(JSON.stringify(expense.subsidyTrips)).toBe(saved)
+  })
+
+  it.each([false, true])('defaults from the uploaded calendar without replacing existing choices, mobile=%s', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.attendanceCalendar = { years: [2026], days: { '2026-09-20': { working: true, name: '补班' }, '2026-09-25': { working: false, name: '休息' } } }
+    const selected = [{ ...approvals[0]!, startDate: '2026-09-20', endDate: '2026-09-27' }]
+    const wrapper = mountCard('same_city_project', selected, false, mobile)
+    expect(expense.subsidyTrips[0]!.attendanceDates).toEqual(['2026-09-20', '2026-09-21', '2026-09-22', '2026-09-23', '2026-09-24'])
+    await wrapper.get('[aria-label="补助 1 出勤日期 2026-09-25"]').trigger('click')
+    expect(expense.tripPayloads()[0]!.attendanceDates).toContain('2026-09-25')
+    const saved = [...expense.subsidyTrips[0]!.attendanceDates!]
+    expense.attendanceCalendar.days['2026-09-21'] = { working: false, name: '调整' }
+    expense.syncSubsidyApprovals(selected)
+    await nextTick()
+    expect(expense.subsidyTrips[0]!.attendanceDates).toEqual(saved)
+  })
+  it.each([false, true])('shows and applies known partial-year arrangements in both modes, mobile=%s', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.attendanceCalendar = { years: [2027], days: {
+      '2026-09-20': { working: true, name: '合成跨年补班' },
+      '2026-09-25': { working: false, name: '合成跨年休息' },
+    } }
+    const wrapper = mountCard('same_city_project', [{ ...approvals[0]!, startDate: '2026-09-20', endDate: '2026-09-27' }], false, mobile)
+    expect(expense.subsidyTrips[0]!.attendanceDates).toEqual(['2026-09-20', '2026-09-21', '2026-09-22', '2026-09-23', '2026-09-24'])
+    expect(wrapper.text()).toContain('2026 年尚未完整维护节假日')
+    expect(wrapper.get('[aria-label="补助 1 出勤日期 2026-09-20"]').text()).toContain('班')
+    expect(wrapper.get('[aria-label="补助 1 出勤日期 2026-09-25"]').attributes('title')).toContain('合成跨年休息（放假）')
+    await wrapper.get('[aria-label="补助 1 出勤日期 2026-09-25"]').trigger('click')
+    expect(expense.tripPayloads()[0]!.attendanceDates).toContain('2026-09-25')
   })
 
   it.each([false, true])('uses the approved internal category at any duration, mobile=%s', (mobile) => {
@@ -376,6 +441,107 @@ describe('TripSubsidyCard', () => {
     }
   })
 
+  it.each([false, true])('limits return dates and half-days from departure without rewriting old values, mobile=%s', async (mobile) => {
+    const wrapper = mountCard('business', [{ ...approvals[0]!, endDate: '2026-09-05' }], false, mobile)
+    const expense = useExpenseStore()
+    await wrapper.get('[aria-label="补助 1 添加非补助时段"]').trigger('click')
+    const editor = wrapper.get('.excluded-period-editor')
+    const dates = editor.findAllComponents({ name: 'ElDatePicker' })
+    const absence = expense.subsidyTrips[0]!.excludedPeriods![0]!
+    const returnMorning = () => editor.get<HTMLInputElement>('[aria-label="补助 1 非补助时段 1 返回时段"] input[value="morning"]')
+    const returnAfternoon = () => editor.get<HTMLInputElement>('[aria-label="补助 1 非补助时段 1 返回时段"] input[value="afternoon"]')
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-03')
+    await nextTick()
+    expect(dates[1]!.props('defaultValue')).toEqual(new Date(2026, 8, 3))
+    let disabled = dates[1]!.props('disabledDate') as (date: Date) => boolean
+    expect(disabled(new Date(2026, 8, 2))).toBe(true)
+    expect(disabled(new Date(2026, 8, 3))).toBe(false)
+    expect(disabled(new Date(2026, 8, 4))).toBe(false)
+    dates[1]!.vm.$emit('update:modelValue', '2026-09-03')
+    await nextTick()
+    expect(returnMorning().element.disabled).toBe(false)
+    await editor.get('[aria-label="补助 1 非补助时段 1 离开时段"] input[value="afternoon"]').setValue()
+    expect(returnMorning().element.disabled).toBe(true)
+    expect(returnAfternoon().element.disabled).toBe(false)
+    expect(absence.endTime).toBe('09:00')
+    expect(wrapper.get('.excluded-period__issue').text()).toContain('返回早于离开')
+    expect(expense.tripPayloads()).toEqual([])
+    await returnAfternoon().setValue()
+    expect(absence.endTime).toBe('18:00')
+    expect(expense.policyInputError).toBe('')
+    await returnMorning().trigger('click')
+    expect(absence.endTime).toBe('18:00')
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-04')
+    await nextTick()
+    expect(absence.endDate).toBe('2026-09-03')
+    expect(returnMorning().element.disabled).toBe(true)
+    expect(returnAfternoon().element.disabled).toBe(true)
+    disabled = dates[1]!.props('disabledDate') as (date: Date) => boolean
+    expect(disabled(new Date(2026, 8, 3))).toBe(true)
+    expect(disabled(new Date(2026, 8, 4))).toBe(false)
+    dates[1]!.vm.$emit('update:modelValue', '2026-09-05')
+    await nextTick()
+    expect(returnMorning().element.disabled).toBe(false)
+    await returnMorning().setValue()
+    expect(expense.policyInputError).toBe('')
+  })
+
+  it.each([false, true])('restricts absence half-days to the subsidy boundaries, mobile=%s', async (mobile) => {
+    const selected = [{ ...approvals[0]!, startDate: '2026-09-02', endDate: '2026-09-04' }]
+    const wrapper = mountCard('business', selected, false, mobile)
+    await wrapper.get('[aria-label="补助 1 出发时段"] input[value="afternoon"]').setValue()
+    await wrapper.get('[aria-label="补助 1 返回时段"] input[value="morning"]').setValue()
+    await wrapper.get('[aria-label="补助 1 添加非补助时段"]').trigger('click')
+    const editor = wrapper.get('.excluded-period-editor')
+    const dates = editor.findAllComponents({ name: 'ElDatePicker' })
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-02')
+    dates[1]!.vm.$emit('update:modelValue', '2026-09-04')
+    await nextTick()
+    expect(editor.get<HTMLInputElement>('[aria-label="补助 1 非补助时段 1 离开时段"] input[value="morning"]').element.disabled).toBe(true)
+    expect(editor.get<HTMLInputElement>('[aria-label="补助 1 非补助时段 1 离开时段"] input[value="afternoon"]').element.disabled).toBe(false)
+    expect(editor.get<HTMLInputElement>('[aria-label="补助 1 非补助时段 1 返回时段"] input[value="afternoon"]').element.disabled).toBe(true)
+    expect(editor.get<HTMLInputElement>('[aria-label="补助 1 非补助时段 1 返回时段"] input[value="morning"]').element.disabled).toBe(false)
+    await editor.get('[aria-label="补助 1 非补助时段 1 离开时段"] input[value="afternoon"]').setValue()
+    expect(useExpenseStore().policyInputError).toBe('')
+  })
+
+  it.each([false, true])('marks only affected absences after changing the subsidy window and keeps manual repair available, mobile=%s', async (mobile) => {
+    const selected = [{ ...approvals[0]!, endDate: '2026-09-10' }]
+    const wrapper = mountCard('business', selected, false, mobile)
+    const expense = useExpenseStore()
+    const trip = expense.subsidyTrips[0]!
+    const first = { startDate: '2026-09-02', startTime: '09:00', endDate: '2026-09-03', endTime: '09:00' }
+    const second = { startDate: '2026-09-06', startTime: '09:00', endDate: '2026-09-07', endTime: '09:00' }
+    trip.excludedPeriods = [first, second]
+    await nextTick()
+    wrapper.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-09-04')
+    await nextTick()
+    const periods = wrapper.findAll('.excluded-period')
+    expect(wrapper.get('[aria-label="补助 1 开始日期"]').element).toHaveProperty('value', '2026-09-04')
+    expect(periods[0]!.classes()).toContain('excluded-period--invalid')
+    expect(periods[0]!.text()).toContain('超出补助时段，请修改')
+    expect(periods[1]!.classes()).not.toContain('excluded-period--invalid')
+    expect(first.startDate).toBe('2026-09-02')
+    expect(second.endDate).toBe('2026-09-07')
+    expect(expense.tripPayloads()).toEqual([])
+    expect(wrapper.findAll('button').some((button) => /清除|一键/.test(button.text()))).toBe(false)
+    const dates = periods[0]!.findAllComponents({ name: 'ElDatePicker' })
+    dates[0]!.vm.$emit('update:modelValue', '2026-09-04')
+    dates[1]!.vm.$emit('update:modelValue', '2026-09-05')
+    await nextTick()
+    expect(wrapper.find('.excluded-period--invalid').exists()).toBe(false)
+    expect(expense.tripPayloads()[0]?.excludedPeriods?.filter((item) => !item.type)).toHaveLength(2)
+    await wrapper.get('[aria-label="补助 1 出发时段"] input[value="afternoon"]').setValue()
+    expect(wrapper.findAll('.excluded-period')[0]!.text()).toContain('超出补助时段')
+    expect(trip.excludedPeriods?.filter((item) => !item.type)).toHaveLength(2)
+    const saved = JSON.stringify(expense.subsidyTrips)
+    const locked = mountCard('business', selected, true, mobile)
+    expect(locked.find('.excluded-period__issue').exists()).toBe(false)
+    locked.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-09-01')
+    await nextTick()
+    expect(JSON.stringify(expense.subsidyTrips)).toBe(saved)
+  })
+
   describe.each([false, true])('calendar edge cases, mobile=%s', (mobile) => {
     it.each([
       { name: 'cross-year', approvalStart: '2026-12-28', approvalEnd: '2027-01-05', start: '2026-12-31', end: '2027-01-02', before: '2026-12-30', after: '2027-01-03' },
@@ -402,21 +568,29 @@ describe('TripSubsidyCard', () => {
     it('preserves an open calendar month across unrelated parent renders', async () => {
       const wrapper = mountCard('business', [{ ...approvals[0]!, endDate: '2026-11-30' }], false, mobile)
       await wrapper.get('[aria-label="补助 1 添加非补助时段"]').trigger('click')
-      const picker = wrapper.get('.excluded-period-editor').findComponent({ name: 'ElDatePicker' })
-      const initial = picker.props('defaultValue')
-      await picker.vm.handleOpen()
-      await flushPromises()
-      const panel = document.body.querySelector<HTMLElement>('.el-date-picker')!
-      const next = panel.querySelector<HTMLButtonElement>('button[aria-label="Next Month"]')!
-      next.click()
-      await flushPromises()
-      const navigated = panel.querySelector('.el-date-picker__header')!.textContent
-      expect(navigated).toContain('October')
-      wrapper.vm.$forceUpdate()
-      await flushPromises()
-      expect(picker.props('defaultValue')).toBe(initial)
-      expect(panel.querySelector('.el-date-picker__header')!.textContent).toBe(navigated)
-      await picker.vm.handleClose()
+      const pickers = wrapper.get('.excluded-period-editor').findAllComponents({ name: 'ElDatePicker' })
+      pickers[0]!.vm.$emit('update:modelValue', '2026-10-15')
+      await nextTick()
+      expect(pickers[1]!.props('defaultValue')).toEqual(new Date(2026, 9, 15))
+      for (const picker of pickers) {
+        const initial = picker.props('defaultValue')
+        await picker.vm.handleOpen()
+        await flushPromises()
+        const panel = Array.from(document.body.querySelectorAll<HTMLElement>('.el-date-picker'))
+          .find((element) => element.style.display !== 'none' && element.closest<HTMLElement>('.el-popper')?.style.display !== 'none')!
+        const before = panel.querySelector('.el-date-picker__header')!.textContent
+        const next = panel.querySelector<HTMLButtonElement>('button[aria-label="Next Month"]')!
+        next.click()
+        await flushPromises()
+        const navigated = panel.querySelector('.el-date-picker__header')!.textContent
+        expect(navigated).not.toBe(before)
+        wrapper.vm.$forceUpdate()
+        await flushPromises()
+        expect(picker.props('defaultValue')).toBe(initial)
+        expect(panel.querySelector('.el-date-picker__header')!.textContent).toBe(navigated)
+        await picker.vm.handleClose()
+        await flushPromises()
+      }
     })
   })
 

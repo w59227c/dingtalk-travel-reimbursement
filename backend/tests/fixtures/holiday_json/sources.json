@@ -1,0 +1,50 @@
+[
+  {
+    "provider": "timor",
+    "year": 2023,
+    "source": "https://timor.tech/api/holiday/year/2023/",
+    "bytes": 2943
+  },
+  {
+    "provider": "timor",
+    "year": 2024,
+    "source": "https://timor.tech/api/holiday/year/2024/",
+    "bytes": 3355
+  },
+  {
+    "provider": "timor",
+    "year": 2025,
+    "source": "https://timor.tech/api/holiday/year/2025/",
+    "bytes": 2911
+  },
+  {
+    "provider": "timor",
+    "year": 2026,
+    "source": "https://timor.tech/api/holiday/year/2026/",
+    "bytes": 3430
+  },
+  {
+    "provider": "holiday-cn",
+    "year": 2023,
+    "source": "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/2023.json",
+    "bytes": 4391
+  },
+  {
+    "provider": "holiday-cn",
+    "year": 2024,
+    "source": "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/2024.json",
+    "bytes": 4506
+  },
+  {
+    "provider": "holiday-cn",
+    "year": 2025,
+    "source": "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/2025.json",
+    "bytes": 4272
+  },
+  {
+    "provider": "holiday-cn",
+    "year": 2026,
+    "source": "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/2026.json",
+    "bytes": 4843
+  }
+]

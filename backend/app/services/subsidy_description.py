@@ -22,6 +22,16 @@ def _point(day, clock) -> str:
 
 def subsidy_explanation(trip: TripInput, result: SubsidyCalculation) -> tuple[str, ...]:
     """Summary first, then one complete non-financial line for every adjustment."""
+    if trip.attendance_dates is not None:
+        lines = [
+            f"市内出差补助：出勤{compact_days(result.effective_days)}天 × "
+            f"{money_string(result.daily_rate)}元/天 = {money_string(result.total)}元"
+        ]
+        months: dict[str, list[str]] = {}
+        for day in sorted(trip.attendance_dates):
+            months.setdefault(day.strftime("%Y-%m"), []).append(day.isoformat())
+        lines.extend("出勤日期：" + "、".join(days) for days in months.values())
+        return tuple(lines)
     original = result.effective_days + (result.excluded_days or 0)
     lines = [
         f"出差补助：审批期间{_point(trip.start_date, trip.start_time)}—"

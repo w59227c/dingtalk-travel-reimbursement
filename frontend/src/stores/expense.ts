@@ -12,6 +12,7 @@ import type {
   TripType,
 } from '@/types/expenses'
 import type { ReceiptUploadLimits } from '@/types/auth'
+import type { AttendanceCalendar } from '@/types/attendance'
 import type {
   ReimbursementDraft,
   ReimbursementDraftExpenseItemInput,
@@ -25,10 +26,8 @@ import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime } from '@/utils/tripPeriod'
 import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 import { adjustmentPayload, adjustmentValidationError } from '@/utils/subsidyAdjustments'
+import { attendanceInputError, defaultAttendanceDates } from '@/utils/attendanceDates'
 
-const SPECIAL_TRIP_TYPES = new Set<TripType>([
-  'same_city_project',
-])
 const CALENDAR_DATE_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/
 
 function newItemId(): string {
@@ -93,6 +92,7 @@ function legacyOriginalDetailsEdited(
 }
 
 export const useExpenseStore = defineStore('expense', () => {
+  const attendanceCalendar = ref<AttendanceCalendar>()
   const manualProjectText = ref('')
   const trip = reactive({
     tripType: 'business' as TripType,
@@ -101,6 +101,7 @@ export const useExpenseStore = defineStore('expense', () => {
     endDate: '',
     endTime: '18:00',
     policyConfirmed: false,
+    attendanceDates: undefined as string[] | undefined,
     confirmedEffectiveDays: '',
     noSubsidyException: false,
     excludedPeriods: [] as ExcludedPeriodInput[],
@@ -128,17 +129,12 @@ export const useExpenseStore = defineStore('expense', () => {
     return ['short_term_project', 'long_term_project'].includes(trip.tripType)
       ? trip.tripType : null
   })
-  const requiresPolicyConfirmation = computed(
-    () => includeSubsidy.value && SPECIAL_TRIP_TYPES.has(trip.tripType),
-  )
   const maxExpenseItems = ref(200)
   const excludedPeriodInputError = computed(() => {
     if (!includeSubsidy.value) return ''
-    const groups = subsidyTrips.value.length
-      ? groupOverlappingSubsidyTrips(subsidyTrips.value)
-      : [{ ...trip, excludedPeriods: trip.excludedPeriods }]
+    const groups = groupOverlappingSubsidyTrips(subsidyTrips.value.length ? subsidyTrips.value : [trip])
     for (const [groupIndex, group] of groups.entries()) {
-      const error = adjustmentValidationError(group)
+      const error = trip.tripType === 'same_city_project' ? attendanceInputError(group) : adjustmentValidationError(group)
       if (error) return error.includes('重叠') ? `补助 ${groupIndex + 1} 的${error}` : error
     }
     return ''
@@ -151,14 +147,7 @@ export const useExpenseStore = defineStore('expense', () => {
     if (excludedPeriodInputError.value) return excludedPeriodInputError.value
     if (!subsidyTrips.value.length) {
       if (!trip.startDate || !trip.endDate) return '请完整填写出发和返回日期、时段'
-      if (requiresPolicyConfirmation.value && !trip.policyConfirmed) {
-        return '请勾选已按公司制度确认'
-      }
       return ''
-    }
-    if (requiresPolicyConfirmation.value
-      && subsidyTrips.value.some((item) => !item.policyConfirmed)) {
-      return '请逐项勾选已按公司制度确认'
     }
     return ''
   })
@@ -253,7 +242,12 @@ export const useExpenseStore = defineStore('expense', () => {
           endTime: TRIP_PERIOD_TIME[endPeriod],
           ...exclusions(item.excludedPeriods),
         }
-        if (trip.tripType === 'same_city_project') payload.policyConfirmed = Boolean(item.policyConfirmed)
+        if (trip.tripType === 'same_city_project') {
+          payload.policyConfirmed = Boolean(item.policyConfirmed)
+          payload.attendanceDates = [...item.attendanceDates!].sort()
+          payload.startTime = '09:00'
+          payload.endTime = '18:00'
+        }
         return [payload]
       })
     }
@@ -274,7 +268,12 @@ export const useExpenseStore = defineStore('expense', () => {
       endTime: TRIP_PERIOD_TIME[endPeriod],
       ...exclusions(trip.excludedPeriods),
     }
-    if (requiresPolicyConfirmation.value) payload.policyConfirmed = trip.policyConfirmed
+    if (trip.tripType === 'same_city_project') {
+      payload.policyConfirmed = trip.policyConfirmed
+      payload.attendanceDates = [...trip.attendanceDates!].sort()
+      payload.startTime = '09:00'
+      payload.endTime = '18:00'
+    }
     return [payload]
   }
 
@@ -297,6 +296,8 @@ export const useExpenseStore = defineStore('expense', () => {
         endDate: approval.endDate,
         endTime: current?.endTime ?? (index === lastIndex ? trip.endTime : '18:00'),
         policyConfirmed: current?.policyConfirmed ?? false,
+        ...(current?.attendanceDates !== undefined ? { attendanceDates: [...current.attendanceDates] }
+          : !current && trip.tripType === 'same_city_project' ? { attendanceDates: defaultAttendanceDates(approval.startDate, approval.endDate, attendanceCalendar.value) } : {}),
         ...(current?.excludedPeriods?.length
           ? { excludedPeriods: current.excludedPeriods.map((item) => ({ ...item })) } : {}),
       }
@@ -501,12 +502,14 @@ export const useExpenseStore = defineStore('expense', () => {
       endDate: persistedTrip?.endDate ?? '',
       endTime: persistedTrip?.endTime ?? '18:00',
       policyConfirmed: persistedTrip?.policyConfirmed ?? false,
+      attendanceDates: persistedTrip?.attendanceDates !== undefined ? [...persistedTrip.attendanceDates] : undefined,
       confirmedEffectiveDays: persistedTrip?.confirmedEffectiveDays ?? '',
       noSubsidyException: persistedTrip?.noSubsidyException ?? false,
       excludedPeriods: (persistedTrip?.excludedPeriods ?? []).map((item) => ({ ...item })),
     })
     subsidyTrips.value = persistedTrips.map((item) => ({
       ...item,
+      ...(item.attendanceDates !== undefined ? { attendanceDates: [...item.attendanceDates] } : {}),
       ...(item.excludedPeriods?.length
         ? { excludedPeriods: item.excludedPeriods.map((excluded) => ({ ...excluded })) } : {}),
     }))
@@ -742,17 +745,18 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   function setTripType(value: TripType): void {
+    const previousType = trip.tripType
     trip.tripType = value
     trip.policyConfirmed = false
     trip.confirmedEffectiveDays = ''
     trip.noSubsidyException = false
-    subsidyTrips.value = subsidyTrips.value.map((item) => ({
-      ...item,
-      tripType: value,
-      policyConfirmed: false,
-      confirmedEffectiveDays: undefined,
-      noSubsidyException: undefined,
-    }))
+    if (value !== 'same_city_project') trip.attendanceDates = undefined
+    subsidyTrips.value = subsidyTrips.value.map((item) => {
+      const next = { ...item, tripType: value, policyConfirmed: false, confirmedEffectiveDays: undefined, noSubsidyException: undefined }
+      if (value === 'same_city_project' && previousType !== value) next.attendanceDates = defaultAttendanceDates(item.startDate, item.endDate, attendanceCalendar.value)
+      if (value !== 'same_city_project') delete next.attendanceDates
+      return next
+    })
     totals.value = null
     calculatedSignature.value = ''
   }
@@ -788,6 +792,7 @@ export const useExpenseStore = defineStore('expense', () => {
       endDate: '',
       endTime: '18:00',
       policyConfirmed: false,
+      attendanceDates: undefined,
       confirmedEffectiveDays: '',
       noSubsidyException: false,
       excludedPeriods: [],
@@ -805,6 +810,7 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   return {
+    attendanceCalendar,
     manualProjectText,
     trip,
     subsidyTrips,
@@ -820,7 +826,6 @@ export const useExpenseStore = defineStore('expense', () => {
     totals,
     calculating,
     calculationError,
-    requiresPolicyConfirmation,
     projectCalendarDays,
     projectPolicyType,
     maxExpenseItems,

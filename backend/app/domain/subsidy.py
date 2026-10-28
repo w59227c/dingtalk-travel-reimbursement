@@ -11,6 +11,7 @@ from app.domain.money import money_string, quantize_money
 HALF_DAY = Decimal("0.5")
 NOON = time(12, 0)
 MAX_DAILY_SUBSIDY = Decimal("10000.00")
+MAX_ATTENDANCE_DATES = 3660
 
 
 class TripType(StrEnum):
@@ -24,10 +25,6 @@ class TripType(StrEnum):
     LONG_TERM_INTERNAL = "long_term_internal"
     SHORT_TERM_OVERSEAS = "short_term_overseas"
     LONG_TERM_OVERSEAS = "long_term_overseas"
-
-    @property
-    def requires_confirmation(self) -> bool:
-        return self is TripType.SAME_CITY_PROJECT
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,8 +54,10 @@ def _adjustment(value: TripPeriod | SubsidyAdjustment) -> SubsidyAdjustment:
     if isinstance(value, SubsidyAdjustment):
         return value
     return SubsidyAdjustment(
-        start_date=value.start_date, start_time=value.start_time,
-        end_date=value.end_date, end_time=value.end_time,
+        start_date=value.start_date,
+        start_time=value.start_time,
+        end_date=value.end_date,
+        end_time=value.end_time,
     )
 
 
@@ -69,7 +68,8 @@ def _half_day(day: date | None, clock: time | None) -> int:
 
 
 def _adjustment_intervals(
-    period: TripPeriod, excluded_periods: list[TripPeriod | SubsidyAdjustment],
+    period: TripPeriod,
+    excluded_periods: list[TripPeriod | SubsidyAdjustment],
 ) -> list[tuple[int, int, int, int]]:
     """Return unpaid and occupied half-day intervals for each original input."""
     lower = _half_day(period.start_date, period.start_time)
@@ -130,7 +130,8 @@ class SubsidyCalculation:
 
 
 def validate_non_overlapping_exclusions(
-    excluded_periods: list[TripPeriod | SubsidyAdjustment], period: TripPeriod,
+    excluded_periods: list[TripPeriod | SubsidyAdjustment],
+    period: TripPeriod,
 ) -> None:
     """Each selected morning or afternoon may belong to only one personal absence."""
     ordered = sorted(
@@ -151,7 +152,8 @@ def validate_non_overlapping_exclusions(
 
 
 def excluded_effective_days(
-    period: TripPeriod, excluded_periods: list[TripPeriod | SubsidyAdjustment],
+    period: TripPeriod,
+    excluded_periods: list[TripPeriod | SubsidyAdjustment],
 ) -> Decimal:
     """Union unpaid half-days, clipped to the original paid half-days.
 
@@ -203,7 +205,59 @@ def calculate_subsidy(
     manual_subsidy_amount: Decimal | None = None,
     related_approval_id: str | None = None,
     excluded_periods: list[TripPeriod | SubsidyAdjustment] | None = None,
+    attendance_dates: list[date] | None = None,
 ) -> SubsidyCalculation:
+    if attendance_dates is not None:
+        if trip_type is not TripType.SAME_CITY_PROJECT:
+            raise ApiError("UNEXPECTED_ATTENDANCE_DATES", "仅市内出差按出勤日期计算", 422)
+        if (
+            manual_subsidy_amount is not None
+            or confirmed_effective_days is not None
+            or no_subsidy_exception
+        ):
+            raise ApiError("UNEXPECTED_POLICY_OVERRIDE", "出勤补助由日期和每日标准计算", 422)
+        lower, upper = period.start_date, period.end_date
+        seen: set[AdjustmentType] = set()
+        for raw in excluded_periods or []:
+            item = _adjustment(raw)
+            if item.adjustment_type is AdjustmentType.TEMPORARY_ABSENCE:
+                raise ApiError(
+                    "ATTENDANCE_LEGACY_PERIODS", "请核对并删除旧非补助时段，改用出勤日期", 422
+                )
+            if item.adjustment_type in seen:
+                raise ApiError("DUPLICATE_SUBSIDY_ADJUSTMENT", "补助起止调整不能重复", 422)
+            seen.add(item.adjustment_type)
+            boundary = (
+                item.end_date
+                if item.adjustment_type is AdjustmentType.LATE_DEPARTURE
+                else item.start_date
+            )
+            if boundary is None or not period.start_date <= boundary <= period.end_date:
+                raise ApiError("INVALID_EXCLUDED_PERIOD", "补助日期必须在审批日期范围内", 422)
+            if item.adjustment_type is AdjustmentType.LATE_DEPARTURE:
+                lower = boundary
+            else:
+                upper = boundary
+        if lower > upper:
+            raise ApiError("INVALID_DATE_RANGE", "补助开始日期不能晚于结束日期", 422)
+        if (upper - lower).days >= MAX_ATTENDANCE_DATES:
+            raise ApiError("INVALID_ATTENDANCE_DATES", "出勤范围过长，请缩小补助日期范围", 422)
+        if len(attendance_dates) > MAX_ATTENDANCE_DATES or len(set(attendance_dates)) != len(
+            attendance_dates
+        ):
+            raise ApiError("INVALID_ATTENDANCE_DATES", "出勤日期重复或数量超出限制", 422)
+        if any(day < lower or day > upper for day in attendance_dates):
+            raise ApiError("INVALID_ATTENDANCE_DATES", "出勤日期必须在当前补助日期范围内", 422)
+        days = Decimal(len(attendance_dates))
+        rate = quantize_money(configured_daily_rate)
+        return SubsidyCalculation(
+            trip_type=trip_type,
+            calendar_days=(period.end_date - period.start_date).days + 1,
+            effective_days=days,
+            daily_rate=rate,
+            total=quantize_money(days * rate),
+            related_approval_id=related_approval_id,
+        )
     calculated_days = automatic_effective_days(period)
     calendar_days = (period.end_date - period.start_date).days + 1
     excluded_days = excluded_effective_days(period, excluded_periods or [])
@@ -212,13 +266,8 @@ def calculate_subsidy(
     if manual_subsidy_amount is not None:
         raise ApiError("UNEXPECTED_POLICY_OVERRIDE", "出差补助由管理员设置的每日标准计算", 422)
 
-    if trip_type.requires_confirmation:
-        if not policy_confirmed:
-            raise ApiError(
-                "POLICY_CONFIRMATION_REQUIRED",
-                "境内同市项目需要勾选已按公司制度确认",
-                422,
-            )
+    if trip_type is TripType.SAME_CITY_PROJECT:
+        # Keep accepting the legacy acknowledgement field in drafts and snapshots.
         if confirmed_effective_days is not None or no_subsidy_exception:
             raise ApiError(
                 "UNEXPECTED_POLICY_OVERRIDE",

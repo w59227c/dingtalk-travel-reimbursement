@@ -203,7 +203,7 @@ async function save(): Promise<void> {
         </h2>
         <div class="settings-rule-row">
           <span>计算方式</span>
-          <strong>按 12:00 半天边界计算</strong>
+          <strong>市内按出勤日期计整天；其他类别按 12:00 半天边界计算</strong>
         </div>
         <div class="settings-rule-row">
           <span>补助类别</span>
@@ -211,7 +211,7 @@ async function save(): Promise<void> {
         </div>
         <div class="settings-rule-row">
           <span>有效天数</span>
-          <strong>所有类型均按日期和时段自动计算；同市项目另需员工按制度确认</strong>
+          <strong>市内按所选出勤日期计算；其他类别按补助时段扣除非补助时段</strong>
         </div>
         <p class="settings-rule-exception">
           每类均可独立配置，0 元表示不发补助。非补助时段按出发和返回时段扣除，各段不能重叠或重复。

@@ -309,6 +309,7 @@ function tripSignature(trip: TripInput | null | undefined): object | null {
     endDate: trip.endDate,
     endTime: trip.endTime,
     policyConfirmed: trip.policyConfirmed ?? false,
+    attendanceDates: trip.attendanceDates,
     confirmedEffectiveDays: trip.confirmedEffectiveDays ?? '',
     noSubsidyException: trip.noSubsidyException ?? false,
     excludedPeriods: (trip.excludedPeriods ?? []).map(adjustmentPayload),
@@ -892,6 +893,9 @@ watch(() => drafts.busy, () => {
   if (!saving.value && !saveError.value) scheduleAutosave()
 })
 watch(budgetLabel, (label) => { expense.manualProjectText = label })
+watch(() => drafts.reimbursementOptions?.attendanceCalendar, (calendar) => {
+  expense.attendanceCalendar = calendar
+}, { immediate: true, flush: 'sync' })
 watch(selectedSubsidyApprovals, (approvals) => {
   if (drafts.currentDraft && !['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status)) return
   expense.syncSubsidyApprovals(approvals)

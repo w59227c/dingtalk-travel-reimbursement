@@ -56,7 +56,7 @@ def test_transport_keyword_migration_preserves_custom_rules_and_guards_downgrade
             }
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "20261028_0023"
+                == "20261028_0024"
             )
         assert rows["滴滴畅行"] == ("local_transport", "ride_hailing")
         assert rows["滴滴科技"] == ("local_transport", "ride_hailing")

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { TripInput } from '@/types/expenses'
 import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
-import { resetSubsidyWindow, subsidyWindow, updateSubsidyWindow } from '@/utils/subsidyWindow'
+import { resetSubsidyWindow, subsidyAbsenceIssue, subsidyWindow, updateSubsidyWindow } from '@/utils/subsidyWindow'
 
 function trips(): TripInput[] {
   return [{ relatedApprovalId: 'a', tripType: 'business', startDate: '2026-09-01', startTime: '09:00', endDate: '2026-09-06', endTime: '18:00' }]
@@ -43,12 +43,44 @@ describe('effective subsidy window', () => {
     expect(updateSubsidyWindow(group(), 'startTime', '18:00')).toContain('不能晚于')
   })
 
-  it('rejects conflicts with existing absences without removing them', () => {
+  it('accepts a new window while preserving and marking existing absences for correction', () => {
     const rows = trips()
-    rows[0]!.excludedPeriods = [{ startDate: '2026-09-02', startTime: '09:00', endDate: '2026-09-03', endTime: '18:00' }]
+    const invalidated = { startDate: '2026-09-02', startTime: '09:00', endDate: '2026-09-03', endTime: '18:00' }
+    const valid = { startDate: '2026-09-04', startTime: '09:00', endDate: '2026-09-05', endTime: '09:00' }
+    rows[0]!.excludedPeriods = [invalidated, valid]
+    const group = () => groupOverlappingSubsidyTrips(rows)[0]!
+    expect(updateSubsidyWindow(group(), 'startDate', '2026-09-04')).toBe('')
+    expect(subsidyWindow(group()).startDate).toBe('2026-09-04')
+    expect(group().excludedPeriods).toContain(invalidated)
+    expect(group().excludedPeriods).toContain(valid)
+    expect(invalidated.startDate).toBe('2026-09-02')
+    expect(subsidyAbsenceIssue(group(), invalidated)).toBe('超出补助时段')
+    expect(subsidyAbsenceIssue(group(), valid)).toBe('')
+    resetSubsidyWindow(group())
+    expect(rows[0]!.excludedPeriods).toEqual([invalidated, valid])
+    expect(subsidyAbsenceIssue(group(), invalidated)).toBe('')
+  })
+
+  it('marks half-day boundaries, reversed times and overlapping absences without mutation', () => {
+    const rows = trips()
+    const first = { startDate: '2026-09-01', startTime: '09:00', endDate: '2026-09-02', endTime: '09:00' }
+    const second = { startDate: '2026-09-03', startTime: '18:00', endDate: '2026-09-03', endTime: '09:00' }
+    rows[0]!.excludedPeriods = [first, second]
+    const group = () => groupOverlappingSubsidyTrips(rows)[0]!
+    expect(updateSubsidyWindow(group(), 'startTime', '18:00')).toBe('')
     const before = JSON.stringify(rows)
-    expect(updateSubsidyWindow(groupOverlappingSubsidyTrips(rows)[0]!, 'startDate', '2026-09-04')).toContain('冲突')
+    expect(subsidyAbsenceIssue(group(), first)).toBe('超出补助时段')
+    expect(subsidyAbsenceIssue(group(), second)).toBe('返回早于离开')
     expect(JSON.stringify(rows)).toBe(before)
+    first.startTime = '18:00'
+    second.startDate = '2026-09-02'
+    second.endTime = '18:00'
+    expect(subsidyAbsenceIssue(group(), second)).toBe('')
+    second.startTime = '09:00'
+    expect(subsidyAbsenceIssue(group(), first)).toBe('与其他时段重叠')
+    expect(subsidyAbsenceIssue(group(), second)).toBe('与其他时段重叠')
+    second.startDate = 'bad-date'
+    expect(subsidyAbsenceIssue(group(), second)).toBe('日期或时段无效')
   })
 
   it('reads legacy adjustments and edits the union of overlapping approvals', () => {

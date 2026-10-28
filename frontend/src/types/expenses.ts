@@ -41,6 +41,8 @@ export interface TripInput {
   endDate: string
   endTime: string
   policyConfirmed?: boolean
+  /** Undefined on legacy drafts; an explicit empty array means no attendance. */
+  attendanceDates?: string[]
   excludedPeriods?: ExcludedPeriodInput[]
   confirmedEffectiveDays?: string
   noSubsidyException?: boolean

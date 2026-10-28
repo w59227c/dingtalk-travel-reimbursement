@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError
 from app.domain.subsidy import (
     SubsidyCalculation,
     calculate_subsidy,
@@ -51,6 +52,12 @@ def calculate_trip_subsidies(
 
     if not trips:
         return []
+    for trip in trips:
+        if trip.trip_type is TripPurpose.SAME_CITY_PROJECT:
+            if trip.attendance_dates is None:
+                raise ApiError("ATTENDANCE_DATES_REQUIRED", "请核对并选择市内出差的出勤日期", 422)
+            if any(day < trip.start_date or day > trip.end_date for day in trip.attendance_dates):
+                raise ApiError("INVALID_ATTENDANCE_DATES", "出勤日期必须位于所属审批日期内", 422)
     settings = get_expense_settings(database)
     results: list[SubsidyCalculation] = []
     for trip in merge_overlapping_subsidy_trips(trips):
@@ -59,7 +66,8 @@ def calculate_trip_subsidies(
         # Validate after merging approvals: exclusions on different source rows
         # still belong to the same displayed subsidy period. Historical locked
         # snapshots retain their original union calculation in the domain layer.
-        validate_non_overlapping_exclusions(excluded_periods, trip.as_period())
+        if trip.attendance_dates is None:
+            validate_non_overlapping_exclusions(excluded_periods, trip.as_period())
         results.append(
             calculate_subsidy(
                 trip_type=trip_type,
@@ -71,6 +79,7 @@ def calculate_trip_subsidies(
                 manual_subsidy_amount=trip.manual_subsidy_amount,
                 related_approval_id=trip.related_approval_id,
                 excluded_periods=excluded_periods,
+                attendance_dates=trip.attendance_dates,
             )
         )
     return results
@@ -121,6 +130,11 @@ def merge_overlapping_subsidy_trips(trips: list[TripInput]) -> list[TripInput]:
                         "end_date": end_date,
                         "end_time": end_time,
                         "policy_confirmed": all(item.policy_confirmed for item in group),
+                        "attendance_dates": sorted(
+                            {day for item in group for day in item.attendance_dates or []}
+                        )
+                        if all(item.attendance_dates is not None for item in group)
+                        else None,
                         "excluded_periods": [
                             excluded for item in group for excluded in item.excluded_periods
                         ],

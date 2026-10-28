@@ -1,0 +1,646 @@
+[
+  {
+    "year": 2017,
+    "source": "https://app.www.gov.cn/govdata/gov/201612/01/394246/article.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01/01-02"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "01-27/02-02"
+        ],
+        "workDates": [
+          "01-22",
+          "02-04"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-02/04-04"
+        ],
+        "workDates": [
+          "04-01"
+        ]
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "05-01"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "05-28/05-30"
+        ],
+        "workDates": [
+          "05-27"
+        ]
+      },
+      {
+        "name": "中秋节、国庆节",
+        "restRanges": [
+          "10-01/10-08"
+        ],
+        "workDates": [
+          "09-30"
+        ]
+      }
+    ],
+    "restCount": 24,
+    "workCount": 5
+  },
+  {
+    "year": 2018,
+    "source": "https://app.www.gov.cn/govdata/gov/201711/30/415918/article.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "02-15/02-21"
+        ],
+        "workDates": [
+          "02-11",
+          "02-24"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-05/04-07"
+        ],
+        "workDates": [
+          "04-08"
+        ]
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "04-29/05-01"
+        ],
+        "workDates": [
+          "04-28"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-18"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "中秋节",
+        "restRanges": [
+          "09-24"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "国庆节",
+        "restRanges": [
+          "10-01/10-07"
+        ],
+        "workDates": [
+          "09-29",
+          "09-30"
+        ]
+      }
+    ],
+    "restCount": 23,
+    "workCount": 6
+  },
+  {
+    "year": 2019,
+    "source": "https://app.www.gov.cn/govdata/gov/201812/06/432792/article.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "2018-12-30/2019-01-01"
+        ],
+        "workDates": [
+          "2018-12-29"
+        ]
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "02-04/02-10"
+        ],
+        "workDates": [
+          "02-02",
+          "02-03"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-05"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "05-01"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-07"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "中秋节",
+        "restRanges": [
+          "09-13"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "国庆节",
+        "restRanges": [
+          "10-01/10-07"
+        ],
+        "workDates": [
+          "09-29",
+          "10-12"
+        ]
+      }
+    ],
+    "restCount": 21,
+    "workCount": 5
+  },
+  {
+    "year": 2020,
+    "source": "https://app.www.gov.cn/govdata/gov/201911/21/451111/article.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "01-24/01-30"
+        ],
+        "workDates": [
+          "01-19",
+          "02-01"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-04/04-06"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "05-01/05-05"
+        ],
+        "workDates": [
+          "04-26",
+          "05-09"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-25/06-27"
+        ],
+        "workDates": [
+          "06-28"
+        ]
+      },
+      {
+        "name": "国庆节、中秋节",
+        "restRanges": [
+          "10-01/10-08"
+        ],
+        "workDates": [
+          "09-27",
+          "10-10"
+        ]
+      }
+    ],
+    "restCount": 27,
+    "workCount": 7
+  },
+  {
+    "year": 2021,
+    "source": "https://app.www.gov.cn/govdata/gov/202011/25/465322/article.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01/01-03"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "02-11/02-17"
+        ],
+        "workDates": [
+          "02-07",
+          "02-20"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-03/04-05"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "05-01/05-05"
+        ],
+        "workDates": [
+          "04-25",
+          "05-08"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-12/06-14"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "中秋节",
+        "restRanges": [
+          "09-19/09-21"
+        ],
+        "workDates": [
+          "09-18"
+        ]
+      },
+      {
+        "name": "国庆节",
+        "restRanges": [
+          "10-01/10-07"
+        ],
+        "workDates": [
+          "09-26",
+          "10-09"
+        ]
+      }
+    ],
+    "restCount": 31,
+    "workCount": 7
+  },
+  {
+    "year": 2022,
+    "source": "https://app.www.gov.cn/govdata/gov/202110/25/477428/article.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01/01-03"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "01-31/02-06"
+        ],
+        "workDates": [
+          "01-29",
+          "01-30"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-03/04-05"
+        ],
+        "workDates": [
+          "04-02"
+        ]
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "04-30/05-04"
+        ],
+        "workDates": [
+          "04-24",
+          "05-07"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-03/06-05"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "中秋节",
+        "restRanges": [
+          "09-10/09-12"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "国庆节",
+        "restRanges": [
+          "10-01/10-07"
+        ],
+        "workDates": [
+          "10-08",
+          "10-09"
+        ]
+      }
+    ],
+    "restCount": 31,
+    "workCount": 7
+  },
+  {
+    "year": 2023,
+    "source": "https://app.www.gov.cn/govdata/gov/202212/08/495070/article.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "2022-12-31/2023-01-02"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "01-21/01-27"
+        ],
+        "workDates": [
+          "01-28",
+          "01-29"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-05"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "04-29/05-03"
+        ],
+        "workDates": [
+          "04-23",
+          "05-06"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-22/06-24"
+        ],
+        "workDates": [
+          "06-25"
+        ]
+      },
+      {
+        "name": "中秋节、国庆节",
+        "restRanges": [
+          "09-29/10-06"
+        ],
+        "workDates": [
+          "10-07",
+          "10-08"
+        ]
+      }
+    ],
+    "restCount": 27,
+    "workCount": 7
+  },
+  {
+    "year": 2024,
+    "source": "https://www.beijing.gov.cn/fuwu/bmfw/sy/jrts/202310/t20231025_3286455.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "02-10/02-17"
+        ],
+        "workDates": [
+          "02-04",
+          "02-18"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-04/04-06"
+        ],
+        "workDates": [
+          "04-07"
+        ]
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "05-01/05-05"
+        ],
+        "workDates": [
+          "04-28",
+          "05-11"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-10"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "中秋节",
+        "restRanges": [
+          "09-15/09-17"
+        ],
+        "workDates": [
+          "09-14"
+        ]
+      },
+      {
+        "name": "国庆节",
+        "restRanges": [
+          "10-01/10-07"
+        ],
+        "workDates": [
+          "09-29",
+          "10-12"
+        ]
+      }
+    ],
+    "restCount": 28,
+    "workCount": 8
+  },
+  {
+    "year": 2025,
+    "source": "https://www.gov.cn/gongbao/2024/issue_11726/material/gwygb202433.pdf",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "01-28/02-04"
+        ],
+        "workDates": [
+          "01-26",
+          "02-08"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-04/04-06"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "05-01/05-05"
+        ],
+        "workDates": [
+          "04-27"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "05-31/06-02"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "国庆节、中秋节",
+        "restRanges": [
+          "10-01/10-08"
+        ],
+        "workDates": [
+          "09-28",
+          "10-11"
+        ]
+      }
+    ],
+    "restCount": 28,
+    "workCount": 5
+  },
+  {
+    "year": 2026,
+    "source": "https://www.beijing.gov.cn/cs/gncs/zcwj/202603/t20260327_4568275.html",
+    "sections": [
+      {
+        "name": "元旦",
+        "restRanges": [
+          "01-01/01-03"
+        ],
+        "workDates": [
+          "01-04"
+        ]
+      },
+      {
+        "name": "春节",
+        "restRanges": [
+          "02-15/02-23"
+        ],
+        "workDates": [
+          "02-14",
+          "02-28"
+        ]
+      },
+      {
+        "name": "清明节",
+        "restRanges": [
+          "04-04/04-06"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "劳动节",
+        "restRanges": [
+          "05-01/05-05"
+        ],
+        "workDates": [
+          "05-09"
+        ]
+      },
+      {
+        "name": "端午节",
+        "restRanges": [
+          "06-19/06-21"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "中秋节",
+        "restRanges": [
+          "09-25/09-27"
+        ],
+        "workDates": []
+      },
+      {
+        "name": "国庆节",
+        "restRanges": [
+          "10-01/10-07"
+        ],
+        "workDates": [
+          "09-20",
+          "10-10"
+        ]
+      }
+    ],
+    "restCount": 33,
+    "workCount": 6
+  }
+]

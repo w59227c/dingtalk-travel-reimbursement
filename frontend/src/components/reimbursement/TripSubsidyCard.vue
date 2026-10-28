@@ -3,10 +3,12 @@ import { computed, ref } from 'vue'
 
 import { useExpenseStore } from '@/stores/expense'
 import type { ExcludedPeriodInput, SubsidyResult, TripInput, TripType } from '@/types/expenses'
-import { adjustmentType } from '@/utils/subsidyAdjustments'
-import { resetSubsidyWindow, subsidyWindow, updateSubsidyWindow } from '@/utils/subsidyWindow'
+import { adjustmentType, subsidyHalfDayIndex } from '@/utils/subsidyAdjustments'
+import { resetSubsidyWindow, subsidyAbsenceIssue, subsidyWindow, updateSubsidyWindow } from '@/utils/subsidyWindow'
 import { groupOverlappingSubsidyTrips, type SubsidyTripGroup } from '@/utils/subsidyTripGroups'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime, type TripDayPeriod } from '@/utils/tripPeriod'
+import { groupAttendanceDates, setGroupAttendanceDates } from '@/utils/attendanceDates'
+import AttendanceDatesPicker from './AttendanceDatesPicker.vue'
 
 interface SubsidyApproval {
   processInstanceId: string
@@ -49,6 +51,40 @@ const subsidyCalendarStarts = computed<Map<string, Date | undefined>>((previous)
   }
   return starts
 })
+const returnCalendarStarts = computed<Map<ExcludedPeriodInput, Date | undefined>>((previous) => {
+  const starts = new Map<ExcludedPeriodInput, Date | undefined>()
+  for (const group of subsidyGroups.value) {
+    const window = subsidyWindow(group)
+    for (const absence of group.excludedPeriods.filter((item) => adjustmentType(item) === 'temporary_absence')) {
+      const departureDay = absence.startDate ?? ''
+      const day = parseCalendarDay(window.startDate) && parseCalendarDay(window.endDate)
+        && parseCalendarDay(departureDay) && departureDay >= window.startDate && departureDay <= window.endDate
+        ? departureDay : window.startDate
+      const existing = previous?.get(absence)
+      starts.set(absence, existing && calendarDay(existing) === day ? existing : parseCalendarDay(day))
+    }
+  }
+  return starts
+})
+const absenceIssues = computed(() => {
+  const issues = new Map<ExcludedPeriodInput, string>()
+  if (props.readonly) return issues
+  for (const group of subsidyGroups.value) {
+    for (const absence of group.excludedPeriods.filter((item) => adjustmentType(item) === 'temporary_absence')) {
+      issues.set(absence, attendanceMode(group) ? '旧时段，请核对后删除' : subsidyAbsenceIssue(group, absence))
+    }
+  }
+  return issues
+})
+
+function attendanceMode(group: SubsidyTripGroup): boolean {
+  return props.approvalTripType === 'same_city_project'
+    && (!props.readonly || group.trips.every((trip) => trip.attendanceDates !== undefined))
+}
+
+function updateAttendance(group: SubsidyTripGroup, dates: string[]): void {
+  if (!props.readonly) setGroupAttendanceDates(group, dates)
+}
 const subsidyCalculationError = computed(() => {
   if (!expense.includeSubsidy || !expense.calculationError || expense.itemReadinessError) return ''
   if (expense.calculationError === expense.policyInputError) return ''
@@ -115,12 +151,44 @@ function disabledDate(bounds: Pick<TripInput, 'startDate' | 'endDate'>, date: Da
     || day < bounds.startDate || day > bounds.endDate
 }
 
-function disabledExcludedDate(group: SubsidyTripGroup, date: Date): boolean {
-  return disabledDate(group, date) || disabledDate(subsidyWindow(group), date)
+function disabledExcludedPeriod(
+  group: SubsidyTripGroup,
+  absence: ExcludedPeriodInput,
+  field: 'startTime' | 'endTime',
+  day: string | undefined,
+  part: TripDayPeriod,
+): boolean {
+  const candidate = subsidyHalfDayIndex(day, TRIP_PERIOD_TIME[part])
+  if (candidate === null) return false
+  const window = subsidyWindow(group)
+  const bounds = [
+    subsidyHalfDayIndex(group.startDate, group.startTime),
+    subsidyHalfDayIndex(group.endDate, group.endTime),
+    subsidyHalfDayIndex(window.startDate, window.startTime),
+    subsidyHalfDayIndex(window.endDate, window.endTime),
+  ]
+  if (bounds.some((bound) => bound === null)) return true
+  if (candidate < Math.max(bounds[0]!, bounds[2]!) || candidate > Math.min(bounds[1]!, bounds[3]!)) return true
+  if (field === 'endTime') {
+    const departureDay = absence.startDate ?? ''
+    if (day && parseCalendarDay(departureDay) && day < departureDay) return true
+    const departure = subsidyHalfDayIndex(absence.startDate, absence.startTime)
+    if (departure !== null && candidate < departure) return true
+  }
+  return false
 }
 
-function setPolicyConfirmed(group: SubsidyTripGroup, value: boolean): void {
-  for (const trip of group.trips) trip.policyConfirmed = value
+function disabledExcludedDate(
+  group: SubsidyTripGroup,
+  absence: ExcludedPeriodInput,
+  field: 'startDate' | 'endDate',
+  date: Date,
+): boolean {
+  if (disabledDate(group, date) || disabledDate(subsidyWindow(group), date)) return true
+  const timeField = field === 'startDate' ? 'startTime' : 'endTime'
+  const day = calendarDay(date)
+  return disabledExcludedPeriod(group, absence, timeField, day, 'morning')
+    && disabledExcludedPeriod(group, absence, timeField, day, 'afternoon')
 }
 
 function addExcludedPeriod(group: SubsidyTripGroup): void {
@@ -180,7 +248,13 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
       v-if="expense.includeSubsidy"
       class="subsidy-help"
     >
-      <summary>补助计算说明</summary><p>补助日期可在审批范围内调整；出发日上午计 1 天、下午计 0.5 天，返回日上午计 0.5 天、下午计 1 天，同日最多计 1 天。中途离开可添加非补助时段，各段不能重叠。</p>
+      <summary>补助计算说明</summary>
+      <p v-if="subsidyGroups.some(attendanceMode)">
+        市内出差按实际出勤日期计，每个选中日期计 1 天，不区分上午下午。首次按管理员维护的放假调休日历默认选择工作日，可补选加班日期或取消未出勤日期。
+      </p>
+      <p v-else>
+        补助日期可在审批范围内调整；出发日上午计 1 天、下午计 0.5 天，返回日上午计 0.5 天、下午计 1 天，同日最多计 1 天。中途离开可添加非补助时段，各段不能重叠。
+      </p>
     </details>
     <el-form
       label-position="top"
@@ -220,7 +294,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           v-for="(group, index) in subsidyGroups"
           :key="group.key"
           class="subsidy-item"
-          :class="{ 'subsidy-item--mobile': props.mobile }"
+          :class="{ 'subsidy-item--mobile': props.mobile, 'subsidy-item--attendance': attendanceMode(group) }"
         >
           <div
             class="subsidy-item__heading"
@@ -257,6 +331,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                     @update:model-value="setWindow(group, endpoint.dateField, $event)"
                   />
                   <el-radio-group
+                    v-if="!attendanceMode(group)"
                     :model-value="period(subsidyWindow(group)[endpoint.timeField])"
                     :aria-label="`补助 ${index + 1} ${endpoint.periodLabel}`"
                     @update:model-value="setWindow(group, endpoint.timeField, $event)"
@@ -291,14 +366,27 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
             >{{ windowErrors[group.key] }}</small>
           </div>
 
+          <AttendanceDatesPicker
+            v-if="attendanceMode(group)"
+            :model-value="groupAttendanceDates(group)"
+            :calendar="expense.attendanceCalendar"
+            :start-date="subsidyWindow(group).startDate"
+            :end-date="subsidyWindow(group).endDate"
+            :readonly="props.readonly"
+            :label="`补助 ${index + 1} 出勤日期`"
+            @update:model-value="updateAttendance(group, $event)"
+          />
+
           <section
+            v-if="!attendanceMode(group) || group.excludedPeriods.some((item) => adjustmentType(item) === 'temporary_absence')"
             class="excluded-periods"
             :class="{ 'excluded-periods--mobile': props.mobile }"
             :aria-label="`补助 ${index + 1} 非补助时段`"
           >
             <div class="excluded-periods__heading">
-              <strong>非补助时段</strong>
+              <strong>{{ attendanceMode(group) ? '原非补助时段（核对后逐项删除）' : '非补助时段' }}</strong>
               <el-button
+                v-if="!attendanceMode(group)"
                 :aria-label="`补助 ${index + 1} 添加非补助时段`"
                 :disabled="group.excludedPeriods.length >= 100"
                 @click="addExcludedPeriod(group)"
@@ -311,9 +399,17 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
               v-for="(excluded, excludedIndex) in group.excludedPeriods.filter((item) => adjustmentType(item) === 'temporary_absence')"
               :key="excludedIndex"
               class="excluded-period"
+              :class="{ 'excluded-period--invalid': absenceIssues.get(excluded) }"
             >
               <div class="excluded-periods__heading">
-                <span>时段 {{ excludedIndex + 1 }}</span>
+                <div class="excluded-period__title">
+                  <span>时段 {{ excludedIndex + 1 }}</span>
+                  <small
+                    v-if="absenceIssues.get(excluded)"
+                    class="excluded-period__issue"
+                    role="status"
+                  >{{ absenceIssues.get(excluded) }}{{ attendanceMode(group) ? '' : '，请修改' }}</small>
+                </div>
                 <el-button
                   type="danger"
                   link
@@ -334,25 +430,33 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                   <el-form-item :label="endpoint.label">
                     <div class="subsidy-endpoint-controls">
                       <el-date-picker
+                        :disabled="attendanceMode(group)"
                         :model-value="excluded[endpoint.dateField]"
                         type="date"
                         :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
                         value-format="YYYY-MM-DD"
                         format="YYYY-MM-DD"
-                        :default-value="subsidyCalendarStarts.get(group.key)"
-                        :disabled-date="(date: Date) => disabledExcludedDate(group, date)"
+                        :default-value="endpoint.key === 'end' ? returnCalendarStarts.get(excluded) : subsidyCalendarStarts.get(group.key)"
+                        :disabled-date="(date: Date) => disabledExcludedDate(group, excluded, endpoint.dateField, date)"
                         :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${endpoint.label}日期`"
                         @update:model-value="setExcludedDate(excluded, endpoint.dateField, $event)"
                       />
                       <el-radio-group
+                        :disabled="attendanceMode(group)"
                         :model-value="period(excluded[endpoint.timeField])"
                         :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${endpoint.label}时段`"
                         @update:model-value="setExcludedPeriod(excluded, endpoint.timeField, $event)"
                       >
-                        <el-radio-button value="morning">
+                        <el-radio-button
+                          value="morning"
+                          :disabled="disabledExcludedPeriod(group, excluded, endpoint.timeField, excluded[endpoint.dateField], 'morning')"
+                        >
                           上午
                         </el-radio-button>
-                        <el-radio-button value="afternoon">
+                        <el-radio-button
+                          value="afternoon"
+                          :disabled="disabledExcludedPeriod(group, excluded, endpoint.timeField, excluded[endpoint.dateField], 'afternoon')"
+                        >
                           下午
                         </el-radio-button>
                       </el-radio-group>
@@ -364,29 +468,18 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           </section>
 
           <div
-            v-if="props.approvalTripType === 'same_city_project'"
-            class="policy-confirmation"
-          >
-            <el-checkbox
-              :model-value="group.trips.every((item) => item.policyConfirmed)"
-              @update:model-value="setPolicyConfirmed(group, $event)"
-            >
-              我已按公司现行制度确认本项补助
-            </el-checkbox>
-          </div>
-
-          <div
             v-if="subsidyFor(group, index) && (props.readonly || !expense.policyInputError)"
             class="subsidy-preview"
             role="status"
             aria-live="polite"
           >
-            <span>审批自然日 {{ subsidyFor(group, index)?.calendarDays }} 天</span>
-            <span v-if="subsidyFor(group, index)?.excludedDays !== undefined">
+            <span v-if="attendanceMode(group)">出勤 {{ Number(subsidyFor(group, index)?.effectiveDays) }} 天</span>
+            <span v-else>审批自然日 {{ subsidyFor(group, index)?.calendarDays }} 天</span>
+            <span v-if="!attendanceMode(group) && subsidyFor(group, index)?.excludedDays !== undefined">
               原补助 {{ (Number(subsidyFor(group, index)?.effectiveDays) + Number(subsidyFor(group, index)?.excludedDays)).toFixed(1) }} 天
             </span>
-            <span v-if="subsidyFor(group, index)?.excludedDays !== undefined">扣除 {{ subsidyFor(group, index)?.excludedDays }} 天</span>
-            <span>有效 {{ subsidyFor(group, index)?.effectiveDays }} 天</span>
+            <span v-if="!attendanceMode(group) && subsidyFor(group, index)?.excludedDays !== undefined">扣除 {{ subsidyFor(group, index)?.excludedDays }} 天</span>
+            <span v-if="!attendanceMode(group)">有效 {{ subsidyFor(group, index)?.effectiveDays }} 天</span>
             <span>¥{{ subsidyFor(group, index)?.dailyRate }} / 天</span>
             <strong>补助 ¥{{ subsidyFor(group, index)?.total }}</strong>
           </div>
@@ -550,6 +643,9 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
 .excluded-periods { margin-top: 16px; }
 .excluded-periods__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .excluded-period { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--el-border-color-light); }
+.excluded-period--invalid { border-top-color: var(--el-color-danger-light-5); }
+.excluded-period__title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.excluded-period__issue { color: var(--el-color-danger); font-size: 12px; }
 .excluded-period-editor { margin-top: 12px; row-gap: 16px; }
 .excluded-period-editor :deep(.el-form-item) { margin-bottom: 0; }
 .excluded-periods--mobile .excluded-periods__heading { flex-wrap: wrap; }
@@ -561,10 +657,6 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
 :global(.excluded-period-picker--mobile .el-date-picker .el-picker-panel__content) {
   width: calc(100% - 24px);
   margin: 12px;
-}
-
-.policy-confirmation {
-  margin-top: 14px;
 }
 
 .subsidy-preview {
@@ -585,6 +677,29 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
 .field-error {
   margin: 12px 0 0;
   color: var(--el-color-danger);
+}
+
+@media (min-width: 900px) {
+  .subsidy-item--attendance:not(.subsidy-item--mobile) {
+    display: grid;
+    grid-template-columns: minmax(180px, .65fr) minmax(0, 1fr);
+    column-gap: 32px;
+  }
+
+  .subsidy-item--attendance:not(.subsidy-item--mobile) > .subsidy-item__heading,
+  .subsidy-item--attendance:not(.subsidy-item--mobile) > .excluded-periods,
+  .subsidy-item--attendance:not(.subsidy-item--mobile) > .subsidy-preview {
+    grid-column: 1 / -1;
+  }
+
+  .subsidy-item--attendance:not(.subsidy-item--mobile) > .subsidy-date-editor {
+    display: block;
+    align-self: start;
+  }
+
+  .subsidy-item--attendance:not(.subsidy-item--mobile) > .attendance-picker {
+    margin-top: 0;
+  }
 }
 
 @media (max-width: 720px) {

@@ -96,7 +96,7 @@ from app.services.subsidy_calculation import (
 )
 from app.services.subsidy_description import subsidy_explanation
 
-SNAPSHOT_VERSION = 10
+SNAPSHOT_VERSION = 11
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _SIGNED_INT64_MAX = 9_223_372_036_854_775_807
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -223,6 +223,11 @@ class SnapshotTrip(_SnapshotModel):
     end_date: StrictCalendarDate
     end_time: MinuteTime
     policy_confirmed: bool
+    attendance_dates: tuple[StrictCalendarDate, ...] | None = Field(
+        default=None,
+        max_length=3660,
+        exclude_if=lambda value: value is None,
+    )
     excluded_periods: tuple[SnapshotExcludedPeriod, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,
@@ -382,7 +387,7 @@ class SnapshotFormValue(_SnapshotModel):
 
 
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[6, 7, 8, 9, 10] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6, 7, 8, 9, 10, 11] = SNAPSHOT_VERSION
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
@@ -396,7 +401,8 @@ class ReimbursementSnapshot(_SnapshotModel):
     related_approvals: tuple[SnapshotRelatedApproval, ...]
     original_files: tuple[SnapshotOriginalFile, ...]
     attachment_mode: Literal["excel_only", "bundle_and_excel"] | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
     excel: SnapshotExcel
     form_values: tuple[SnapshotFormValue, ...]
@@ -1184,6 +1190,9 @@ def _snapshot_trip(trip: TripInput | None) -> SnapshotTrip | None:
         end_date=trip.end_date,
         end_time=trip.end_time,
         policy_confirmed=trip.policy_confirmed,
+        attendance_dates=tuple(trip.attendance_dates)
+        if trip.attendance_dates is not None
+        else None,
         excluded_periods=tuple(
             SnapshotExcludedPeriod.model_validate(item.model_dump())
             for item in trip.excluded_periods
@@ -1391,11 +1400,11 @@ def _description_v1(
 
 def _description_v2(items, subsidy, totals, subsidies, trips) -> str:
     calculated = subsidies or ((subsidy,) if subsidy is not None else ())
-    if not any(trip.excluded_periods for trip in trips):
+    if not any(trip.excluded_periods or trip.attendance_dates is not None for trip in trips):
         return _description_v1(items, subsidy, totals, subsidies)
     lines = _description_v1(items, None, totals).splitlines()[:-1]
     for trip, result in zip(trips, calculated, strict=True):
-        if trip.excluded_periods:
+        if trip.excluded_periods or trip.attendance_dates is not None:
             calculation = _subsidy_from_snapshot(result)
             lines.extend(subsidy_explanation(trip, calculation))
         else:
@@ -1665,12 +1674,20 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
     if len(calculated_subsidies) != len(output_trips):
         raise ValueError("trip input requires one subsidy calculation per merged period")
     for trip_item, subsidy_item in zip(output_trips, calculated_subsidies, strict=True):
+        if snapshot.snapshot_version < 11 and trip_item.attendance_dates is not None:
+            raise ValueError("attendance dates require snapshot v11")
+        if (
+            snapshot.snapshot_version >= 11
+            and trip_item.trip_type.value == "same_city_project"
+            and trip_item.attendance_dates is None
+        ):
+            raise ValueError("same-city snapshot requires attendance dates")
         if snapshot.snapshot_version < 9 and any(
             item.adjustment_type != AdjustmentType.TEMPORARY_ABSENCE
             for item in trip_item.excluded_periods
         ):
             raise ValueError("one-way subsidy adjustments require snapshot v9")
-        if snapshot.snapshot_version >= 9:
+        if snapshot.snapshot_version >= 9 and trip_item.attendance_dates is None:
             validate_non_overlapping_exclusions(
                 [item.as_period() for item in trip_item.excluded_periods], trip_item.as_period()
             )
@@ -1705,6 +1722,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
                 manual_subsidy_amount=trip_item.manual_subsidy_amount,
                 related_approval_id=trip_item.related_approval_id,
                 excluded_periods=[item.as_period() for item in trip_item.excluded_periods],
+                attendance_dates=trip_item.attendance_dates,
             )
             if recalculated != subsidy_item:
                 raise ValueError("snapshot subsidy days mismatch")

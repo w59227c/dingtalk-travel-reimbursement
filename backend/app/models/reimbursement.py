@@ -503,7 +503,7 @@ class ReimbursementSubmission(Base):
     template_process_code: Mapped[str] = mapped_column(String(128))
     template_config_version: Mapped[int] = mapped_column(Integer)
     schema_fingerprint: Mapped[str] = mapped_column(String(64))
-    snapshot_version: Mapped[int] = mapped_column(Integer, default=10)
+    snapshot_version: Mapped[int] = mapped_column(Integer, default=11)
     form_snapshot_json: Mapped[str] = mapped_column(Text)
     related_instance_ids_json: Mapped[str] = mapped_column(Text)
     snapshot_sha256: Mapped[str] = mapped_column(String(64))
@@ -1209,7 +1209,7 @@ _SQLITE_BUNDLE_MANIFEST_TRIGGERS = tuple(
                      WHERE submission_id = NEW.id AND role = 'GENERATED_EXCEL'
                        AND sort_order = 1 AND upload_status = 'LINKED'
                  )
-             WHEN NEW.snapshot_version = 10 AND json_valid(NEW.form_snapshot_json) THEN
+             WHEN NEW.snapshot_version IN (10, 11) AND json_valid(NEW.form_snapshot_json) THEN
                  json_extract(NEW.form_snapshot_json, '$.snapshotVersion') = NEW.snapshot_version
                  AND CASE json_extract(NEW.form_snapshot_json, '$.attachmentMode')
                  WHEN 'excel_only' THEN

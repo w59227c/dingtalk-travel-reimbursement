@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.api import oa_reimbursements
 from app.core.errors import ApiError, install_error_handlers
@@ -14,6 +17,7 @@ from app.integrations.dingtalk.workflow import (
     WorkflowInstanceIdPage,
     WorkflowProcessInstance,
 )
+from app.models.setting import Setting
 from app.services.sessions import get_current_session
 
 
@@ -124,7 +128,11 @@ def _client(monkeypatch, *, catalog=None, workflow=None) -> TestClient:
     application.include_router(oa_reimbursements.router, prefix="/api")
     selected_workflow = workflow or FakeWorkflow()
     application.state.dingtalk_workflow = selected_workflow
-    database_session_factory = object()
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Setting.__table__.create(engine)
+    database_session_factory = sessionmaker(engine)
     application.state.database_session_factory = database_session_factory
     application.dependency_overrides[get_current_session] = lambda: SimpleNamespace(
         record=SimpleNamespace(dingtalk_user_id="employee-1")
@@ -158,6 +166,7 @@ def test_options_returns_only_confirmed_exact_catalog_options(monkeypatch) -> No
     assert response.json()["data"] == {
         "templateConfigVersion": 12,
         "reimbursementProcessCode": "PROC-REIMBURSEMENT",
+        "attendanceCalendar": {"years": [], "days": {}},
         "companyOptions": [{"value": "北京", "label": "北京公司", "key": "company-beijing"}],
         "budgetCodeOptions": [{"value": "26007", "label": "MES 项目", "key": "budget-26007"}],
         "travelProfiles": [

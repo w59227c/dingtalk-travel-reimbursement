@@ -30,6 +30,8 @@ import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { useReimbursementSubmissionStore } from '@/stores/reimbursementSubmission'
+import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
+import { updateSubsidyWindow } from '@/utils/subsidyWindow'
 import type {
   ReimbursementDraft,
   ReimbursementDraftFile,
@@ -1632,6 +1634,77 @@ describe('ReimburseView single-form OA flow', () => {
     await nextTick()
     expect(summary.props('previewDisabledReason')).not.toContain('重叠')
     wrapper.unmount()
+  })
+
+  it.each([false, true])('autosaves an updated subsidy window with retained conflicting absences and restores them for manual repair, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const absence = { startDate: linkedApproval.startDate, startTime: '09:00', endDate: linkedApproval.startDate, endTime: '09:00' }
+    const trip = {
+      relatedApprovalId: linkedApproval.processInstanceId, tripType: 'business' as const,
+      startDate: linkedApproval.startDate, startTime: '09:00',
+      endDate: linkedApproval.endDate, endTime: '18:00', excludedPeriods: [absence],
+    }
+    serverDraft = makeDraft({
+      relatedApprovalCount: 1, relatedApprovals: [linkedApproval],
+      input: {
+        ...structuredClone(baseInput), trip: null, trips: [trip],
+        editingState: { includeSubsidy: true, trip, trips: [trip] },
+      },
+    })
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    const group = groupOverlappingSubsidyTrips(expense.subsidyTrips)[0]!
+    expect(updateSubsidyWindow(group, 'startDate', linkedApproval.endDate)).toBe('')
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    const sent = vi.mocked(updateReimbursementDraft).mock.calls.at(-1)![2]
+    expect(sent.trips).toEqual([])
+    expect(sent.editingState?.trips?.[0]?.excludedPeriods).toEqual([
+      absence,
+      { type: 'late_departure', endDate: linkedApproval.endDate, endTime: '09:00' },
+    ])
+    expect(expense.policyInputError).not.toBe('')
+    expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).not.toBe('')
+    wrapper.unmount()
+    const restored = await mountView(undefined, false, mobile)
+    const saved = restored.expense.subsidyTrips[0]!
+    expect(saved.excludedPeriods).toEqual(sent.editingState!.trips![0]!.excludedPeriods)
+    expect(restored.expense.policyInputError).not.toBe('')
+    saved.excludedPeriods![0]!.startDate = linkedApproval.endDate
+    saved.excludedPeriods![0]!.endDate = linkedApproval.endDate
+    await nextTick()
+    expect(restored.expense.policyInputError).toBe('')
+    expect(restored.expense.tripPayloads()).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(650)
+    expect(vi.mocked(updateReimbursementDraft).mock.calls.at(-1)![2].trips).toHaveLength(1)
+    restored.wrapper.unmount()
+  })
+
+  it.each([false, true])('autosaves and restores exact attendance dates after changing only a day selection, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const cityOptions = { ...structuredClone(options), attendanceCalendar: { years: [2026], days: { [linkedApproval.startDate]: { working: false, name: "合成休息日" } } } }
+    cityOptions.travelProfiles[0]!.travelTypeOption = { value: 'city', label: '境内市内项目出差（长/短期）', key: null }
+    vi.mocked(getOaReimbursementOptions).mockResolvedValue(cityOptions)
+    const trip = {
+      relatedApprovalId: linkedApproval.processInstanceId, tripType: 'same_city_project' as const,
+      startDate: linkedApproval.startDate, startTime: '09:00', endDate: linkedApproval.endDate, endTime: '18:00',
+      attendanceDates: [linkedApproval.startDate, linkedApproval.endDate],
+    }
+    serverDraft = makeDraft({ relatedApprovalCount: 1, relatedApprovals: [linkedApproval], input: {
+      ...structuredClone(baseInput), trip: null, trips: [trip], editingState: { includeSubsidy: true, trip, trips: [trip] },
+    } })
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    expect(expense.attendanceCalendar).toEqual(cityOptions.attendanceCalendar)
+    expect(expense.subsidyTrips[0]!.attendanceDates).toContain(linkedApproval.startDate)
+    expense.subsidyTrips[0]!.attendanceDates = [linkedApproval.endDate]
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    const sent = vi.mocked(updateReimbursementDraft).mock.calls.at(-1)![2]
+    expect(sent.trips![0]!.attendanceDates).toEqual([linkedApproval.endDate])
+    expect(sent.editingState!.trips![0]!.attendanceDates).toEqual([linkedApproval.endDate])
+    wrapper.unmount()
+    const restored = await mountView(undefined, false, mobile)
+    expect(restored.expense.subsidyTrips[0]!.attendanceDates).toEqual([linkedApproval.endDate])
+    restored.wrapper.unmount()
   })
 
   it('restores incomplete editing state after reload without turning the subsidy switch off', async () => {

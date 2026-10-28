@@ -1,0 +1,291 @@
+import ElementPlus, { ElMessageBox } from 'element-plus'
+import { createPinia } from 'pinia'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { DefineComponent } from 'vue'
+import { applyAttendanceNotice, deleteAttendanceCalendar, listAttendanceCalendars, parseAttendanceNotice } from '@/api/attendanceCalendars'
+import { useAuthStore } from '@/stores/auth'
+import type { AttendanceCalendarCorrection, AttendanceCalendarYear, AttendanceNoticePreview } from '@/types/attendance'
+import AttendanceCalendarSettingsCard from './AttendanceCalendarSettingsCard.vue'
+import CalendarCorrectionEditor from './CalendarCorrectionEditor.vue'
+vi.mock('@/api/attendanceCalendars', () => ({ deleteAttendanceCalendar: vi.fn(), listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn() }))
+const correctionEditor = CalendarCorrectionEditor as DefineComponent<{ modelValue: AttendanceCalendarCorrection; mobile?: boolean }>
+enableAutoUnmount(afterEach)
+afterEach(() => vi.restoreAllMocks())
+const saved: AttendanceCalendarYear = { year: 2042, revision: 'revision-one', updatedAt: '2041-12-01T01:02:03Z', days: [{ date: '2042-01-01', working: false, name: '元旦' }], complete: true, noticeTitle: '合成年度通知', sourceYears: [2042], legacy: false }
+const plan: AttendanceNoticePreview = { year: 2042, title: '合成年度通知', sourceFormat: 'notice', sourceLabel: '政府年度通知', canSave: true, previewDigest: 'a'.repeat(64), expectedRevisions: { '2042': 'revision-one' }, sections: [{ name: '元旦', source: '合成元旦原文', restDates: ['2042-01-01'], workDates: [] }], errors: [], warnings: [], changes: [{ year: 2042, mode: 'annual', complete: true, days: saved.days, added: saved.days, removed: [], modified: [], changed: true }], unchanged: false }
+function card(mobile: boolean, attachTo?: HTMLElement) { return mount(AttendanceCalendarSettingsCard, { attachTo, props: { mobile }, global: { plugins: [createPinia(), ElementPlus], stubs: { teleport: true } } }) }
+function button(wrapper: ReturnType<typeof card>, text: string) { return wrapper.findAll('button').find((item) => item.text() === text)! }
+async function paste(wrapper: ReturnType<typeof card>) {
+  await flushPromises(); await button(wrapper, '录入年度安排').trigger('click'); await flushPromises()
+  await wrapper.get('textarea').setValue('合成完整通知')
+}
+async function parse(wrapper: ReturnType<typeof card>) { await button(wrapper, '解析内容').trigger('click'); await flushPromises() }
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(listAttendanceCalendars).mockResolvedValue(structuredClone([saved]))
+  vi.mocked(parseAttendanceNotice).mockResolvedValue(structuredClone(plan))
+  vi.mocked(applyAttendanceNotice).mockResolvedValue({ items: [{ ...saved, revision: 'revision-two' }], year: 2042, unchanged: false })
+  vi.mocked(deleteAttendanceCalendar).mockResolvedValue([])
+  vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
+})
+describe.each([false, true])('paste-only annual notice flow, mobile=%s', (mobile) => {
+  it('parses without saving, shows source and diff, and explicitly confirms the exact preview', async () => {
+    const wrapper = card(mobile); await paste(wrapper)
+    expect(wrapper.find('input[type=file]').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ElDatePicker' }).exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'ElDialog' }).props('fullscreen')).toBe(mobile)
+    expect(wrapper.get('a[href="https://www.gov.cn/"]').text()).toBe('中国政府网')
+    expect(wrapper.text()).toContain(`搜索“${new Date().getFullYear()}年部分节假日安排的通知”`)
+    expect(wrapper.text()).toContain('查询其他年份时，修改搜索词中的年份')
+    expect(wrapper.text()).toContain(`提莫和 holiday-cn 查询其他年份时，替换各自网址中的 ${new Date().getFullYear()}`)
+    expect(wrapper.get(`a[href="https://timor.tech/api/holiday/year/${new Date().getFullYear()}/"]`).text()).toContain('提莫节假日 API')
+    expect(wrapper.get(`a[href="https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/${new Date().getFullYear()}.json"]`).text()).toContain('holiday-cn')
+    await parse(wrapper)
+    expect(parseAttendanceNotice).toHaveBeenCalledWith('合成完整通知', expect.any(AbortSignal))
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('合成元旦原文')
+    expect(wrapper.text()).toContain('新增 1 天')
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(applyAttendanceNotice).toHaveBeenCalledWith('合成完整通知', plan, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('2042 年安排已保存')
+  })
+  it('invalidates a preview on return to edit and blocks incomplete parsing', async () => {
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    await button(wrapper, '返回修改原文').trigger('click'); await flushPromises()
+    expect(button(wrapper, '确认保存')).toBeUndefined()
+    vi.mocked(parseAttendanceNotice).mockResolvedValue({ ...plan, canSave: false, errors: [{ message: '缺少国庆节', source: '' }] })
+    await wrapper.get('textarea').setValue('不完整通知'); await parse(wrapper)
+    expect(wrapper.text()).toContain('缺少国庆节')
+    expect(button(wrapper, '确认保存')).toBeUndefined()
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it('keeps the source toggle in its heading and expands the source below the date summary', async () => {
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    const heading = wrapper.get('.notice-section-heading')
+    const toggle = heading.get('button[aria-label="核对原文：元旦"]')
+    const source = wrapper.get('.notice-source-content')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(toggle.attributes('aria-controls')).toBe(source.attributes('id'))
+    expect(source.attributes('aria-labelledby')).toBe(toggle.attributes('id'))
+    expect((source.element as HTMLElement).style.display).toBe('none')
+    expect(heading.find('.notice-source-content').exists()).toBe(false)
+    await toggle.trigger('click')
+    expect(heading.get('button').element).toBe(toggle.element)
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect((source.element as HTMLElement).style.display).toBe('')
+    expect(source.text()).toBe('合成元旦原文')
+    expect(wrapper.find('[aria-label="年度日期清单"]').exists()).toBe(false)
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect((source.element as HTMLElement).style.display).toBe('none')
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it('locates summary dates in the calendar, including repeated clicks and adjacent years', async () => {
+    const june = { date: '2042-06-01', working: false, name: '合成节日' }
+    const december = { date: '2041-12-31', working: false, name: '元旦' }
+    vi.mocked(parseAttendanceNotice).mockResolvedValue({
+      ...plan,
+      sections: [
+        { ...plan.sections[0]!, restDates: ['2041-12-31', '2042-01-01'] },
+        { name: '合成节日', source: '合成节日原文', restDates: [june.date], workDates: ['2042-06-07'] },
+      ],
+      changes: [
+        { ...plan.changes[0]!, days: [...saved.days, june, { date: '2042-06-07', working: true, name: june.name }] },
+        { ...plan.changes[0]!, year: 2041, complete: false, mode: 'adjacent', days: [december] },
+      ],
+    })
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    const juneLink = wrapper.get('[aria-label="在日历中查看合成节日放假：06-01"]')
+    await juneLink.trigger('click')
+    expect(wrapper.get('.arrangement-grid').attributes('aria-label')).toBe('2042 年 6 月安排，只读')
+    await wrapper.get('[aria-label="查看 2042 年 9 月"]').trigger('click')
+    await juneLink.trigger('click')
+    expect(wrapper.get('.arrangement-grid').attributes('aria-label')).toBe('2042 年 6 月安排，只读')
+    await wrapper.get('[aria-label="在日历中查看合成节日补班：06-07"]').trigger('click')
+    expect(wrapper.get('.arrangement-grid').attributes('aria-label')).toBe('2042 年 6 月安排，只读')
+    await wrapper.get('[aria-label="在日历中查看元旦放假：2041-12-31 至 2042-01-01"]').trigger('click')
+    expect(wrapper.get('.arrangement-grid').attributes('aria-label')).toBe('2041 年 12 月安排，只读')
+    expect(wrapper.text()).toContain('该年仍未完整维护')
+    await button(wrapper, '2042 年 · 年度安排').trigger('click')
+    expect(wrapper.get('.arrangement-grid').attributes('aria-label')).toBe('2042 年 1 月安排，只读')
+    expect(wrapper.find('[aria-label="年度日期清单"]').exists()).toBe(false)
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it.each([
+    { sourceFormat: 'timor' as const, sourceLabel: '提莫节假日 API' },
+    { sourceFormat: 'holiday_cn' as const, sourceLabel: 'holiday-cn 年度数据' },
+  ])('shows the detected $sourceLabel and preserves pasted JSON until explicit save', async (source) => {
+    const jsonPlan = { ...plan, ...source, sections: [{ ...plan.sections[0]!, source: '[{"date":"2042-01-01","isOffDay":true}]' }] }
+    vi.mocked(parseAttendanceNotice).mockResolvedValue(jsonPlan)
+    const wrapper = card(mobile); await paste(wrapper)
+    const text = '{"year":2042,"days":[{"date":"2042-01-01","name":"元旦","isOffDay":true}]}'
+    await wrapper.get('textarea').setValue(text); await parse(wrapper)
+    expect(wrapper.text()).toContain(`已识别：${source.sourceLabel}`)
+    expect(wrapper.text()).toContain('查看数据')
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(applyAttendanceNotice).toHaveBeenCalledWith(text, jsonPlan, expect.any(AbortSignal))
+  })
+  it('keeps text on server conflict and forces a new preview', async () => {
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    vi.mocked(applyAttendanceNotice).mockRejectedValue({ isAxiosError: true, response: { data: { error: { code: 'ATTENDANCE_CALENDAR_CONFLICT', message: '日历已变更，请重新解析' } } } })
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('合成完整通知')
+    expect(wrapper.text()).toContain('日历已变更，请重新解析')
+    expect(button(wrapper, '确认保存')).toBeUndefined()
+  })
+  it('shows cross-year scope and supports safe completion when content is unchanged', async () => {
+    vi.mocked(parseAttendanceNotice).mockResolvedValue({ ...plan, unchanged: true, changes: [plan.changes[0]!, { ...plan.changes[0]!, year: 2041, complete: false, mode: 'adjacent', changed: false }] })
+    vi.mocked(applyAttendanceNotice).mockResolvedValue({ items: [saved], year: 2042, unchanged: true })
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    expect(wrapper.text()).toContain('含跨年日期')
+    expect(wrapper.text()).toContain('2041 年 · 跨年日期')
+    await button(wrapper, '完成核对').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('无需更新')
+  })
+  it('retains a verified preview on network failure so the same save can be retried', async () => {
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    vi.mocked(applyAttendanceNotice).mockRejectedValueOnce(new Error('网络中断'))
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('网络中断')
+    expect(button(wrapper, '确认保存').attributes('disabled')).toBeUndefined()
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(applyAttendanceNotice).toHaveBeenNthCalledWith(2, '合成完整通知', plan, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('安排已保存')
+  })
+  it('protects unsaved input and discards late results on unmount', async () => {
+    const wrapper = card(mobile); await paste(wrapper)
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce('cancel')
+    await button(wrapper, '取消').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent({ name: 'ElDialog' }).props('modelValue')).toBe(true)
+    let resolve!: (value: AttendanceNoticePreview) => void
+    vi.mocked(parseAttendanceNotice).mockReturnValue(new Promise((done) => { resolve = done }))
+    await button(wrapper, '解析内容').trigger('click'); await flushPromises()
+    const signal = vi.mocked(parseAttendanceNotice).mock.calls.at(-1)![1]!
+    wrapper.unmount(); expect(signal.aborted).toBe(true)
+    resolve(plan); await flushPromises()
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it('reads current state for viewing and deletion, and only offers full-year deletion', async () => {
+    vi.mocked(listAttendanceCalendars).mockResolvedValue([saved, { ...saved, year: 2041, complete: false, sourceYears: [2042] }])
+    const wrapper = card(mobile); await flushPromises()
+    expect(wrapper.find('[aria-label="删除 2041 年安排"]').exists()).toBe(false)
+    await wrapper.get('[aria-label="查看 2042 年日历"]').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('合成年度通知')
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="年度日期清单"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="查看 2042 年 2 月"]').trigger('click')
+    expect(wrapper.get('.arrangement-grid').attributes('aria-label')).toBe('2042 年 2 月安排，只读')
+    await wrapper.get('[aria-label="查看 2042-01-01 放假 元旦"]').trigger('click')
+    expect(wrapper.get('.arrangement-grid').attributes('aria-label')).toBe('2042 年 1 月安排，只读')
+    await button(wrapper, '关闭').trigger('click'); await flushPromises()
+    vi.mocked(listAttendanceCalendars).mockResolvedValue([{ ...saved, revision: 'other' }])
+    await wrapper.get('[aria-label="删除 2042 年安排"]').trigger('click'); await flushPromises()
+    expect(deleteAttendanceCalendar).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('日历已变更')
+    await wrapper.get('[aria-label="删除 2042 年安排"]').trigger('click'); await flushPromises()
+    expect(deleteAttendanceCalendar).toHaveBeenCalledWith(2042, 'other', expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('年度安排已删除')
+  })
+  it('clears pasted text and results when administrator identity changes', async () => {
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    useAuthStore().session = { user: { userId: 'synthetic-admin', name: '合成管理员' }, departments: [], selectedDepartment: null, csrfToken: 'synthetic-csrf', isAdmin: true }
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'ElDialog' }).props('modelValue')).toBe(false)
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it('offers corrections after a parse error and requires a new validated preview before explicit save', async () => {
+    vi.mocked(parseAttendanceNotice).mockResolvedValueOnce({ ...plan, canSave: false, errors: [{ message: '部分日期未识别', source: '合成来源' }] })
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    await button(wrapper, '手动修正日期').trigger('click'); await flushPromises()
+    let editor = wrapper.getComponent(correctionEditor)
+    expect(editor.props('mobile')).toBe(mobile)
+    expect(editor.props('modelValue').year).toBe(2042)
+    expect(editor.props('modelValue').ranges[0]).toEqual({ name: '元旦', startDate: '2042-01-01', endDate: '2042-01-01', working: false })
+    expect(editor.props('modelValue').ranges).toHaveLength(7)
+    expect(button(wrapper, '生成修正预览').attributes('disabled')).toBeDefined()
+    const patch: AttendanceCalendarCorrection = { year: 2042, ranges: [{ name: '合成节日', startDate: '2042-06-01', endDate: '2042-06-03', working: false }] }
+    editor.vm.$emit('update:modelValue', patch); await flushPromises()
+    const manual = { ...plan, sourceFormat: 'manual' as const, sourceLabel: '手动核对', previewDigest: 'b'.repeat(64) }
+    vi.mocked(parseAttendanceNotice).mockResolvedValue(manual)
+    await button(wrapper, '生成修正预览').trigger('click'); await flushPromises()
+    expect(parseAttendanceNotice).toHaveBeenLastCalledWith('合成完整通知', expect.any(AbortSignal), patch)
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('已手动修正')
+    await button(wrapper, '继续修正日期').trigger('click'); await flushPromises()
+    editor = wrapper.getComponent(correctionEditor)
+    expect(editor.props('modelValue')).toEqual(patch)
+    expect(button(wrapper, '确认保存')).toBeUndefined()
+    await button(wrapper, '生成修正预览').trigger('click'); await flushPromises()
+    vi.mocked(applyAttendanceNotice).mockRejectedValueOnce({ isAxiosError: true, response: { data: { error: { code: 'ATTENDANCE_CALENDAR_CONFLICT', message: '日历已变更，请重新核对' } } } })
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(wrapper.getComponent(correctionEditor).props('modelValue')).toEqual(patch)
+    expect(button(wrapper, '确认保存')).toBeUndefined()
+    await button(wrapper, '生成修正预览').trigger('click'); await flushPromises()
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(applyAttendanceNotice).toHaveBeenLastCalledWith('合成完整通知', manual, expect.any(AbortSignal), patch)
+    expect(wrapper.text()).toContain('2042 年安排已保存')
+  })
+  it('retains rejected correction values, returns to the source, and invalidates them on source edits', async () => {
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    await button(wrapper, '修正识别结果').trigger('click'); await flushPromises()
+    const patch = { year: 2042, ranges: [{ name: '元旦', startDate: '2042-01-01', endDate: '2042-01-01', working: false }] }
+    wrapper.getComponent(correctionEditor).vm.$emit('update:modelValue', patch); await flushPromises()
+    vi.mocked(parseAttendanceNotice).mockResolvedValue({ ...plan, canSave: false, sourceFormat: 'manual', errors: [{ message: '缺少全年节日安排', source: '' }] })
+    await button(wrapper, '生成修正预览').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('缺少全年节日安排')
+    expect(wrapper.getComponent(correctionEditor).props('modelValue')).toEqual(patch)
+    expect(button(wrapper, '确认保存')).toBeUndefined()
+    await button(wrapper, '返回修改原文').trigger('click'); await flushPromises()
+    expect(button(wrapper, '继续手动修正')).toBeDefined()
+    expect(wrapper.text()).toContain('修改原文或重新解析将重置修正内容')
+    await button(wrapper, '继续手动修正').trigger('click'); await flushPromises()
+    expect(wrapper.getComponent(correctionEditor).props('modelValue')).toEqual(patch)
+    await button(wrapper, '返回修改原文').trigger('click'); await flushPromises()
+    await wrapper.get('textarea').setValue('已修改来源')
+    expect(button(wrapper, '继续手动修正')).toBeUndefined()
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it('keeps a partially recognized holiday in place and requires a year when none was recognized', async () => {
+    vi.mocked(parseAttendanceNotice).mockResolvedValue({ ...plan, year: null, canSave: false, sections: [{ ...plan.sections[0]!, restDates: [] }], errors: [{ message: '年份和元旦日期未识别', source: '' }] })
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    await button(wrapper, '手动修正日期').trigger('click'); await flushPromises()
+    const editor = wrapper.getComponent(correctionEditor)
+    expect(editor.props('modelValue').year).toBe(0)
+    expect(editor.props('modelValue').ranges[0]).toEqual({ name: '元旦', startDate: '', endDate: '', working: false })
+    expect(editor.props('modelValue').ranges).toHaveLength(7)
+    expect(button(wrapper, '生成修正预览').attributes('disabled')).toBeDefined()
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it('preserves all safe JSON entries for correction and only adds the missing holiday', async () => {
+    const sections = ['春节', '清明节', '劳动节', '端午节', '中秋节', '国庆节'].map((name, index) => ({ name, source: '合成 JSON 条目', restDates: [`2042-${String(index + 2).padStart(2, '0')}-01`], workDates: [] }))
+    vi.mocked(parseAttendanceNotice).mockResolvedValue({ ...plan, sourceFormat: 'holiday_cn', canSave: false, sections, errors: [{ message: '缺少全年节日安排：元旦', source: '' }] })
+    const wrapper = card(mobile); await paste(wrapper); await parse(wrapper)
+    await button(wrapper, '手动修正日期').trigger('click'); await flushPromises()
+    const rows = wrapper.getComponent(correctionEditor).props('modelValue').ranges
+    expect(rows).toHaveLength(7)
+    expect(rows.slice(0, 6).map((row) => row.startDate)).toEqual(sections.map((section) => section.restDates[0]))
+    expect(rows.at(-1)).toEqual({ name: '元旦', startDate: '', endDate: '', working: false })
+    expect(button(wrapper, '生成修正预览').attributes('disabled')).toBeDefined()
+  })
+  it('focuses parse, correction and request errors so failed actions have visible feedback', async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    vi.mocked(parseAttendanceNotice).mockResolvedValueOnce({ ...plan, canSave: false, errors: [{ message: '合成解析问题', source: '' }] })
+    const wrapper = card(mobile, document.body); await paste(wrapper); await parse(wrapper)
+    expect(focus.mock.contexts).toContain(wrapper.get('.notice-issues').element)
+    await button(wrapper, '手动修正日期').trigger('click'); await flushPromises()
+    wrapper.getComponent(correctionEditor).vm.$emit('update:modelValue', { year: 2042, ranges: [{ name: '元旦', startDate: '2042-01-02', endDate: '2042-01-01', working: false }] })
+    await flushPromises()
+    focus.mockClear()
+    vi.mocked(parseAttendanceNotice).mockResolvedValueOnce({ ...plan, canSave: false, errors: [{ message: '第 1 段日期倒序', source: '' }] })
+    await button(wrapper, '生成修正预览').trigger('click'); await flushPromises()
+    expect(focus.mock.contexts).toContain(wrapper.get('.notice-issues').element)
+    expect(wrapper.get('.notice-issues').text()).toContain('日期倒序')
+    vi.mocked(parseAttendanceNotice).mockRejectedValueOnce(new Error('合成网络问题'))
+    focus.mockClear()
+    await button(wrapper, '生成修正预览').trigger('click'); await flushPromises()
+    expect(focus.mock.contexts).toContain(wrapper.get('p.calendar-error').element)
+    expect(wrapper.get('p.calendar-error').text()).toContain('网络问题')
+  })
+})

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import AttendanceCalendarSettingsCard from '@/components/settings/AttendanceCalendarSettingsCard.vue'
 import ApprovalDiagnosticsCard from '@/components/settings/ApprovalDiagnosticsCard.vue'
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
 import OaTemplateSettingsCard from '@/components/settings/OaTemplateSettingsCard.vue'
@@ -15,7 +16,7 @@ const props = withDefaults(defineProps<{
 
 <template>
   <main
-    class="page-shell narrow-page"
+    class="page-shell narrow-page settings-page"
     :class="{ 'page-shell--mobile': props.mobile }"
   >
     <div class="admin-page-header">
@@ -42,9 +43,27 @@ const props = withDefaults(defineProps<{
 
     <ReceiptKeywordSettingsCard />
     <SubsidyRateSettingsCard />
+    <AttendanceCalendarSettingsCard :mobile="props.mobile" />
     <SubmissionRecoveryCard :mobile="props.mobile" />
     <ApprovalDiagnosticsCard :mobile="props.mobile" />
     <ReceiptDiagnosticsCard :mobile="props.mobile" />
     <OaTemplateSettingsCard />
   </main>
 </template>
+
+<style scoped>
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.settings-page > .admin-page-header {
+  margin-bottom: 4px;
+}
+
+.settings-page > :deep(.el-card) {
+  margin: 0;
+  border-radius: 8px;
+}
+</style>

@@ -1,6 +1,7 @@
 import type { ExcludedPeriodInput } from '@/types/expenses'
-import { adjustmentType, adjustmentValidationError } from '@/utils/subsidyAdjustments'
+import { adjustmentType, adjustmentValidationError, subsidyHalfDayIndex } from '@/utils/subsidyAdjustments'
 import type { SubsidyTripGroup } from '@/utils/subsidyTripGroups'
+import { tripPeriodFromTime } from '@/utils/tripPeriod'
 
 type WindowField = 'startDate' | 'startTime' | 'endDate' | 'endTime'
 
@@ -23,9 +24,44 @@ export function subsidyWindow(group: SubsidyTripGroup): Record<WindowField, stri
   }
 }
 
+/** Explain existing absences without changing or dropping the user's input. */
+export function subsidyAbsenceIssue(group: SubsidyTripGroup, absence: ExcludedPeriodInput): string {
+  const window = subsidyWindow(group)
+  const lower = subsidyHalfDayIndex(window.startDate, window.startTime)
+  const upper = subsidyHalfDayIndex(window.endDate, window.endTime)
+  if (lower === null || upper === null || lower > upper) return ''
+  const start = subsidyHalfDayIndex(absence.startDate, absence.startTime)
+  const end = subsidyHalfDayIndex(absence.endDate, absence.endTime)
+  for (const [day, time] of [[absence.startDate, absence.startTime], [absence.endDate, absence.endTime]]) {
+    if (day && subsidyHalfDayIndex(day, '09:00') === null) return '日期或时段无效'
+    if (time && !tripPeriodFromTime(time)) return '日期或时段无效'
+    if (day && (day < window.startDate || day > window.endDate)) return '超出补助时段'
+  }
+  if ((start !== null && (start < lower || start > upper))
+    || (end !== null && (end < lower || end > upper))) return '超出补助时段'
+  if (start === null || end === null) return ''
+  if (end < start) return '返回早于离开'
+  const edges = group.excludedPeriods.filter((item) => adjustmentType(item) !== 'temporary_absence')
+  const edgeError = adjustmentValidationError({ ...group, excludedPeriods: [...edges, absence] })
+  if (edgeError && !edgeError.startsWith('请补齐')) return '与补助起止时段冲突'
+  for (const other of group.excludedPeriods) {
+    if (other === absence || adjustmentType(other) !== 'temporary_absence') continue
+    const otherStart = subsidyHalfDayIndex(other.startDate, other.startTime)
+    const otherEnd = subsidyHalfDayIndex(other.endDate, other.endTime)
+    if (otherStart !== null && otherEnd !== null && otherStart <= otherEnd && start <= otherEnd && otherStart <= end) {
+      return '与其他时段重叠'
+    }
+  }
+  return ''
+}
+
 /** Edit the effective window using the existing server-validated edge adjustments. */
 export function updateSubsidyWindow(group: SubsidyTripGroup, field: WindowField, value: string): string {
   const next = { ...subsidyWindow(group), [field]: value }
+  if (group.trips[0]?.tripType === 'same_city_project') {
+    next.startTime = '09:00'
+    next.endTime = '18:00'
+  }
   for (const day of [next.startDate, next.endDate]) {
     if (!day) continue
     const parsed = new Date(`${day}T00:00:00Z`)
@@ -49,8 +85,8 @@ export function updateSubsidyWindow(group: SubsidyTripGroup, field: WindowField,
   }
   const startTime = next.startDate === group.startDate ? next.startTime : group.startTime
   const endTime = next.endDate === group.endDate ? next.endTime : group.endTime
-  const error = adjustmentValidationError({ ...group, startTime, endTime, excludedPeriods: [...temporary, ...edges] })
-  if (error && !error.startsWith('请补齐')) return `补助日期与已有非补助时段冲突，请先调整或删除相应时段（${error}）`
+  const error = adjustmentValidationError({ ...group, startTime, endTime, excludedPeriods: edges })
+  if (error && !error.startsWith('请补齐')) return error
   for (const trip of group.trips) {
     trip.excludedPeriods = (trip.excludedPeriods ?? []).filter((item) => adjustmentType(item) === 'temporary_absence')
     if (trip.startDate === group.startDate) trip.startTime = startTime

@@ -774,7 +774,6 @@ describe('expense store', () => {
     })
     expect(store.projectCalendarDays).toBe(31)
     expect(store.projectPolicyType).toBe('long_term_project')
-    expect(store.requiresPolicyConfirmation).toBe(false)
     expect(store.tripPayload()).toMatchObject({
       tripType: 'long_term_project',
     })
@@ -785,7 +784,6 @@ describe('expense store', () => {
     })
     expect(store.projectCalendarDays).toBe(30)
     expect(store.projectPolicyType).toBe('long_term_project')
-    expect(store.requiresPolicyConfirmation).toBe(false)
 
     store.setTripType('long_term_internal')
     expect(store.tripPayload()).toMatchObject({
@@ -793,8 +791,11 @@ describe('expense store', () => {
     })
 
     store.setTripType('same_city_project')
+    expect(store.tripPayload()).toBeNull()
+    expect(store.policyInputError).toContain('出勤日期')
+    store.trip.attendanceDates = ['2026-06-01']
     expect(store.tripPayload()).toMatchObject({ tripType: 'same_city_project', policyConfirmed: false })
-    expect(store.policyInputError).toContain('勾选')
+    expect(store.policyInputError).toBe('')
     store.trip.policyConfirmed = true
     expect(store.tripPayload()).toMatchObject({ tripType: 'same_city_project', policyConfirmed: true })
     expect(store.policyInputError).toBe('')

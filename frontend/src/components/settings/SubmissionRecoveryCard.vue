@@ -51,7 +51,7 @@ async function attachInstance(): Promise<void> {
   const instance = processInstanceId.value.trim()
   const note = verificationNote.value.trim()
   if (!submission || !instance || !note) {
-    ElMessage.error('请填写提交记录 ID、钉钉审批实例 ID 和核对依据')
+    ElMessage.error('请填写提交记录 ID、钉钉审批实例 ID 和核对说明')
     return
   }
   recovering.value = true
@@ -78,7 +78,7 @@ async function confirmNotCreated(): Promise<void> {
   const submission = submissionId.value.trim()
   const note = verificationNote.value.trim()
   if (!submission || !note) {
-    ElMessage.error('请填写提交记录 ID 和核对依据')
+    ElMessage.error('请填写提交记录 ID 和核对说明')
     return
   }
   recovering.value = true
@@ -154,12 +154,7 @@ async function recoverNotCreated(
     class="submission-recovery-card"
   >
     <template #header>
-      <div class="submission-recovery-heading">
-        <strong>异常提交恢复</strong>
-        <el-tag type="warning">
-          管理员工具
-        </el-tag>
-      </div>
+      <strong>异常提交恢复</strong>
     </template>
     <details class="recovery-details">
       <summary>展开人工核对与恢复</summary><p class="field-help">
@@ -189,19 +184,22 @@ async function recoverNotCreated(
             placeholder="确认 OA 已创建时填写"
           />
         </el-form-item>
-        <el-form-item label="核对依据">
+        <el-form-item label="核对说明">
           <el-input
             v-model="verificationNote"
             type="textarea"
-            :rows="3"
+            :rows="2"
             data-testid="verification-note"
             maxlength="500"
             show-word-limit
-            placeholder="简要记录核对位置、时间范围和判断依据"
+            placeholder="例如：在钉钉审批列表按发起人和提交当天查询，未找到对应报销"
           />
+          <p class="field-help recovery-note-help">
+            记录核对位置、查询时间范围和结果，随本次恢复操作保存，便于追溯。
+          </p>
         </el-form-item>
         <p class="field-help">
-          已找到 OA：填写实例 ID 后继续回读；确认 OA 未创建：记录核对依据后进入附件清理。
+          已找到 OA：填写实例 ID 后继续回读；确认 OA 未创建：填写核对说明后进入附件清理。
         </p>
         <div
           class="submission-recovery-actions"
@@ -242,7 +240,6 @@ async function recoverNotCreated(
   margin-bottom: 20px;
 }
 
-.submission-recovery-heading,
 .submission-recovery-actions {
   display: flex;
   align-items: center;
@@ -262,6 +259,7 @@ async function recoverNotCreated(
 
 <style scoped>
 .recovery-details summary { cursor: pointer; color: var(--el-color-primary); }
+.recovery-note-help { width: 100%; margin: 6px 0 0; font-size: 12px; line-height: 1.6; }
 .submission-recovery-actions--mobile { align-items: stretch; flex-direction: column; }
 .submission-recovery-actions--mobile :deep(.el-button + .el-button) { margin-left: 0; }
 </style>

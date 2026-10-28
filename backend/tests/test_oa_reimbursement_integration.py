@@ -780,7 +780,7 @@ def test_subsidy_only_submission_manifest_readback_retry_and_cleanup(
     with client.app.state.database_session_factory() as database:
         submission = database.get(ReimbursementSubmission, submission_id)
         snapshot = json.loads(submission.form_snapshot_json)
-        assert snapshot["snapshotVersion"] == 10
+        assert snapshot["snapshotVersion"] == 11
         assert snapshot["attachmentMode"] == (
             "bundle_and_excel" if with_materials else "excel_only"
         )
@@ -1623,7 +1623,7 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
             .order_by(ReimbursementUpload.sort_order)
         ).all()
         assert submission is not None
-        assert submission.snapshot_version == 10
+        assert submission.snapshot_version == 11
         frozen = json.loads(submission.form_snapshot_json)
         if with_exclusions:
             assert frozen["subsidy"]["excludedDays"] == (

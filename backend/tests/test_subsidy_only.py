@@ -49,7 +49,7 @@ def canonical(value):
 
 def test_subsidy_only_snapshot_and_exact_excel_attachment_manifest():
     snapshot = build_snapshot(subsidy_source())
-    assert snapshot.snapshot_version == 10
+    assert snapshot.snapshot_version == 11
     assert snapshot.attachment_mode == "excel_only"
     encoded = serialize_snapshot(snapshot)
     assert (

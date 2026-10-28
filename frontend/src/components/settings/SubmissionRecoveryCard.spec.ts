@@ -39,12 +39,15 @@ describe('SubmissionRecoveryCard', () => {
     vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)
     const wrapper = mount(SubmissionRecoveryCard, { props: { mobile }, global: { plugins: [createPinia(), ElementPlus] } })
     expect(wrapper.get('details').attributes('open')).toBeUndefined()
+    expect(wrapper.text()).not.toContain('管理员工具')
+    expect(wrapper.text()).toContain('核对说明')
+    expect(wrapper.text()).toContain('随本次恢复操作保存')
     const inputs = wrapper.findAll('input')
     await inputs[0]!.setValue('submission-1')
     await inputs[1]!.setValue('oa-1')
 
     await wrapper.findAll('button').find((button) => button.text().includes('绑定审批'))!.trigger('click')
-    expect(error).toHaveBeenCalledWith('请填写提交记录 ID、钉钉审批实例 ID 和核对依据')
+    expect(error).toHaveBeenCalledWith('请填写提交记录 ID、钉钉审批实例 ID 和核对说明')
     expect(recoverReimbursementSubmission).not.toHaveBeenCalled()
 
     await wrapper.get('[data-testid="verification-note"]').setValue('已按发起人、时间和全部表单字段核对')

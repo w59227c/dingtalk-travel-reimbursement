@@ -122,6 +122,7 @@ export interface OaReimbursementTravelProfile {
 }
 
 export interface OaReimbursementOptions {
+  attendanceCalendar?: import('./attendance').AttendanceCalendar
   templateConfigVersion: number
   reimbursementProcessCode: string
   companyOptions: OaFormOption[]

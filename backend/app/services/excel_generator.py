@@ -187,7 +187,9 @@ def _ordered_lines(
     for index, (subsidy_trip, subsidy_item) in enumerate(subsidy_pairs):
         explanation = (
             subsidy_explanation(subsidy_trip, subsidy_item)
-            if detailed_subsidies and subsidy_trip.excluded_periods else ()
+            if detailed_subsidies
+            and (subsidy_trip.excluded_periods or subsidy_trip.attendance_dates is not None)
+            else ()
         )
         indexed_lines.append(
             (

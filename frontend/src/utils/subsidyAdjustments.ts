@@ -15,7 +15,7 @@ export function adjustmentPayload(value: ExcludedPeriodInput): ExcludedPeriodInp
   }
 }
 
-function point(day: string | undefined, clock: string | undefined): number | null {
+export function subsidyHalfDayIndex(day: string | undefined, clock: string | undefined): number | null {
   const period = tripPeriodFromTime(clock)
   if (!day || day.startsWith('0000') || !/^\d{4}-\d{2}-\d{2}$/.test(day) || !period) return null
   const parsed = new Date(`${day}T00:00:00Z`)
@@ -28,8 +28,8 @@ export function adjustmentValidationError(
 ): string {
   const values = group.excludedPeriods ?? []
   if (!values.length) return ''
-  const lower = point(group.startDate, group.startTime)
-  const upper = point(group.endDate, group.endTime)
+  const lower = subsidyHalfDayIndex(group.startDate, group.startTime)
+  const upper = subsidyHalfDayIndex(group.endDate, group.endTime)
   if (lower === null || upper === null) return ''
   let actualStart = lower
   let actualEnd = upper
@@ -42,8 +42,8 @@ export function adjustmentValidationError(
   for (const [index, value] of values.entries()) {
     const type = adjustmentType(value)
     if (!['temporary_absence', 'late_departure', 'early_end'].includes(type)) return '请选择有效的调整类型'
-    const start = type === 'late_departure' ? lower : point(value.startDate, value.startTime)
-    const end = type === 'early_end' ? upper : point(value.endDate, value.endTime)
+    const start = type === 'late_departure' ? lower : subsidyHalfDayIndex(value.startDate, value.startTime)
+    const end = type === 'early_end' ? upper : subsidyHalfDayIndex(value.endDate, value.endTime)
     if (start === null || end === null) return '请补齐每个非补助时段的日期和出发时段'
     if (start < lower || start > upper || end < lower || end > upper) return '非补助时段必须在本项出差时段内'
     if (end < start) return '非补助时段的结束时间不能早于开始时间'

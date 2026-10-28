@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query, Request
 
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
 from app.schemas.common import success
+from app.services.attendance_calendar import attendance_calendar
 from app.services.oa_template_profiles import load_fresh_submission_catalog
 from app.services.sessions import CurrentSession, get_current_session
 from app.services.travel_approvals import (
@@ -27,7 +28,9 @@ async def get_reimbursement_options(
         request.app.state.database_session_factory,
         request.app.state.dingtalk_workflow,
     )
-    return success(runtime_options(catalog))
+    with request.app.state.database_session_factory() as database:
+        calendar = attendance_calendar(database)
+    return success({**runtime_options(catalog), "attendanceCalendar": calendar})
 
 
 @router.get("/oa/travel-approvals")

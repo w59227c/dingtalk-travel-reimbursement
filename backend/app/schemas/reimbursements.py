@@ -3,11 +3,18 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from app.domain.categories import ExpenseCategory
 from app.domain.money import MAX_REIMBURSEMENT_AMOUNT, quantize_money
-from app.domain.subsidy import AdjustmentType
+from app.domain.subsidy import MAX_ATTENDANCE_DATES, AdjustmentType
 from app.schemas.excel import ExcelGenerateRequest, ManualProjectInput, SelectedProjectInput
 from app.schemas.expenses import MAX_EXPENSE_ITEMS_HARD_LIMIT, TripPurpose
 from app.schemas.primitives import DecimalString, StrictCalendarDate
@@ -49,6 +56,12 @@ class ReimbursementEditingTripInput(BaseModel):
     end_date: str = Field(default="", alias="endDate", max_length=10)
     end_time: str = Field(default="", alias="endTime", max_length=5)
     policy_confirmed: bool = Field(default=False, alias="policyConfirmed")
+    attendance_dates: list[Annotated[str, StringConstraints(max_length=10)]] | None = Field(
+        default=None,
+        alias="attendanceDates",
+        max_length=MAX_ATTENDANCE_DATES,
+        exclude_if=lambda value: value is None,
+    )
     excluded_periods: list[ReimbursementEditingExcludedPeriodInput] = Field(
         default_factory=list,
         alias="excludedPeriods",
@@ -151,7 +164,9 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
         return value
 
     @field_validator(
-        "itinerary_file_ids", "payment_proof_file_ids", "hotel_bill_file_ids",
+        "itinerary_file_ids",
+        "payment_proof_file_ids",
+        "hotel_bill_file_ids",
         "receipt_attachment_file_ids",
     )
     @classmethod

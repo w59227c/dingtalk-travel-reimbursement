@@ -4,6 +4,7 @@ import { createPinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { listAttendanceCalendars } from '@/api/attendanceCalendars'
 import { getExpenseCategories } from '@/api/expenses'
 import { getOaTemplateCatalog } from '@/api/oaTemplates'
 import {
@@ -16,6 +17,7 @@ import { getAdminExpenseSettings, updateExpenseSettings } from '@/api/settings'
 import SettingsAdminView from './SettingsAdminView.vue'
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
 
+vi.mock('@/api/attendanceCalendars', () => ({ listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), deleteAttendanceCalendar: vi.fn() }))
 vi.mock('@/api/expenses', () => ({ getExpenseCategories: vi.fn() }))
 vi.mock('@/api/oaTemplates', () => ({
   confirmOaTemplateCatalog: vi.fn(),
@@ -40,6 +42,7 @@ vi.mock('@/api/settings', async (importOriginal) => {
 describe('SettingsAdminView receipt keywords', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(listAttendanceCalendars).mockResolvedValue([])
     window.ResizeObserver = class ResizeObserver {
       observe(): void {}
       unobserve(): void {}

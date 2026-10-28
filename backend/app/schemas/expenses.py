@@ -16,7 +16,13 @@ from pydantic import (
 from app.core.errors import ApiError
 from app.domain.categories import ExpenseCategory
 from app.domain.money import MAX_REIMBURSEMENT_AMOUNT, quantize_money
-from app.domain.subsidy import AdjustmentType, SubsidyAdjustment, TripPeriod, TripType
+from app.domain.subsidy import (
+    MAX_ATTENDANCE_DATES,
+    AdjustmentType,
+    SubsidyAdjustment,
+    TripPeriod,
+    TripType,
+)
 from app.schemas.primitives import DecimalString, MinuteTime, StrictCalendarDate
 
 MAX_CONFIRMED_EFFECTIVE_DAYS = Decimal("366.0")
@@ -98,6 +104,12 @@ class TripInput(BaseModel):
     end_date: StrictCalendarDate = Field(alias="endDate")
     end_time: MinuteTime = Field(alias="endTime")
     policy_confirmed: bool = Field(default=False, alias="policyConfirmed")
+    attendance_dates: list[StrictCalendarDate] | None = Field(
+        default=None,
+        alias="attendanceDates",
+        max_length=MAX_ATTENDANCE_DATES,
+        exclude_if=lambda value: value is None,
+    )
     excluded_periods: list[ExcludedPeriodInput] = Field(
         default_factory=list,
         alias="excludedPeriods",
@@ -132,6 +144,14 @@ class TripInput(BaseModel):
     def validate_manual_subsidy_type(self) -> TripInput:
         if self.manual_subsidy_amount is not None:
             raise ValueError("manual subsidy total is no longer supported")
+        if self.attendance_dates is not None:
+            if self.trip_type is not TripPurpose.SAME_CITY_PROJECT:
+                raise ValueError("attendance dates are only supported for same-city projects")
+            if len(set(self.attendance_dates)) != len(self.attendance_dates):
+                raise ValueError("attendance dates must be unique")
+            if any(day < self.start_date or day > self.end_date for day in self.attendance_dates):
+                raise ValueError("attendance dates must belong to the source approval")
+            self.attendance_dates = sorted(self.attendance_dates)
         return self
 
     def as_period(self) -> TripPeriod:
