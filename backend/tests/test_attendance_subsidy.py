@@ -37,6 +37,23 @@ def attendance_trip(**changes):
     }
 
 
+def install_calendar(client):
+    from test_attendance_calendar import NOTICE
+
+    from app.services.attendance_calendar import NoticeApply, apply_notice, preview_notice
+
+    with client.app.state.database_session_factory() as database:
+        plan = preview_notice(database, NOTICE)
+        apply_notice(
+            database,
+            NoticeApply(
+                text=NOTICE,
+                previewDigest=plan["previewDigest"],
+                expectedRevisions=plan["expectedRevisions"],
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     "start,end", [(time(9), time(9)), (time(18), time(18)), (time(18), time(9))]
 )
@@ -54,6 +71,7 @@ def test_attendance_pays_one_whole_day_even_for_half_day_or_weekend(start, end):
 
 def test_real_api_uses_selected_dates_and_server_rate_without_confirmation(client_factory):
     client = client_factory(auth_mock_enabled=True)
+    install_calendar(client)
     headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
     body = {"trip": attendance_trip(), "items": []}
     assert client.post("/api/calculate/totals", json=body).status_code == 403
@@ -68,6 +86,58 @@ def test_real_api_uses_selected_dates_and_server_rate_without_confirmation(clien
     )
     assert empty.status_code == 200
     assert empty.json()["data"]["subsidyTotal"] == "0.00"
+
+
+def test_missing_calendar_blocks_city_only_and_validates_all_effective_years(client_factory):
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    missing = client.post(
+        "/api/calculate/totals", json={"trip": attendance_trip(), "items": []}, headers=headers
+    )
+    assert missing.status_code == 422
+    assert missing.json()["error"]["code"] == "ATTENDANCE_CALENDAR_REQUIRED"
+    assert "2026" in missing.json()["error"]["message"]
+    business = attendance_trip(tripType="business")
+    business.pop("attendanceDates")
+    assert (
+        client.post(
+            "/api/calculate/totals", json={"trip": business, "items": []}, headers=headers
+        ).status_code
+        == 200
+    )
+    install_calendar(client)
+    cross = attendance_trip(
+        startDate="2025-12-31", endDate="2026-01-03", attendanceDates=["2026-01-02"]
+    )
+    response = client.post(
+        "/api/calculate/totals", json={"trip": cross, "items": []}, headers=headers
+    )
+    assert response.status_code == 422 and "2025" in response.json()["error"]["message"]
+    cross["excludedPeriods"] = [
+        {"type": "late_departure", "endDate": "2026-01-01", "endTime": "09:00"}
+    ]
+    assert (
+        client.post(
+            "/api/calculate/totals", json={"trip": cross, "items": []}, headers=headers
+        ).status_code
+        == 200
+    )
+
+
+def test_missing_calendar_draft_can_save_restore_but_cannot_generate_totals(
+    client_factory, monkeypatch
+):
+    from test_reimbursement_drafts import _create, _install_catalog
+
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    response = _create(client, headers, {"items": [], "trip": attendance_trip()})
+    assert response.status_code == 201
+    draft = response.json()["data"]
+    assert draft["totals"]["subsidies"] == []
+    loaded = client.get(f"/api/reimbursements/drafts/{draft['id']}").json()["data"]
+    assert loaded["input"]["trip"]["attendanceDates"] == attendance_trip()["attendanceDates"]
 
 
 @pytest.mark.parametrize(
@@ -109,6 +179,7 @@ def test_attendance_api_rejects_missing_duplicate_outside_or_mixed_rules(client_
 
 def test_overlapping_approvals_deduplicate_dates_and_preserve_source_bounds(client_factory):
     client = client_factory(auth_mock_enabled=True)
+    install_calendar(client)
     headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
     first = attendance_trip(
         relatedApprovalId="synthetic-a",

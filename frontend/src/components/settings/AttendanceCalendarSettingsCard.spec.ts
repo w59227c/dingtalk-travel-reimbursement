@@ -3,12 +3,12 @@ import { createPinia } from 'pinia'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DefineComponent } from 'vue'
-import { applyAttendanceNotice, deleteAttendanceCalendar, listAttendanceCalendars, parseAttendanceNotice } from '@/api/attendanceCalendars'
+import { applyAttendanceNotice, deleteAttendanceCalendar, listAttendanceCalendars, parseAttendanceNotice, attendanceSyncStatus, checkAttendanceYear } from '@/api/attendanceCalendars'
 import { useAuthStore } from '@/stores/auth'
 import type { AttendanceCalendarCorrection, AttendanceCalendarYear, AttendanceNoticePreview } from '@/types/attendance'
 import AttendanceCalendarSettingsCard from './AttendanceCalendarSettingsCard.vue'
 import CalendarCorrectionEditor from './CalendarCorrectionEditor.vue'
-vi.mock('@/api/attendanceCalendars', () => ({ deleteAttendanceCalendar: vi.fn(), listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn() }))
+vi.mock('@/api/attendanceCalendars', () => ({ deleteAttendanceCalendar: vi.fn(), listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), attendanceSyncStatus: vi.fn(), checkAttendanceYear: vi.fn() }))
 const correctionEditor = CalendarCorrectionEditor as DefineComponent<{ modelValue: AttendanceCalendarCorrection; mobile?: boolean }>
 enableAutoUnmount(afterEach)
 afterEach(() => vi.restoreAllMocks())
@@ -17,12 +17,13 @@ const plan: AttendanceNoticePreview = { year: 2042, title: '合成年度通知',
 function card(mobile: boolean, attachTo?: HTMLElement) { return mount(AttendanceCalendarSettingsCard, { attachTo, props: { mobile }, global: { plugins: [createPinia(), ElementPlus], stubs: { teleport: true } } }) }
 function button(wrapper: ReturnType<typeof card>, text: string) { return wrapper.findAll('button').find((item) => item.text() === text)! }
 async function paste(wrapper: ReturnType<typeof card>) {
-  await flushPromises(); await button(wrapper, '录入年度安排').trigger('click'); await flushPromises()
+  await flushPromises(); await button(wrapper, '粘贴内容录入').trigger('click'); await flushPromises()
   await wrapper.get('textarea').setValue('合成完整通知')
 }
 async function parse(wrapper: ReturnType<typeof card>) { await button(wrapper, '解析内容').trigger('click'); await flushPromises() }
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(attendanceSyncStatus).mockResolvedValue({ enabled: true, startMonth: 11, intervalDays: 5, source: "holiday_cn", items: [] })
   vi.mocked(listAttendanceCalendars).mockResolvedValue(structuredClone([saved]))
   vi.mocked(parseAttendanceNotice).mockResolvedValue(structuredClone(plan))
   vi.mocked(applyAttendanceNotice).mockResolvedValue({ items: [{ ...saved, revision: 'revision-two' }], year: 2042, unchanged: false })
@@ -30,6 +31,39 @@ beforeEach(() => {
   vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
 })
 describe.each([false, true])('paste-only annual notice flow, mobile=%s', (mobile) => {
+  it('supports standalone entry without a pasted source, previews before saving and preserves edits', async () => {
+    const wrapper = card(mobile); await flushPromises()
+    await button(wrapper, '手动填写').trigger('click'); await flushPromises()
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(wrapper.text()).toContain('无需粘贴内容')
+    const patch = { year: 2042, ranges: [{ name: '合成完整安排', startDate: '2042-01-01', endDate: '2042-01-02', working: false }] }
+    wrapper.findComponent(correctionEditor).vm.$emit('update:modelValue', patch)
+    await flushPromises()
+    vi.mocked(parseAttendanceNotice).mockResolvedValue({ ...plan, sourceFormat: 'manual', sourceLabel: '手动核对' })
+    await button(wrapper, '生成预览').trigger('click'); await flushPromises()
+    expect(parseAttendanceNotice).toHaveBeenCalledWith('', expect.any(AbortSignal), patch)
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+    expect(wrapper.find('.notice-source-toggle').exists()).toBe(false)
+    expect(button(wrapper, '返回修改原文')).toBeUndefined()
+    await button(wrapper, '返回填写').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent(correctionEditor).props('modelValue')).toEqual(patch)
+    await button(wrapper, '生成预览').trigger('click'); await flushPromises()
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(applyAttendanceNotice).toHaveBeenCalledWith('', expect.objectContaining({ canSave: true }), expect.any(AbortSignal), patch)
+  })
+  it('shows persistent automatic acquisition status and checks the requested year', async () => {
+    const waiting = { year: 2042, status: 'retry' as const, lastAttemptAt: '2041-11-01T00:00:00Z', nextAttemptAt: '2041-11-06T00:00:00Z', completedAt: null, errorCode: 'unavailable', message: '暂无完整年度安排' }
+    const state = { enabled: true, startMonth: 11, intervalDays: 5, source: 'holiday_cn', items: [waiting] }
+    vi.mocked(attendanceSyncStatus).mockResolvedValue(state)
+    vi.mocked(checkAttendanceYear).mockResolvedValue({ ...state, items: [{ ...waiting, status: 'completed', nextAttemptAt: null, errorCode: '', message: '' }] })
+    const wrapper = card(mobile); await flushPromises()
+    expect(wrapper.text()).toContain('每年 11 月 1 日起，每 5 天')
+    expect(wrapper.text()).toContain('等待重试')
+    wrapper.findComponent({ name: 'ElInputNumber' }).vm.$emit('update:modelValue', 2042)
+    await flushPromises(); await button(wrapper, '立即获取').trigger('click'); await flushPromises()
+    expect(checkAttendanceYear).toHaveBeenCalledWith(2042, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('本轮自动获取已完成')
+  })
   it('parses without saving, shows source and diff, and explicitly confirms the exact preview', async () => {
     const wrapper = card(mobile); await paste(wrapper)
     expect(wrapper.find('input[type=file]').exists()).toBe(false)

@@ -26,7 +26,8 @@ import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime } from '@/utils/tripPeriod'
 import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 import { adjustmentPayload, adjustmentValidationError } from '@/utils/subsidyAdjustments'
-import { attendanceInputError, defaultAttendanceDates } from '@/utils/attendanceDates'
+import { attendanceInputError, defaultAttendanceDates, missingAttendanceYears } from '@/utils/attendanceDates'
+import { subsidyWindow } from '@/utils/subsidyWindow'
 
 const CALENDAR_DATE_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/
 
@@ -130,11 +131,20 @@ export const useExpenseStore = defineStore('expense', () => {
       ? trip.tripType : null
   })
   const maxExpenseItems = ref(200)
+  const snapshotLocked = ref(false)
+  const missingCalendarYears = computed(() => {
+    if (snapshotLocked.value || !includeSubsidy.value || trip.tripType !== 'same_city_project') return []
+    const groups = groupOverlappingSubsidyTrips(subsidyTrips.value.length ? subsidyTrips.value : [trip])
+    return [...new Set(groups.flatMap((group) => {
+      const window = subsidyWindow(group)
+      return missingAttendanceYears(window.startDate, window.endDate, attendanceCalendar.value)
+    }))].sort((a, b) => a - b)
+  })
   const excludedPeriodInputError = computed(() => {
     if (!includeSubsidy.value) return ''
     const groups = groupOverlappingSubsidyTrips(subsidyTrips.value.length ? subsidyTrips.value : [trip])
     for (const [groupIndex, group] of groups.entries()) {
-      const error = trip.tripType === 'same_city_project' ? attendanceInputError(group) : adjustmentValidationError(group)
+      const error = trip.tripType === 'same_city_project' ? attendanceInputError(group, attendanceCalendar.value) : adjustmentValidationError(group)
       if (error) return error.includes('重叠') ? `补助 ${groupIndex + 1} 的${error}` : error
     }
     return ''
@@ -297,7 +307,7 @@ export const useExpenseStore = defineStore('expense', () => {
         endTime: current?.endTime ?? (index === lastIndex ? trip.endTime : '18:00'),
         policyConfirmed: current?.policyConfirmed ?? false,
         ...(current?.attendanceDates !== undefined ? { attendanceDates: [...current.attendanceDates] }
-          : !current && trip.tripType === 'same_city_project' ? { attendanceDates: defaultAttendanceDates(approval.startDate, approval.endDate, attendanceCalendar.value) } : {}),
+          : !current && trip.tripType === 'same_city_project' && !missingAttendanceYears(approval.startDate, approval.endDate, attendanceCalendar.value).length ? { attendanceDates: defaultAttendanceDates(approval.startDate, approval.endDate, attendanceCalendar.value) } : {}),
         ...(current?.excludedPeriods?.length
           ? { excludedPeriods: current.excludedPeriods.map((item) => ({ ...item })) } : {}),
       }
@@ -484,6 +494,7 @@ export const useExpenseStore = defineStore('expense', () => {
     draft: ReimbursementDraft,
     draftFiles: readonly ReimbursementDraftFile[],
   ): void {
+    snapshotLocked.value = draft.status === 'LOCKED'
     ocrUnavailable.value = false
 
     const project = draft.input.project
@@ -784,6 +795,7 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   function reset(): void {
+    snapshotLocked.value = false
     manualProjectText.value = ''
     Object.assign(trip, {
       tripType: 'business' as TripType,
@@ -830,6 +842,7 @@ export const useExpenseStore = defineStore('expense', () => {
     projectPolicyType,
     maxExpenseItems,
     policyInputError,
+    missingCalendarYears,
     itemReadinessError,
     manualCategories,
     localReceiptCount,

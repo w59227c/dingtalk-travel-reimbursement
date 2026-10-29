@@ -536,6 +536,14 @@ def create_submission(
         if (snapshot.snapshot_version != snapshot_version or snapshot.draft_id != draft.id
                 or snapshot.draft_revision != expected_revision):
             raise ReimbursementSubmissionConflict("submission snapshot identity mismatch")
+        if snapshot_version >= 11:
+            from app.schemas.expenses import TripInput
+            from app.services.subsidy_calculation import require_attendance_calendars
+
+            trips = snapshot.input.trips or ((snapshot.input.trip,) if snapshot.input.trip else ())
+            require_attendance_calendars(database, [
+                TripInput.model_validate(item.model_dump(mode="json")) for item in trips
+            ])
         excel_only = snapshot.attachment_mode == "excel_only"
         if excel_only and source_files:
             raise ReimbursementSubmissionConflict("Excel-only snapshot cannot omit source files")

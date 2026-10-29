@@ -59,10 +59,10 @@ async function downloadExcel(): Promise<void> {
   >
     <div class="totals-grid">
       <div><span>票据金额</span><strong>¥{{ expense.displayExpenseTotal }}</strong></div>
-      <div><span>出差补助</span><strong>¥{{ expense.displaySubsidyTotal }}</strong></div>
+      <div><span>出差补助</span><strong>{{ expense.missingCalendarYears.length ? '待核对' : `¥${expense.displaySubsidyTotal}` }}</strong></div>
       <div><span>票据张数</span><strong>{{ expense.displayReceiptCount }} 张</strong></div>
       <div class="grand-total">
-        <span>合计</span><strong>¥{{ expense.displayTotal }}</strong>
+        <span>合计</span><strong>{{ expense.missingCalendarYears.length ? '待核对' : `¥${expense.displayTotal}` }}</strong>
       </div>
     </div>
     <el-alert

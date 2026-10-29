@@ -17,10 +17,20 @@ function picker(dates: string[] | undefined = ['2026-09-01', '2026-09-02']) {
     readonly?: boolean
     calendar?: AttendanceCalendar
   }>
-  return mount(component, { props: { modelValue: dates, startDate: '2026-09-01', endDate: '2026-09-07', label: '合成出勤日期' }, global: { plugins: [ElementPlus] } })
+  return mount(component, { props: { modelValue: dates, startDate: '2026-09-01', endDate: '2026-09-07', label: '合成出勤日期', calendar: { years: [2026], days: {} } }, global: { plugins: [ElementPlus] } })
 }
 
 describe('attendance calendar', () => {
+  it('unblocks after refreshing a missing year without replacing existing selections', async () => {
+    const wrapper = picker(['2026-09-05'])
+    await wrapper.setProps({ calendar: { years: [], days: {} } })
+    expect(wrapper.get('[aria-label="合成出勤日期 2026-09-05"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.findAll('button').find((button) => button.text() === '重新检查')).toBeDefined()
+    await wrapper.setProps({ calendar: { years: [2026], days: {} } })
+    expect(wrapper.get('[aria-label="合成出勤日期 2026-09-05"]').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.get('[aria-label="合成出勤日期 2026-09-05"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
   it('allows selecting weekends and deselecting weekdays, with readonly protection', async () => {
     const wrapper = picker()
     await wrapper.get('[aria-label="合成出勤日期 2026-09-05"]').trigger('click')
@@ -56,7 +66,7 @@ describe('attendance calendar', () => {
     await wrapper.get('[aria-label="合成出勤日期 2026-09-01"]').trigger('click')
     expect(wrapper.emitted('update:modelValue')!.at(-1)![0]).toEqual(['2026-09-01'])
     await wrapper.setProps({ startDate: '2026-12-31', endDate: '2027-01-04' })
-    expect(wrapper.text()).toContain('2027 年尚未完整维护节假日')
+    expect(wrapper.text()).toContain('2027 年节假日与调休安排尚未完整维护')
   })
 
   it('only initializes a legacy selection on an explicit action', async () => {
@@ -72,10 +82,12 @@ describe('attendance calendar', () => {
       '2025-12-27': { working: true, name: '合成跨年补班' },
       '2025-12-31': { working: false, name: '合成跨年放假' },
     } } })
-    expect(wrapper.text()).toContain('2025 年尚未完整维护节假日')
+    expect(wrapper.text()).toContain('2025 年节假日与调休安排尚未完整维护')
     expect(wrapper.get('[aria-label="合成出勤日期 2025-12-27"]').text()).toContain('班')
     expect(wrapper.get('[aria-label="合成出勤日期 2025-12-31"]').attributes('title')).toContain('合成跨年放假（放假）')
-    await wrapper.findAll('button').find((button) => button.text() === '带入默认工作日')!.trigger('click')
-    expect(wrapper.emitted('update:modelValue')!.at(-1)![0]).toEqual(['2025-12-26', '2025-12-27', '2025-12-29', '2025-12-30'])
+    expect(wrapper.findAll('button').find((button) => button.text() === '带入默认工作日')).toBeUndefined()
+    await wrapper.findAll('button').find((button) => button.text() === '重新检查')!.trigger('click')
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
   })
 })

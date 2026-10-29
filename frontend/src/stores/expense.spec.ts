@@ -107,6 +107,27 @@ vi.mock('@/api/expenses', () => ({
 }))
 
 describe('expense store', () => {
+  it('requires all effective city-subsidy years while preserving attendance and exempting locked snapshots', () => {
+    const store = useExpenseStore()
+    const draft = durableDraft([])
+    draft.input.trip = { tripType: 'same_city_project', startDate: '2026-12-31', endDate: '2027-01-03', startTime: '09:00', endTime: '18:00', attendanceDates: ['2027-01-02'] }
+    store.attendanceCalendar = { years: [2026], days: {} }
+    store.hydrateFromDraft(draft, [])
+    expect(store.missingCalendarYears).toEqual([2027])
+    expect(store.policyInputError).toContain('2027 年')
+    expect(store.tripPayload()).toBeNull()
+    store.attendanceCalendar = { years: [2026, 2027], days: {} }
+    expect(store.missingCalendarYears).toEqual([])
+    expect(store.trip.attendanceDates).toEqual(['2027-01-02'])
+    expect(store.tripPayload()?.attendanceDates).toEqual(['2027-01-02'])
+    store.attendanceCalendar = { years: [], days: {} }
+    store.hydrateFromDraft({ ...draft, status: 'LOCKED' }, [])
+    expect(store.missingCalendarYears).toEqual([])
+    store.reset(); store.hydrateFromDraft(draft, [])
+    expect(store.missingCalendarYears).toEqual([2026, 2027])
+    store.setSubsidyIncluded(false)
+    expect(store.missingCalendarYears).toEqual([])
+  })
   it('restores excluded periods independently, retains them when toggled off, and blocks incomplete calculation', async () => {
     setActivePinia(createPinia())
     const store = useExpenseStore()
@@ -790,6 +811,7 @@ describe('expense store', () => {
       tripType: 'long_term_internal',
     })
 
+    store.attendanceCalendar = { years: [2026], days: {} }
     store.setTripType('same_city_project')
     expect(store.tripPayload()).toBeNull()
     expect(store.policyInputError).toContain('出勤日期')

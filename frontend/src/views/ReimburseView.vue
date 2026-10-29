@@ -910,6 +910,7 @@ watch(selectedSubsidyTripType, (value) => {
 watch(() => [
   sessionScope(),
   expense.includeSubsidy,
+  expense.attendanceCalendar,
   expense.trip,
   expense.subsidyTrips,
   expense.items,
@@ -1546,7 +1547,7 @@ onBeforeUnmount(() => {
             <footer class="mobile-step-footer">
               <div class="mobile-footer-total">
                 <span>当前合计</span>
-                <strong>¥{{ expense.displayTotal }}</strong>
+                <strong>{{ expense.missingCalendarYears.length ? '待核对' : `¥${expense.displayTotal}` }}</strong>
               </div>
               <div class="mobile-footer-actions">
                 <el-button

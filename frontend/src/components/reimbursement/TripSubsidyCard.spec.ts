@@ -24,6 +24,7 @@ const approvals = [
 describe('TripSubsidyCard', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
+    useExpenseStore().attendanceCalendar = { years: [2026], days: {} }
     vi.mocked(calculateTotals).mockReset()
   })
 
@@ -285,12 +286,14 @@ describe('TripSubsidyCard', () => {
       '2026-09-25': { working: false, name: '合成跨年休息' },
     } }
     const wrapper = mountCard('same_city_project', [{ ...approvals[0]!, startDate: '2026-09-20', endDate: '2026-09-27' }], false, mobile)
-    expect(expense.subsidyTrips[0]!.attendanceDates).toEqual(['2026-09-20', '2026-09-21', '2026-09-22', '2026-09-23', '2026-09-24'])
-    expect(wrapper.text()).toContain('2026 年尚未完整维护节假日')
+    expect(expense.subsidyTrips[0]!.attendanceDates).toBeUndefined()
+    expect(wrapper.text()).toContain('2026 年节假日与调休安排尚未完整维护')
     expect(wrapper.get('[aria-label="补助 1 出勤日期 2026-09-20"]').text()).toContain('班')
     expect(wrapper.get('[aria-label="补助 1 出勤日期 2026-09-25"]').attributes('title')).toContain('合成跨年休息（放假）')
     await wrapper.get('[aria-label="补助 1 出勤日期 2026-09-25"]').trigger('click')
-    expect(expense.tripPayloads()[0]!.attendanceDates).toContain('2026-09-25')
+    expect(expense.tripPayloads()).toEqual([])
+    expect(expense.policyInputError).toContain('请联系管理员')
+    expect(wrapper.get('[aria-label="补助 1 出勤日期 2026-09-25"]').attributes('disabled')).toBeDefined()
   })
 
   it.each([false, true])('uses the approved internal category at any duration, mobile=%s', (mobile) => {

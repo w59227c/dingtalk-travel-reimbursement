@@ -1,7 +1,8 @@
+import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
@@ -19,6 +20,28 @@ from app.services.attendance_calendar import (
 from app.services.sessions import CurrentSession, require_admin, require_admin_csrf
 
 router = APIRouter(tags=["attendance-calendars"])
+
+
+class FetchYear(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    year: int = Field(ge=1, le=9999)
+
+
+@router.get("/admin/attendance-calendars/sync")
+async def calendar_sync_status(
+    request: Request,
+    _current: Annotated[CurrentSession, Depends(require_admin)],
+):
+    return success(await asyncio.to_thread(request.app.state.attendance_calendar_sync.status))
+
+
+@router.post("/admin/attendance-calendars/sync")
+async def calendar_sync_check(
+    body: FetchYear,
+    request: Request,
+    _current: Annotated[CurrentSession, Depends(require_admin_csrf)],
+):
+    return success(await request.app.state.attendance_calendar_sync.check(body.year, force=True))
 
 
 async def _body(request: Request, model: type[NoticeInput]):

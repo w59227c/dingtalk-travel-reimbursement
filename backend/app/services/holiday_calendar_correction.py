@@ -43,8 +43,8 @@ class CalendarCorrection(BaseModel):
 def corrected_calendar(text: str, correction: CalendarCorrection) -> ParsedNotice:
     original = parse_calendar_content(text)
     result = ParsedNotice(year=correction.year, source_format="manual")
-    if not text.strip() or re.fullmatch(r"https?://\S+", text.strip()):
-        result.issue("请保留完整来源内容，不能仅提供网址或空白内容")
+    if re.fullmatch(r"https?://\S+", text.strip()):
+        result.issue("请保留完整来源内容，不能仅提供网址")
         return result
     if len(text.encode("utf-8")) > 64 * 1024:
         result.issue("来源内容超过 64 KB，请缩短到完整年度安排正文")
@@ -76,7 +76,8 @@ def corrected_calendar(text: str, correction: CalendarCorrection) -> ParsedNotic
         json.dumps({"year": correction.year, "days": days}, ensure_ascii=False)
     )
     result.source_format = "manual"
-    result.title = f"{correction.year} 年年度安排（手动核对）"
+    standalone = not text.strip()
+    result.title = f"{correction.year} 年年度安排（{'手动录入' if standalone else '手动核对'}）"
     result.warnings = []
     for issue in result.errors:
         if issue["message"].startswith("缺少全年节日安排："):
@@ -87,14 +88,18 @@ def corrected_calendar(text: str, correction: CalendarCorrection) -> ParsedNotic
             issue["message"] = "存在重复或冲突日期，请修改或删除重叠的日期安排"
         elif issue["message"] == "JSON 未包含适用年份的日期":
             issue["message"] = "修正内容未包含适用年份的日期，请核对年份与各段日期"
-    result.issue("此安排经过手动修正，请对照来源核对全年放假及补班日期后保存。", warning=True)
+    result.issue("请核对全年放假及补班日期，手动填写的内容由管理员确认后生效。", warning=True)
 
     def source_key(name: str) -> frozenset[str]:
         return frozenset(re.split(r"[、,，和及与]", name))
 
     sources = {source_key(section["name"]): section["source"] for section in original.sections}
     for section in result.sections:
-        section["source"] = sources.get(
-            source_key(section["name"]), "本项没有可用的自动识别原文，请返回完整来源内容核对。"
+        section["source"] = (
+            "管理员手动填写，无粘贴原文。"
+            if standalone
+            else sources.get(
+                source_key(section["name"]), "本项没有可用的自动识别原文，请返回完整来源内容核对。"
+            )
         )
     return result

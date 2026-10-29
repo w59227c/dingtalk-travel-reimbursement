@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     )
 
     app_env: Literal["development", "test", "production"] = "development"
+    attendance_calendar_sync_enabled: bool = True
     log_level: str = "INFO"
     database_url: str = "sqlite:///./data/app.db"
     temp_dir: Path = Path("/tmp/expense")

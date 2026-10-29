@@ -13,7 +13,7 @@ export function attendanceDate(day: string): Date | null {
 
 export function defaultAttendanceDates(start: string, end: string, calendar?: AttendanceCalendar): string[] {
   const first = attendanceDate(start), last = attendanceDate(end)
-  if (!first || !last || first > last || (last.getTime() - first.getTime()) / 86_400_000 >= MAX_ATTENDANCE_DATES) return []
+  if (!first || !last || first > last || (last.getTime() - first.getTime()) / 86_400_000 >= MAX_ATTENDANCE_DATES || missingAttendanceYears(start, end, calendar).length) return []
   const dates: string[] = []
   for (let day = first.getTime(); day <= last.getTime(); day += 86_400_000) {
     const date = new Date(day)
@@ -48,10 +48,12 @@ export function setGroupAttendanceDates(group: SubsidyTripGroup, dates: readonly
   }
 }
 
-export function attendanceInputError(group: SubsidyTripGroup): string {
+export function attendanceInputError(group: SubsidyTripGroup, calendar?: AttendanceCalendar): string {
   const window = subsidyWindow(group)
   const start = attendanceDate(window.startDate), end = attendanceDate(window.endDate)
   if (!start || !end || start > end) return '请填写有效的补助日期范围'
+  const missing = missingAttendanceYears(window.startDate, window.endDate, calendar)
+  if (missing.length) return `${missing.join('、')} 年节假日与调休安排尚未完整维护，请联系管理员维护后重新检查`
   if ((end.getTime() - start.getTime()) / 86_400_000 >= MAX_ATTENDANCE_DATES) return '出勤范围过长，请缩小补助日期范围'
   if (group.excludedPeriods.some((item) => adjustmentType(item) === 'temporary_absence')) return '请核对并逐项删除市内出差的旧非补助时段，改用出勤日期'
   const dates = groupAttendanceDates(group)

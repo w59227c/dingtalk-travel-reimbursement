@@ -4,12 +4,42 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.domain.subsidy import (
+    AdjustmentType,
     SubsidyCalculation,
     calculate_subsidy,
     validate_non_overlapping_exclusions,
 )
 from app.schemas.expenses import TripInput, TripPurpose
 from app.services.application_settings import get_expense_settings
+from app.services.attendance_calendar import attendance_calendar
+
+
+def require_attendance_calendars(database: Session, trips: list[TripInput]) -> None:
+    city = [
+        trip
+        for trip in merge_overlapping_subsidy_trips(trips)
+        if trip.trip_type is TripPurpose.SAME_CITY_PROJECT
+    ]
+    if not city:
+        return
+    complete = set(attendance_calendar(database)["years"])
+    required = set()
+    for trip in city:
+        start, end = trip.start_date, trip.end_date
+        for item in trip.excluded_periods:
+            if item.adjustment_type is AdjustmentType.LATE_DEPARTURE and item.end_date:
+                start = item.end_date
+            elif item.adjustment_type is AdjustmentType.EARLY_END and item.start_date:
+                end = item.start_date
+        required.update(range(start.year, end.year + 1))
+    missing = sorted(required - complete)
+    if missing:
+        raise ApiError(
+            "ATTENDANCE_CALENDAR_REQUIRED",
+            f"{'、'.join(map(str, missing))} 年节假日与调休安排尚未完整维护，"
+            "请联系管理员维护后重新检查",
+            422,
+        )
 
 
 def subsidy_purpose_for_travel_type(
@@ -82,6 +112,7 @@ def calculate_trip_subsidies(
                 attendance_dates=trip.attendance_dates,
             )
         )
+    require_attendance_calendars(database, trips)
     return results
 
 

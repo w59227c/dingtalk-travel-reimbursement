@@ -18,6 +18,7 @@ def settings_factory(tmp_path: Path):
     def factory(**overrides: object) -> Settings:
         values: dict[str, object] = {
             "app_env": "test",
+            "attendance_calendar_sync_enabled": False,
             "database_url": f"sqlite:///{tmp_path / 'phase2.db'}",
             "temp_dir": tmp_path / "receipts",
             "reimbursement_staging_dir": tmp_path / "reimbursement-staging",

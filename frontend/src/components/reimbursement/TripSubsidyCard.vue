@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import { useExpenseStore } from '@/stores/expense'
+import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import type { ExcludedPeriodInput, SubsidyResult, TripInput, TripType } from '@/types/expenses'
 import { adjustmentType, subsidyHalfDayIndex } from '@/utils/subsidyAdjustments'
 import { resetSubsidyWindow, subsidyAbsenceIssue, subsidyWindow, updateSubsidyWindow } from '@/utils/subsidyWindow'
@@ -40,6 +41,10 @@ const excludedEndpoints = [
 ] as const
 
 const expense = useExpenseStore()
+const drafts = useReimbursementDraftStore()
+async function refreshCalendar(): Promise<void> {
+  await drafts.loadReimbursementOptions()
+}
 const subsidyGroups = computed(() => groupOverlappingSubsidyTrips(expense.subsidyTrips))
 // Element Plus resets an open calendar when its default Date reference changes.
 const subsidyCalendarStarts = computed<Map<string, Date | undefined>>((previous) => {
@@ -373,9 +378,18 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
             :start-date="subsidyWindow(group).startDate"
             :end-date="subsidyWindow(group).endDate"
             :readonly="props.readonly"
+            :refreshing="drafts.loadingReimbursementOptions"
             :label="`补助 ${index + 1} 出勤日期`"
             @update:model-value="updateAttendance(group, $event)"
+            @refresh="refreshCalendar"
           />
+          <p
+            v-if="attendanceMode(group) && drafts.reimbursementOptionsError"
+            class="subsidy-window-error"
+            role="alert"
+          >
+            {{ drafts.reimbursementOptionsError }}
+          </p>
 
           <section
             v-if="!attendanceMode(group) || group.excludedPeriods.some((item) => adjustmentType(item) === 'temporary_absence')"

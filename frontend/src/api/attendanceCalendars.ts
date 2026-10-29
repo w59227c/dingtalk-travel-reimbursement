@@ -1,6 +1,13 @@
 import { http } from '@/api/http'
 import type { ApiEnvelope } from '@/types/auth'
-import type { AttendanceNoticePreview, AttendanceNoticeResult, AttendanceCalendarYear, AttendanceCalendarCorrection } from '@/types/attendance'
+import type { AttendanceNoticePreview, AttendanceNoticeResult, AttendanceCalendarYear, AttendanceCalendarCorrection, AttendanceSyncStatus } from '@/types/attendance'
+
+export async function attendanceSyncStatus(signal?: AbortSignal): Promise<AttendanceSyncStatus> {
+  return (await http.get<ApiEnvelope<AttendanceSyncStatus>>('/admin/attendance-calendars/sync', { signal })).data.data
+}
+export async function checkAttendanceYear(year: number, signal?: AbortSignal): Promise<AttendanceSyncStatus> {
+  return (await http.post<ApiEnvelope<AttendanceSyncStatus>>('/admin/attendance-calendars/sync', { year }, { signal, timeout: 30000 })).data.data
+}
 
 export async function listAttendanceCalendars(signal?: AbortSignal): Promise<AttendanceCalendarYear[]> {
   return (await http.get<ApiEnvelope<{ items: AttendanceCalendarYear[] }>>('/admin/attendance-calendars', { signal })).data.data.items

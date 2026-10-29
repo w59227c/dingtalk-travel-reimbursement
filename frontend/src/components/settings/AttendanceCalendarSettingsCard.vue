@@ -3,9 +3,9 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, useId, wat
 import { ElMessageBox } from 'element-plus'
 import { matchedRouteKey, onBeforeRouteLeave } from 'vue-router'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
-import { applyAttendanceNotice, deleteAttendanceCalendar, listAttendanceCalendars, parseAttendanceNotice } from '@/api/attendanceCalendars'
+import { applyAttendanceNotice, deleteAttendanceCalendar, listAttendanceCalendars, parseAttendanceNotice, attendanceSyncStatus, checkAttendanceYear } from '@/api/attendanceCalendars'
 import { useAuthStore } from '@/stores/auth'
-import type { AttendanceCalendarCorrection, AttendanceCalendarDay, AttendanceCalendarYear, AttendanceNoticePreview } from '@/types/attendance'
+import type { AttendanceCalendarCorrection, AttendanceCalendarDay, AttendanceCalendarYear, AttendanceNoticePreview, AttendanceSyncStatus } from '@/types/attendance'
 import { calendarRanges } from '@/utils/calendarMaintenance'
 import CalendarArrangementPreview from './CalendarArrangementPreview.vue'
 import CalendarCorrectionEditor from './CalendarCorrectionEditor.vue'
@@ -17,6 +17,9 @@ const noticeSearchExample = `${exampleYear}年部分节假日安排的通知`
 const timorUrl = `https://timor.tech/api/holiday/year/${exampleYear}/`
 const holidayCnUrl = `https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/${exampleYear}.json`
 const years = ref<AttendanceCalendarYear[]>([])
+const sync = ref<AttendanceSyncStatus | null>(null), fetchYear = ref(exampleYear)
+const syncJobs = computed(() => sync.value?.items.filter((job) => job.year >= exampleYear || job.status !== 'completed') ?? [])
+const standalone = ref(false), manualBaseline = ref('')
 const busy = ref(false), loaded = ref(false), error = ref(''), message = ref(''), open = ref(false)
 const mode = ref<'paste' | 'correct' | 'review' | 'view'>('paste'), text = ref('')
 const preview = ref<AttendanceNoticePreview | null>(null), viewed = ref<AttendanceCalendarYear | null>(null)
@@ -28,9 +31,9 @@ const parseFeedback = ref<HTMLElement | null>(null), correctionFeedback = ref<HT
 const sourceId = useId()
 watch(preview, () => { expandedSources.value = [] }, { flush: 'sync' })
 let controller: AbortController | null = null, generation = 0
-const unsaved = computed(() => open.value && mode.value !== 'view' && !!text.value.trim())
+const unsaved = computed(() => open.value && mode.value !== 'view' && (!!text.value.trim() || standalone.value && JSON.stringify(correction.value) !== manualBaseline.value))
 const selectedChange = computed(() => preview.value?.changes.find((item) => item.year === selectedYear.value))
-const title = computed(() => mode.value === 'view' ? `${viewed.value?.year} 年安排` : mode.value === 'review' ? '核对年度安排' : mode.value === 'correct' ? '修正年度安排' : '录入年度安排')
+const title = computed(() => mode.value === 'view' ? `${viewed.value?.year} 年安排` : mode.value === 'review' ? '核对年度安排' : mode.value === 'correct' ? standalone.value ? '手动填写年度安排' : '修正年度安排' : '录入年度安排')
 const correctionComplete = computed(() => !!correction.value?.year && !!correction.value.ranges.length && correction.value.ranges.every((item) => item.name.trim() && item.startDate && item.endDate))
 watch(correction, () => {
   if (mode.value === 'review' || mode.value === 'correct') { preview.value = null; mode.value = 'correct'; error.value = '' }
@@ -100,13 +103,41 @@ async function discard(): Promise<boolean> {
   try { await ElMessageBox.confirm('年度安排尚未保存，是否放弃本次录入？', '未保存的年度安排', { confirmButtonText: '放弃录入', cancelButtonText: '继续核对', type: 'warning' }); return true }
   catch { return false }
 }
-function paste(): void { if (!busy.value) { text.value = ''; preview.value = null; correction.value = null; viewed.value = null; mode.value = 'paste'; error.value = ''; open.value = true } }
+function paste(): void { if (!busy.value) { standalone.value = false; text.value = ''; preview.value = null; correction.value = null; viewed.value = null; mode.value = 'paste'; error.value = ''; open.value = true } }
+function manual(): void {
+  if (busy.value) return
+  paste(); standalone.value = true; mode.value = 'correct'
+  correction.value = { year: exampleYear, ranges: ['元旦', '春节', '清明节', '劳动节', '端午节', '中秋节', '国庆节'].map((name) => ({ name, startDate: '', endDate: '', working: false })) }
+  manualBaseline.value = JSON.stringify(correction.value)
+}
+const statusLabels = { scheduled: '等待年度获取开始', pending: '等待获取', running: '正在获取', retry: '等待重试', completed: '已维护，本轮已完成', paused: '已删除，自动获取已暂停' }
+function timeLabel(value: string | null): string { return value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }
+async function fetchOnline(): Promise<void> {
+  if (!fetchYear.value) return
+  await run(async (signal) => {
+    const state = await checkAttendanceYear(fetchYear.value, signal)
+    if (signal.aborted) return
+    sync.value = state
+    const items = await listAttendanceCalendars(signal)
+    if (signal.aborted) return
+    years.value = items; loaded.value = true
+    const job = state.items.find((item) => item.year === fetchYear.value)
+    if (job?.status === 'completed') message.value = `${fetchYear.value} 年安排已维护，本轮自动获取已完成`
+    else if (job?.message) error.value = job.message
+  })
+}
 async function close(done?: () => void): Promise<void> {
   if (busy.value || !await discard()) return
   open.value = false; text.value = ''; preview.value = null; viewed.value = null; error.value = ''; done?.()
 }
 async function load(): Promise<void> {
-  await run(async (signal) => { const items = await listAttendanceCalendars(signal); if (!signal.aborted) { years.value = items; loaded.value = true } })
+  await run(async (signal) => {
+    const [items, status] = await Promise.all([listAttendanceCalendars(signal), attendanceSyncStatus(signal)])
+    if (!signal.aborted) {
+      if (!loaded.value && items.some((item) => item.year === exampleYear && item.complete)) fetchYear.value = Math.min(9999, exampleYear + 1)
+      years.value = items; sync.value = status; loaded.value = true
+    }
+  })
 }
 onMounted(() => { window.addEventListener('beforeunload', beforeUnload); void load() })
 async function view(item: AttendanceCalendarYear): Promise<void> {
@@ -165,6 +196,7 @@ async function save(): Promise<void> {
     if (signal.aborted) return
     years.value = result.items; loaded.value = true; open.value = false; text.value = ''; preview.value = null
     message.value = result.unchanged ? `${result.year} 年安排与已保存内容一致，无需更新` : `${result.year} 年安排已保存，相关年度安排已同步更新`
+    sync.value = await attendanceSyncStatus(signal)
   })
 }
 async function remove(item: AttendanceCalendarYear): Promise<void> {
@@ -173,11 +205,12 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
     if (signal.aborted) return
     years.value = latest
     if (!latest.some((value) => value.year === item.year && value.revision === item.revision)) throw new Error('该年日历已变更，请核对最新列表后再删除')
-    try { await ElMessageBox.confirm(`删除 ${item.year} 年年度安排及其跨年日期。其他年度通知的安排会保留，未维护日期按周一至周五默认出勤。已保存的出勤选择保持不变。`, '删除年度安排', { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' }) }
+    try { await ElMessageBox.confirm(`删除 ${item.year} 年年度安排及其跨年日期，并暂停该年自动获取。涉及缺失年份的市内补助将暂不能确认；已有填写内容保留。可通过立即获取或手动录入恢复。`, '删除年度安排', { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' }) }
     catch { return }
     if (signal.aborted) return
     const items = await deleteAttendanceCalendar(item.year, item.revision, signal)
     if (!signal.aborted) { years.value = items; open.value = false; viewed.value = null; message.value = `${item.year} 年年度安排已删除` }
+    sync.value = await attendanceSyncStatus(signal)
   })
 }
 </script>
@@ -191,23 +224,85 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
   >
     <template #header>
       <div class="calendar-card-heading">
-        <strong>节假日与调休</strong><el-button
-          type="primary"
-          :disabled="busy"
-          @click="paste"
-        >
-          录入年度安排
-        </el-button>
+        <strong>节假日与调休</strong><div class="calendar-entry-actions">
+          <el-button
+            :disabled="busy"
+            @click="manual"
+          >
+            手动填写
+          </el-button><el-button
+            type="primary"
+            :disabled="busy"
+            @click="paste"
+          >
+            粘贴内容录入
+          </el-button>
+        </div>
       </div>
     </template>
     <p class="calendar-intro">
-      粘贴政府年度通知、提莫或 holiday-cn 年度 JSON，核对后生成市内出差的默认出勤日历。
+      系统自动获取年度安排；也可粘贴内容或手动填写，维护市内出差的默认出勤日历。
     </p>
+    <section
+      class="calendar-sync"
+      :class="{ 'is-mobile': props.mobile }"
+      aria-label="年度日历自动获取"
+    >
+      <div class="calendar-sync-heading">
+        <strong>自动获取</strong><el-tag
+          size="small"
+          :type="sync?.enabled ? 'success' : 'info'"
+        >
+          {{ sync?.enabled ? '已开启' : sync ? '后台已暂停' : '正在读取' }}
+        </el-tag>
+      </div>
+      <p>每年 11 月 1 日起，每 5 天从 holiday-cn 获取下一年安排，校验通过后自动保存，成功后结束本轮。首次启动会补查当年。</p>
+      <ul
+        v-if="sync"
+        class="calendar-sync-jobs"
+      >
+        <li
+          v-for="job in syncJobs"
+          :key="job.year"
+        >
+          <div><strong>{{ job.year }} 年</strong><span>{{ statusLabels[job.status] }}</span></div>
+          <small v-if="job.lastAttemptAt">上次检查：{{ timeLabel(job.lastAttemptAt) }}</small>
+          <small v-if="job.nextAttemptAt">下次检查：{{ timeLabel(job.nextAttemptAt) }}</small>
+          <small
+            v-if="job.message"
+            class="calendar-error"
+          >{{ job.message }}</small>
+        </li>
+      </ul>
+      <div class="calendar-fetch-action">
+        <label>获取年份<el-input-number
+          v-model="fetchYear"
+          :min="1"
+          :max="9999"
+          :precision="0"
+          :disabled="busy"
+          aria-label="联网获取年份"
+        /></label><el-button
+          :disabled="busy || !fetchYear"
+          :loading="busy && !open"
+          @click="fetchOnline"
+        >
+          立即获取
+        </el-button><el-button
+          link
+          :disabled="busy"
+          @click="load"
+        >
+          刷新状态
+        </el-button>
+      </div>
+      <small>立即获取用于补齐缺失年份；已维护的年份会保留。修改已有安排请粘贴新内容或手动填写。</small>
+    </section>
     <p
       v-if="!years.length && loaded"
       class="calendar-muted"
     >
-      尚未维护年度安排，默认按周一至周五出勤。
+      尚未维护年度安排，相关年份的市内补助暂不能确认报销。
     </p>
     <ul
       v-if="years.length"
@@ -294,7 +389,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
           aria-label="录入步骤"
         >
           <li :class="{ active: mode === 'paste' || mode === 'correct' }">
-            1 粘贴完整内容
+            {{ standalone ? '1 手动填写日期' : '1 粘贴完整内容' }}
           </li><li :class="{ active: mode === 'review' }">
             2 核对并保存
           </li>
@@ -384,20 +479,25 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
         </template>
         <template v-else-if="mode === 'correct' && correction">
           <div class="notice-correction-heading">
-            <p>修正结果需重新生成预览，确认后才会保存。</p><el-button
+            <p>{{ standalone ? '无需粘贴内容，填写完整年度放假及补班安排后生成预览。' : '修正结果需重新生成预览，确认后才会保存。' }}</p><el-button
+              v-if="!standalone"
               :disabled="busy"
               @click="editText"
             >
               返回修改原文
             </el-button>
           </div>
-          <details class="calendar-source-guide">
+          <details
+            v-if="!standalone"
+            class="calendar-source-guide"
+          >
             <summary>查看完整来源内容</summary><p>{{ text }}</p>
           </details>
           <CalendarCorrectionEditor
             v-model="correction"
             :disabled="busy"
             :mobile="props.mobile"
+            :standalone="standalone"
           />
           <div
             v-if="preview && !preview.canSave"
@@ -420,7 +520,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
           <div class="notice-review-heading">
             <div>
               <h3>{{ preview.year }} 年年度安排</h3><p class="notice-source-label">
-                {{ preview.sourceFormat === 'manual' ? '已手动修正，请对照来源核对' : `已识别：${preview.sourceLabel}` }}
+                {{ preview.sourceFormat === 'manual' ? standalone ? '手动填写，请核对全年安排' : '已手动修正，请对照来源核对' : `已识别：${preview.sourceLabel}` }}
               </p><p>
                 {{ preview.sections.length }} 项节日安排 · 放假 {{ totalDays?.rest }} 天 · 补班 {{ totalDays?.work }} 天<template v-if="preview.changes.length > 1">
                   （含跨年日期）
@@ -431,8 +531,9 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
                 :disabled="busy"
                 @click="beginCorrection"
               >
-                {{ correction ? '继续修正日期' : '修正识别结果' }}
+                {{ standalone ? '返回填写' : correction ? '继续修正日期' : '修正识别结果' }}
               </el-button><el-button
+                v-if="!standalone"
                 :disabled="busy"
                 @click="editText"
               >
@@ -479,6 +580,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
                 <div class="notice-section-heading">
                   <strong>{{ section.name }}</strong>
                   <button
+                    v-if="!standalone"
                     :id="`${sourceId}-toggle-${index}`"
                     type="button"
                     class="notice-source-toggle"
@@ -628,7 +730,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
       </p>
       <template #footer>
         <div class="notice-footer">
-          <span>{{ mode === 'view' ? '日历仅供查看，更新请重新粘贴年度内容' : mode === 'paste' ? '解析不会修改已保存的安排' : mode === 'correct' ? '手动修正也需完整核对全年安排' : preview?.unchanged ? '内容一致，已有日历无需更新' : '确认保存后生效，已有出勤选择保持不变' }}</span><div>
+          <span>{{ mode === 'view' ? '日历仅供查看，可重新录入以更新安排' : mode === 'paste' ? '解析不会修改已保存的安排' : mode === 'correct' ? '请完整核对全年放假与补班安排' : preview?.unchanged ? '内容一致，已有日历无需更新' : '确认保存后生效，已有出勤选择保持不变' }}</span><div>
             <el-button
               :disabled="busy"
               @click="close()"
@@ -649,7 +751,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
               :disabled="busy || !correctionComplete"
               @click="previewCorrection"
             >
-              生成修正预览
+              {{ standalone ? '生成预览' : '生成修正预览' }}
             </el-button><el-button
               v-else-if="mode === 'review'"
               type="primary"
@@ -668,6 +770,16 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
 
 <style scoped>
 .calendar-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.calendar-card-heading { flex-wrap: wrap; }
+.calendar-entry-actions { display: flex; gap: 8px; flex-wrap: wrap; }.calendar-entry-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.calendar-sync { padding: 16px; margin-bottom: 20px; background: var(--el-fill-color-light); border-radius: 6px; min-width: 0; }
+.calendar-sync-heading { display: flex; align-items: center; gap: 10px; }
+.calendar-sync p, .calendar-sync small { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.7; }
+.calendar-sync-jobs { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 12px; }
+.calendar-sync.is-mobile .calendar-sync-jobs { grid-template-columns: minmax(0,1fr); }
+.calendar-sync-jobs li { padding: 10px 12px; background: var(--el-bg-color); border-radius: 4px; }
+.calendar-sync-jobs li > div { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; }.calendar-sync-jobs small { display: block; }
+.calendar-fetch-action { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 14px 0 8px; }.calendar-fetch-action label { display: flex; align-items: center; gap: 8px; font-size: 13px; }.calendar-fetch-action :deep(.el-button + .el-button) { margin-left: 0; }
 .calendar-intro { margin: 0 0 16px; color: var(--el-text-color-regular); line-height: 1.7; }
 .calendar-intro a, .calendar-source-guide a { color: var(--el-color-primary); text-decoration: underline; text-underline-offset: 2px; }
 .calendar-source-guide { margin-bottom: 18px; padding: 10px 14px; background: var(--el-fill-color-light); border-radius: 4px; color: var(--el-text-color-regular); line-height: 1.7; }

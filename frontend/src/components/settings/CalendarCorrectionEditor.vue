@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import type { AttendanceCalendarCorrection, AttendanceCorrectionRange } from '@/types/attendance'
 
-const props = defineProps<{ modelValue: AttendanceCalendarCorrection; disabled?: boolean; mobile?: boolean }>()
+const props = defineProps<{ modelValue: AttendanceCalendarCorrection; disabled?: boolean; mobile?: boolean; standalone?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: AttendanceCalendarCorrection] }>()
 const year = computed(() => props.modelValue.year)
 function updateYear(value: number | undefined): void { emit('update:modelValue', { ...props.modelValue, year: value ?? 0 }) }
@@ -38,7 +38,7 @@ const endMonths = computed<Date[]>((previous) => props.modelValue.ranges.map((it
     <section
       class="calendar-correction-editor"
       :class="{ 'is-mobile': mobile }"
-      aria-label="手动修正年度安排"
+      :aria-label="standalone ? '手动填写年度安排' : '手动修正年度安排'"
     >
       <p class="correction-intro">
         只需填写放假和补班日期，其余按周一至周五。请覆盖元旦、春节、清明、劳动、端午、中秋、国庆的全年安排；跨年日期需写实际年份，每段最多 32 天。

@@ -254,7 +254,9 @@ def preview_notice(
     return response
 
 
-def _write_plan(database: Session, records: dict, plan: dict[int, dict]) -> None:
+def _write_plan(
+    database: Session, records: dict, plan: dict[int, dict], *, commit: bool = True
+) -> None:
     try:
         for year, value in plan.items():
             raw, old = records.get(year, (None, None))
@@ -274,7 +276,8 @@ def _write_plan(database: Session, records: dict, plan: dict[int, dict]) -> None
                 )
                 if result.rowcount != 1:
                     raise _conflict()
-        database.commit()
+        if commit:
+            database.commit()
     except IntegrityError:
         database.rollback()
         raise _conflict() from None
@@ -283,7 +286,7 @@ def _write_plan(database: Session, records: dict, plan: dict[int, dict]) -> None
         raise
 
 
-def apply_notice(database: Session, body: NoticeApply) -> dict:
+def apply_notice(database: Session, body: NoticeApply, *, commit: bool = True) -> dict:
     parsed = (
         parse_calendar_content(body.text)
         if body.correction is None
@@ -302,7 +305,7 @@ def apply_notice(database: Session, body: NoticeApply) -> dict:
     }:
         raise _conflict()
     if not unchanged:
-        _write_plan(database, records, plan)
+        _write_plan(database, records, plan, commit=commit)
     return {"items": list_calendars(database), "unchanged": unchanged, "year": parsed.year}
 
 
@@ -323,4 +326,10 @@ def delete_calendar(database: Session, year: int, revision: str) -> None:
             if target == year:
                 value.update(legacyDays=[], legacyComplete=False)
             plan[target] = _compose(value)
-    _write_plan(database, records, plan)
+    # Pause this year's automatic job in the same transaction as deletion.
+    # A response already in flight must not restore a deliberately removed year.
+    from app.services.attendance_calendar_sync import pause_year
+
+    _write_plan(database, records, plan, commit=False)
+    pause_year(database, year)
+    database.commit()

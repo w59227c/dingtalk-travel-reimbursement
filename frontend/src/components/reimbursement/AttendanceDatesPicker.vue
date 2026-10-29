@@ -11,8 +11,9 @@ const props = withDefaults(defineProps<{
   label: string
   readonly?: boolean
   calendar?: AttendanceCalendar
+  refreshing?: boolean
 }>(), { modelValue: undefined, readonly: false, calendar: undefined })
-const emit = defineEmits<{ 'update:modelValue': [dates: string[]] }>()
+const emit = defineEmits<{ 'update:modelValue': [dates: string[]]; refresh: [] }>()
 const month = ref(props.startDate.slice(0, 7))
 watch(() => [props.startDate, props.endDate], () => {
   if (month.value < props.startDate.slice(0, 7) || month.value > props.endDate.slice(0, 7)) month.value = props.startDate.slice(0, 7)
@@ -42,7 +43,7 @@ function move(delta: number): void {
   month.value = date.toISOString().slice(0, 7)
 }
 function toggle(day: string): void {
-  if (props.readonly) return
+  if (props.readonly || missingYears.value.length) return
   const next = new Set(selected.value)
   if (next.has(day)) next.delete(day)
   else if (attendanceDate(day) && day >= props.startDate && day <= props.endDate && next.size < MAX_ATTENDANCE_DATES) next.add(day)
@@ -62,19 +63,25 @@ function toggle(day: string): void {
     <p class="attendance-help">
       默认排除节假日、选中调休补班；加班可补选，未出勤日可取消。
     </p>
-    <p
+    <div
       v-if="missingYears.length && !props.readonly"
       class="attendance-legacy"
-      role="status"
+      role="alert"
     >
-      {{ missingYears.join('、') }} 年尚未完整维护节假日，已知安排仍会应用，其余按周一至周五默认选择，请按实际出勤核对。
-    </p>
+      <p>{{ missingYears.join('、') }} 年节假日与调休安排尚未完整维护，请联系管理员维护后重新检查。已填写内容保留，补齐前暂不能确认报销。</p>
+      <el-button
+        :loading="props.refreshing"
+        @click="emit('refresh')"
+      >
+        重新检查
+      </el-button>
+    </div>
     <p
-      v-if="props.modelValue === undefined && !props.readonly"
+      v-if="props.modelValue === undefined && !props.readonly && !missingYears.length"
       class="attendance-legacy"
       role="status"
     >
-      旧草稿尚未按出勤日期填写，请核对后选择。
+      尚未填写出勤日期，请带入默认工作日后核对。
       <el-button
         link
         type="primary"
@@ -117,7 +124,7 @@ function toggle(day: string): void {
           :aria-label="`${props.label} ${cell.day}`"
           :title="cell.schedule ? `${cell.day} ${cell.schedule.name}（${cell.schedule.working ? '补班' : '放假'}）` : cell.day"
           :aria-pressed="selected.has(cell.day)"
-          :disabled="props.readonly || (!selected.has(cell.day) && (cell.day < props.startDate || cell.day > props.endDate))"
+          :disabled="props.readonly || !!missingYears.length || (!selected.has(cell.day) && (cell.day < props.startDate || cell.day > props.endDate))"
           @click="toggle(cell.day)"
         >
           {{ cell.number }}
@@ -142,7 +149,7 @@ function toggle(day: string): void {
         size="small"
         type="danger"
         plain
-        :disabled="props.readonly"
+        :disabled="props.readonly || !!missingYears.length"
         :aria-label="`${props.label} 取消 ${day}`"
         @click="toggle(day)"
       >

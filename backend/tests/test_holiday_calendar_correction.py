@@ -139,7 +139,7 @@ def test_strict_correction_schema(client_factory, change):
     assert items(client) == []
 
 
-@pytest.mark.parametrize("text", ["", "  ", "https://example.invalid/holiday", "中" * 22000])
+@pytest.mark.parametrize("text", ["https://example.invalid/holiday", "中" * 22000])
 def test_correction_still_requires_bounded_pasted_source(client_factory, text):
     client, headers = admin(client_factory)
     response = preview(client, headers, text, correction())
@@ -148,6 +148,21 @@ def test_correction_still_requires_bounded_pasted_source(client_factory, text):
     else:
         assert response.status_code == 422
     assert items(client) == []
+
+
+@pytest.mark.parametrize("text", ["", "  "])
+def test_standalone_manual_entry_previews_and_saves_without_source(client_factory, text):
+    client, headers = admin(client_factory)
+    patch = correction()
+    plan = preview(client, headers, text, patch).json()["data"]
+    assert plan["canSave"] and "手动录入" in plan["title"]
+    assert all("无粘贴原文" in item["source"] for item in plan["sections"])
+    assert items(client) == []
+    assert apply(client, headers, text, patch, plan).status_code == 200
+    assert "手动录入" in items(client)[0]["noticeTitle"]
+    assert apply(client, headers, text, patch, plan).json()["data"]["unchanged"]
+    patch["ranges"].pop()
+    assert apply(client, headers, text, patch, plan).status_code == 422
 
 
 def test_corrected_cross_year_cas_conflict_is_atomic_and_preserves_other_sources(client_factory):

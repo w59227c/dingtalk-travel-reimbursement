@@ -41,3 +41,13 @@ export interface AttendanceNoticePreview {
   unchanged: boolean
 }
 export interface AttendanceNoticeResult { items: AttendanceCalendarYear[]; year: number; unchanged: boolean }
+export interface AttendanceSyncJob {
+  year: number
+  status: 'scheduled' | 'pending' | 'running' | 'retry' | 'completed' | 'paused'
+  lastAttemptAt: string | null
+  nextAttemptAt: string | null
+  completedAt: string | null
+  errorCode: string
+  message: string
+}
+export interface AttendanceSyncStatus { enabled: boolean; startMonth: number; intervalDays: number; source: string; items: AttendanceSyncJob[] }

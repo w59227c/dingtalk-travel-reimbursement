@@ -35,6 +35,7 @@ from app.integrations.dingtalk.storage import DingTalkStorageClient
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
 from app.ocr.engine import FakeOcrEngine
 from app.ocr.types import LocalOcrEngine
+from app.services.attendance_calendar_sync import AttendanceCalendarSync
 from app.services.dingtalk import DingTalkService
 from app.services.file_coordination import SessionFileCoordinator
 from app.services.multipart_uploads import prepare_spool_directory
@@ -73,6 +74,9 @@ def create_app(
     )
     database_engine = create_database_engine(runtime_settings.database_url)
     database_session_factory = create_session_factory(database_engine)
+    calendar_sync = AttendanceCalendarSync(
+        database_session_factory, enabled=runtime_settings.attendance_calendar_sync_enabled
+    )
     reimbursement_quota = ReimbursementQuotaCoordinator(
         database_engine,
         reimbursement_staging,
@@ -240,6 +244,12 @@ def create_app(
                 purge_expired_sessions(database)
             session_cleanup_gate.mark_completed()
             await ocr_service.ensure_ready()
+            if runtime_settings.attendance_calendar_sync_enabled:
+                calendar_stop = asyncio.Event()
+                calendar_task = asyncio.create_task(calendar_sync.run(calendar_stop))
+                resources.push_async_callback(
+                    stop_periodic_temp_cleanup, calendar_stop, calendar_task
+                )
             cleanup_stop = asyncio.Event()
             cleanup_task = asyncio.create_task(periodic_temp_cleanup(cleanup_stop))
             resources.push_async_callback(
@@ -267,6 +277,7 @@ def create_app(
     application.state.settings = runtime_settings
     application.state.database_engine = database_engine
     application.state.database_session_factory = database_session_factory
+    application.state.attendance_calendar_sync = calendar_sync
     application.state.dingtalk_service = dingtalk_service
     application.state.dingtalk_client = dingtalk_client
     application.state.dingtalk_workflow = dingtalk_workflow
