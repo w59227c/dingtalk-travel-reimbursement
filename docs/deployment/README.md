@@ -2,6 +2,8 @@
 
 适用于 Linux x86_64/amd64、支持 AVX 且已安装 Docker Compose v2 的服务器。镜像公开可拉取，服务器无需登录 GHCR；OCR 模型、Excel 模板和 Web 配置已包含在镜像中。
 
+受限网络部署前，请按[生产服务器出口放行清单](NETWORK_EGRESS.md)分别开放应用运行与 Docker 拉取镜像所需的域名和端口。
+
 ## 首次部署
 
 把本目录的 `compose.yaml` 和项目根目录的 `.env` 上传到服务器同一目录，例如：

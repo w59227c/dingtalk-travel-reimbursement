@@ -1,7 +1,7 @@
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { diagnoseTravelApproval } from '@/api/approvalDiagnostics'
 import { useAuthStore } from '@/stores/auth'
@@ -23,6 +23,7 @@ const report: ApprovalDiagnosticReport = {
 describe.each([false, true])('ApprovalDiagnosticsCard, mobile=%s', (mobile) => {
   let pinia: ReturnType<typeof createPinia>
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-29T06:00:00Z'))
     vi.clearAllMocks()
     pinia = createPinia()
     setActivePinia(pinia)
@@ -33,6 +34,7 @@ describe.each([false, true])('ApprovalDiagnosticsCard, mobile=%s', (mobile) => {
     }
     vi.mocked(diagnoseTravelApproval).mockResolvedValue(report)
   })
+  afterEach(() => vi.useRealTimers())
   function render() {
     return mount(ApprovalDiagnosticsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
   }
@@ -40,6 +42,19 @@ describe.each([false, true])('ApprovalDiagnosticsCard, mobile=%s', (mobile) => {
     await wrapper.get('[aria-label="诊断员工 userId"]').setValue(' synthetic-employee ')
     await wrapper.get('[aria-label="诊断审批编号或实例 ID"]').setValue(' 202608010800000000001 ')
   }
+
+  it('rejects unavailable historical dates and constrains the diagnostic date controls', async () => {
+    const wrapper = render(); await fill(wrapper)
+    const dates = wrapper.findAllComponents({ name: 'ElDatePicker' })
+    expect(dates[0]!.props('disabledDate')(new Date(2025, 9, 29))).toBe(true)
+    expect(dates[1]!.props('disabledDate')(new Date(2026, 9, 30))).toBe(true)
+    dates[0]!.vm.$emit('update:modelValue', '2025-01-01')
+    dates[1]!.vm.$emit('update:modelValue', '2025-05-31')
+    await flushPromises(); await wrapper.get('form').trigger('submit')
+    expect(wrapper.text()).toContain('最近 365 个自然日')
+    expect(diagnoseTravelApproval).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
 
   it('does not query on mount and validates required inputs', async () => {
     const wrapper = render()

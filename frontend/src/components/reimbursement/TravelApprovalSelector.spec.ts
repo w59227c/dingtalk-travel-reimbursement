@@ -1,7 +1,7 @@
 import ElementPlus from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -51,6 +51,53 @@ const linked: ReimbursementRelatedApproval = {
   },
   verifiedAt: '2026-09-04T00:00:00Z',
 }
+
+describe.each([false, true])('approval query bounds, mobile=%s', (mobile) => {
+  beforeEach(() => { setActivePinia(createPinia()); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-29T06:00:00Z')) })
+  afterEach(() => vi.useRealTimers())
+  it.each([
+    ['2025-01-01', '2025-05-31', '365'],
+    ['2026-10-29', '2026-10-30', '晚于今天'],
+    ['2026-01-01', '2026-07-01', '180'],
+  ])('rejects invalid dates %s through %s before sending a request', async (from, to, reason) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.travelApprovals = [candidate]
+    const load = vi.spyOn(drafts, 'loadTravelApprovals').mockResolvedValue(undefined)
+    const wrapper = mount(TravelApprovalSelector, { props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] } })
+    const pickers = wrapper.findAllComponents({ name: 'ElDatePicker' })
+    pickers[0]!.vm.$emit('update:modelValue', from)
+    pickers[1]!.vm.$emit('update:modelValue', to)
+    await nextTick()
+    await wrapper.get('.travel-query-button').trigger('click')
+    expect(wrapper.text()).toContain(reason)
+    expect(load).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('审批发起日期')
+    wrapper.unmount()
+  })
+  it('uses the same allowed dates in both pickers and accepts exactly 180 days', async () => {
+    const drafts = useReimbursementDraftStore(); drafts.travelApprovals = [candidate]
+    const load = vi.spyOn(drafts, 'loadTravelApprovals').mockResolvedValue(undefined)
+    const wrapper = mount(TravelApprovalSelector, { props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] } })
+    const pickers = wrapper.findAllComponents({ name: 'ElDatePicker' })
+    expect(pickers[0]!.props('disabledDate')(new Date(2025, 9, 29))).toBe(true)
+    expect(pickers[1]!.props('disabledDate')(new Date(2026, 9, 30))).toBe(true)
+    pickers[0]!.vm.$emit('update:modelValue', '2025-10-30')
+    pickers[1]!.vm.$emit('update:modelValue', '2026-04-27')
+    await nextTick(); await wrapper.get('.travel-query-button').trigger('click')
+    expect(load).toHaveBeenCalledWith({ from: '2025-10-30', to: '2026-04-27' })
+    wrapper.unmount()
+  })
+  it('keeps upstream date rejections actionable instead of offering blind retries', () => {
+    const drafts = useReimbursementDraftStore()
+    drafts.travelApprovalsError = '钉钉拒绝当前查询日期，请调整日期'
+    drafts.travelApprovalsErrorCode = 'DINGTALK_QUERY_TIME_INVALID'
+    const wrapper = mount(TravelApprovalSelector, { props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] } })
+    expect(wrapper.text()).toContain('请调整查询日期后重新查询')
+    expect(wrapper.text()).not.toContain('重新加载')
+    expect(wrapper.findComponent({ name: 'ElEmpty' }).props('description')).toBe('请调整查询日期后重新查询')
+    wrapper.unmount()
+  })
+})
 
 describe('TravelApprovalSelector', () => {
   beforeEach(() => {

@@ -130,6 +130,19 @@ function responseError(code: string, message: string, status = 422): Error {
 }
 
 describe('persistent reimbursement draft store', () => {
+  it('preserves a query-date error code and clears it on a successful retry or session reset', async () => {
+    const store = useReimbursementDraftStore()
+    vi.mocked(listOaTravelApprovals).mockRejectedValueOnce({ isAxiosError: true, response: { data: { error: { code: 'DINGTALK_QUERY_TIME_INVALID', message: '请调整查询日期' } } } })
+    await store.loadTravelApprovals()
+    expect(store.travelApprovalsErrorCode).toBe('DINGTALK_QUERY_TIME_INVALID')
+    expect(store.travelApprovalsError).toBe('请调整查询日期')
+    vi.mocked(listOaTravelApprovals).mockResolvedValueOnce({ templateConfigVersion: 12, queryWindow: { from: '2026-08-01', to: '2026-08-31' }, items: [] })
+    await store.loadTravelApprovals()
+    expect(store.travelApprovalsErrorCode).toBe('')
+    expect(store.travelApprovalsError).toBe('')
+    store.travelApprovalsErrorCode = 'DINGTALK_QUERY_TIME_INVALID'; store.reset()
+    expect(store.travelApprovalsErrorCode).toBe('')
+  })
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()

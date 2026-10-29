@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useAuthStore } from '@/stores/auth'
 import AttendanceCalendarSettingsCard from '@/components/settings/AttendanceCalendarSettingsCard.vue'
 import ApprovalDiagnosticsCard from '@/components/settings/ApprovalDiagnosticsCard.vue'
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
@@ -6,6 +7,8 @@ import OaTemplateSettingsCard from '@/components/settings/OaTemplateSettingsCard
 import ReceiptKeywordSettingsCard from '@/components/settings/ReceiptKeywordSettingsCard.vue'
 import SubmissionRecoveryCard from '@/components/settings/SubmissionRecoveryCard.vue'
 import SubsidyRateSettingsCard from '@/components/settings/SubsidyRateSettingsCard.vue'
+
+const auth = useAuthStore()
 
 const props = withDefaults(defineProps<{
   mobile?: boolean
@@ -16,6 +19,7 @@ const props = withDefaults(defineProps<{
 
 <template>
   <main
+    v-if="auth.isAdmin"
     class="page-shell narrow-page settings-page"
     :class="{ 'page-shell--mobile': props.mobile }"
   >

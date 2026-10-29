@@ -406,3 +406,6 @@ a {
   .identity-grid .el-descriptions__label,
   .identity-grid .el-descriptions__content { padding: 8px !important; }
 }
+:root .approval-query-picker { max-width: calc(100vw - 24px); }
+:root .approval-query-picker .el-date-picker { width: min(322px, calc(100vw - 24px)); }
+:root .approval-query-picker .el-picker-panel__content { width: auto; margin: 10px; }

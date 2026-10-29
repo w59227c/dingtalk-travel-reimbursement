@@ -22,6 +22,7 @@ _MAX_LISTED_IDS = 200
 _MAX_PAGES_PER_PROFILE = 50
 _DETAIL_CONCURRENCY = 5
 _MAX_WINDOW_DAYS = 180
+_HISTORY_CALENDAR_DAYS = 365
 _DINGTALK_MAX_QUERY_DAYS = 120
 
 
@@ -182,7 +183,34 @@ def requested_query_window(
             "自定义查询范围必须同时填写开始和结束日期",
             422,
         )
-    return TravelApprovalQueryWindow.from_dates(from_date, to_date)
+    window = TravelApprovalQueryWindow.from_dates(from_date, to_date)
+    validate_live_query_window(window, today=today)
+    return window
+
+
+def validate_live_query_window(
+    window: TravelApprovalQueryWindow, *, today: date | None = None
+) -> None:
+    """Restrict live reads without invalidating stored proofs or frozen snapshots.
+
+    Use full Shanghai calendar days. Midnight 365 days ago is already older
+    than the upstream rolling 365-day limit during most of the current day.
+    """
+    latest = today or datetime.now(_DINGTALK_TIME_ZONE).date()
+    earliest = latest - timedelta(days=_HISTORY_CALENDAR_DAYS - 1)
+    if window.from_date < earliest:
+        raise ApiError(
+            "TRAVEL_APPROVAL_QUERY_HISTORY_UNAVAILABLE",
+            f"仅支持查询最近 365 个自然日发起的审批，请选择 {earliest} 至 {latest} 内的日期；"
+            "单次最多 180 天",
+            422,
+        )
+    if window.to_date > latest:
+        raise ApiError(
+            "TRAVEL_APPROVAL_QUERY_FUTURE",
+            f"审批查询结束日期不能晚于今天（{latest}，上海时间）",
+            422,
+        )
 
 
 def runtime_options(catalog: OaTemplateCatalogLike) -> dict[str, object]:
@@ -383,6 +411,7 @@ async def _list_approval_references(
     current_user_id: str,
     query_window: TravelApprovalQueryWindow,
 ) -> dict[str, ListedTravelApproval]:
+    validate_live_query_window(query_window)
     listed: dict[str, ListedTravelApproval] = {}
     for profile in profiles:
         page_count = 0

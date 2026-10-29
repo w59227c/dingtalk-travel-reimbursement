@@ -102,6 +102,18 @@ class DingTalkOpenAPIError(ApiError):
         error.status_code = 503
         return error
 
+    @classmethod
+    def _query_time_invalid(
+        cls, *, http_status: int | None, upstream_code: object
+    ) -> DingTalkOpenAPIError:
+        error = cls(http_status=http_status, upstream_code=upstream_code)
+        error.code = "DINGTALK_QUERY_TIME_INVALID"
+        error.message = (
+            "钉钉拒绝当前查询日期，请选择最近 365 个自然日内、不超过 180 天的范围后重新查询"
+        )
+        error.status_code = 422
+        return error
+
 
 class _RequestPacer:
     """Space request starts across every caller sharing one application client."""
@@ -201,6 +213,19 @@ class DingTalkOpenAPIClient:
                     )
                 elif error.http_status == 403 and _is_permission_code(error.upstream_code):
                     error = DingTalkOpenAPIError._permission_denied(
+                        http_status=error.http_status,
+                        upstream_code=error.upstream_code,
+                    )
+                elif (
+                    operation == "workflow_instance_list"
+                    and error.http_status == 400
+                    and error.upstream_code
+                    in {
+                        "invalidEndTime",
+                        "invalidInstanceListIdsStartTime",
+                    }
+                ):
+                    error = DingTalkOpenAPIError._query_time_invalid(
                         http_status=error.http_status,
                         upstream_code=error.upstream_code,
                     )

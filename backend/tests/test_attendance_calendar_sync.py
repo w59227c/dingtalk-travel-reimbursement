@@ -262,6 +262,7 @@ def test_http_fetch_bounds_and_fixed_url(monkeypatch):
 
     def transport(request):
         seen.append(str(request.url))
+        assert request.headers["Accept"] == "application/vnd.github.raw+json"
         return httpx.Response(200, text=annual())
 
     def client(**options):
@@ -270,7 +271,9 @@ def test_http_fetch_bounds_and_fixed_url(monkeypatch):
 
     monkeypatch.setattr(sync_module.httpx, "AsyncClient", client)
     assert json.loads(asyncio.run(sync_module.fetch_holiday_cn(2027)))["year"] == 2027
-    assert seen == ["https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/2027.json"]
+    assert seen == [
+        "https://api.github.com/repos/NateScarlet/holiday-cn/contents/2027.json?ref=master"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -278,6 +281,7 @@ def test_http_fetch_bounds_and_fixed_url(monkeypatch):
     [(404, "", "unavailable"), (302, "", "network"), (200, "x" * (64 * 1024 + 1), "invalid")],
 )
 def test_http_fetch_rejects_missing_redirect_or_oversize(monkeypatch, status, body, code):
+    monkeypatch.setattr(sync_module, "FETCH_BACKOFF_SECONDS", (0, 0, 0))
     real_client = httpx.AsyncClient
     monkeypatch.setattr(
         sync_module.httpx,
@@ -289,3 +293,116 @@ def test_http_fetch_rejects_missing_redirect_or_oversize(monkeypatch, status, bo
     with pytest.raises(ApiError) as failure:
         asyncio.run(sync_module.fetch_holiday_cn(2027))
     assert failure.value.code == code
+
+
+def fetch_transport(monkeypatch, handler):
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(sync_module, "FETCH_BACKOFF_SECONDS", (0, 0, 0))
+    monkeypatch.setattr(
+        sync_module.httpx,
+        "AsyncClient",
+        lambda **options: real_client(**options, transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_network_failure_uses_raw_fallback_then_retries_the_official_api(monkeypatch, caplog):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if len(seen) == 1:
+            raise httpx.ConnectTimeout("private proxy credential must not be logged")
+        if len(seen) == 2:
+            raise httpx.ConnectError("private upstream detail")
+        return httpx.Response(200, text=annual())
+
+    fetch_transport(monkeypatch, handler)
+    assert json.loads(asyncio.run(sync_module.fetch_holiday_cn(2027)))["year"] == 2027
+    assert seen == ["api.github.com", "raw.githubusercontent.com", "api.github.com"]
+    assert "private" not in caplog.text
+    assert {
+        record.failure_kind for record in caplog.records if hasattr(record, "failure_kind")
+    } == {"timeout", "transport"}
+
+
+def test_raw_fallback_uses_the_same_fixed_annual_file(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        return (
+            httpx.Response(503)
+            if request.url.host == "api.github.com"
+            else httpx.Response(200, text=annual())
+        )
+
+    fetch_transport(monkeypatch, handler)
+    assert json.loads(asyncio.run(sync_module.fetch_holiday_cn(2027)))["year"] == 2027
+    assert seen == [
+        "https://api.github.com/repos/NateScarlet/holiday-cn/contents/2027.json?ref=master",
+        "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/2027.json",
+    ]
+
+
+def test_missing_year_does_not_replay_or_fallback(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        return httpx.Response(404)
+
+    fetch_transport(monkeypatch, handler)
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(sync_module.fetch_holiday_cn(2027))
+    assert caught.value.code == "unavailable" and seen == ["api.github.com"]
+
+
+def test_rate_limited_api_is_not_hit_again_in_same_attempt(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        return (
+            httpx.Response(403, headers={"x-ratelimit-remaining": "0"})
+            if request.url.host == "api.github.com"
+            else httpx.Response(503)
+        )
+
+    fetch_transport(monkeypatch, handler)
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(sync_module.fetch_holiday_cn(2027))
+    assert caught.value.code == "rate_limited"
+    assert seen == ["api.github.com", "raw.githubusercontent.com"]
+
+
+def test_all_transient_failures_are_bounded_and_redirects_never_leave_fixed_hosts(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+
+    fetch_transport(monkeypatch, handler)
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(sync_module.fetch_holiday_cn(2027))
+    assert caught.value.code == "network"
+    assert seen == ["api.github.com", "raw.githubusercontent.com", "api.github.com"]
+
+
+def test_one_total_deadline_covers_all_fetch_attempts(monkeypatch):
+    async def handler(request):
+        await asyncio.sleep(1)
+        return httpx.Response(200, text=annual())
+
+    fetch_transport(monkeypatch, handler)
+    monkeypatch.setattr(sync_module, "FETCH_TOTAL_TIMEOUT_SECONDS", 0.02)
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(sync_module.fetch_holiday_cn(2027))
+    assert caught.value.code == "network"
+
+
+def test_invalid_utf8_cannot_be_saved_or_retried_as_a_network_error(monkeypatch):
+    fetch_transport(monkeypatch, lambda _: httpx.Response(200, content=b"\xff"))
+    with pytest.raises(ApiError) as caught:
+        asyncio.run(sync_module.fetch_holiday_cn(2027))
+    assert caught.value.code == "invalid"

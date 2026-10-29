@@ -25,11 +25,18 @@ from app.services.attendance_calendar import (
 PREFIX = "attendance_calendar_sync:"
 INTERVAL = timedelta(days=5)
 LEASE = timedelta(minutes=2)
+FETCH_TOTAL_TIMEOUT_SECONDS = 20
+FETCH_BACKOFF_SECONDS = (0, 0.3, 0.6)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger(__name__)
 MESSAGES = {
     "unavailable": "holiday-cn 暂未提供该年数据，下次将自动重试。",
-    "network": "holiday-cn 连接失败或超时，下次将自动重试；也可手动录入。",
+    "network": (
+        "holiday-cn 获取失败（已自动重试），请检查服务器到 api.github.com:443 的网络；"
+        "下次将自动重试，也可粘贴或手动录入。"
+    ),
+    "rate_limited": "GitHub 请求受限，请稍后重试；下次将自动重试，也可粘贴或手动录入。",
+    "access": "GitHub 拒绝访问，请检查服务器出口是否放行 api.github.com:443；也可粘贴或手动录入。",
     "invalid": "holiday-cn 数据未通过完整年度校验，请手动核对或等待下次重试。",
     "storage": "保存未完成，下次将自动重试；可重新检查或手动录入。",
 }
@@ -101,27 +108,88 @@ def _window_start(year: int) -> datetime:
 
 
 async def fetch_holiday_cn(year: int) -> str:
-    # No arbitrary URLs, environment proxy, redirects, HTML parsing or remote code.
-    url = f"https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json"
+    # Both endpoints read the same public repository file, with no mirrors,
+    # arbitrary URLs, environment proxy, redirects or remote code execution.
+    if type(year) is not int or not 1 <= year <= 9999:
+        raise ValueError("invalid calendar year")
+    sources = {
+        "api": f"https://api.github.com/repos/NateScarlet/holiday-cn/contents/{year}.json?ref=master",
+        "raw": f"https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json",
+    }
+    last_error, api_limited = "network", False
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15, connect=5), follow_redirects=False, trust_env=False
-        ) as client:
-            async with client.stream(
-                "GET", url, headers={"Accept": "application/json", "Accept-Encoding": "identity"}
-            ) as response:
-                if response.status_code == 404:
-                    raise ApiError("unavailable", MESSAGES["unavailable"], 503)
-                if response.status_code != 200:
-                    raise ApiError("network", MESSAGES["network"], 503)
-                content = bytearray()
-                async for chunk in response.aiter_bytes(chunk_size=8192):
-                    content.extend(chunk)
-                    if len(content) > 64 * 1024:
-                        raise ApiError("invalid", MESSAGES["invalid"], 422)
-                return content.decode("utf-8-sig")
-    except (httpx.HTTPError, UnicodeError):
+        async with (
+            asyncio.timeout(FETCH_TOTAL_TIMEOUT_SECONDS),
+            httpx.AsyncClient(
+                timeout=httpx.Timeout(4, connect=3), follow_redirects=False, trust_env=False
+            ) as client,
+        ):
+            for attempt, source in enumerate(("api", "raw", "api")):
+                if source == "api" and api_limited:
+                    continue
+                if FETCH_BACKOFF_SECONDS[attempt]:
+                    await asyncio.sleep(FETCH_BACKOFF_SECONDS[attempt])
+                try:
+                    async with client.stream(
+                        "GET",
+                        sources[source],
+                        headers={
+                            "Accept": "application/vnd.github.raw+json"
+                            if source == "api"
+                            else "application/json",
+                            "Accept-Encoding": "identity",
+                            "User-Agent": "DingTalkTravelReimbursement",
+                        },
+                    ) as response:
+                        if response.status_code == 404:
+                            raise ApiError("unavailable", MESSAGES["unavailable"], 503)
+                        if response.status_code != 200:
+                            last_error = (
+                                "rate_limited"
+                                if response.status_code == 429
+                                or response.status_code == 403
+                                and response.headers.get("x-ratelimit-remaining") == "0"
+                                else "access"
+                                if response.status_code == 403
+                                else "network"
+                            )
+                            logger.warning(
+                                "Attendance calendar upstream rejected",
+                                extra={
+                                    "error_code": f"CALENDAR_SYNC_{last_error.upper()}",
+                                    "upstream": "github",
+                                    "upstream_operation": f"calendar_fetch_{source}",
+                                    "upstream_http_status": response.status_code,
+                                },
+                            )
+                            api_limited |= source == "api" and last_error == "rate_limited"
+                            continue
+                        content = bytearray()
+                        async for chunk in response.aiter_bytes(chunk_size=8192):
+                            content.extend(chunk)
+                            if len(content) > 64 * 1024:
+                                raise ApiError("invalid", MESSAGES["invalid"], 422)
+                        return content.decode("utf-8-sig")
+                except httpx.HTTPError as error:
+                    last_error = "network"
+                    logger.warning(
+                        "Attendance calendar connection failed",
+                        extra={
+                            "error_code": "CALENDAR_SYNC_NETWORK",
+                            "upstream": "github",
+                            "upstream_operation": f"calendar_fetch_{source}",
+                            "exception_type": type(error).__name__,
+                            "failure_kind": "timeout"
+                            if isinstance(error, httpx.TimeoutException)
+                            else "transport",
+                        },
+                    )
+    except TimeoutError:
         raise ApiError("network", MESSAGES["network"], 503) from None
+    except UnicodeError:
+        raise ApiError("invalid", MESSAGES["invalid"], 422) from None
+    code = "rate_limited" if api_limited else last_error
+    raise ApiError(code, MESSAGES[code], 503)
 
 
 class AttendanceCalendarSync:
@@ -289,7 +357,7 @@ class AttendanceCalendarSync:
         if token:
             content, error = None, ""
             try:
-                async with asyncio.timeout(20):
+                async with asyncio.timeout(FETCH_TOTAL_TIMEOUT_SECONDS):
                     content = await fetch_holiday_cn(year)
             except ApiError as failure:
                 error = failure.code if failure.code in MESSAGES else "network"

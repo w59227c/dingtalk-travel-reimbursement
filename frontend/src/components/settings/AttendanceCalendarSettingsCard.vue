@@ -313,6 +313,11 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
         </el-button>
       </div>
       <small>立即获取用于补齐缺失年份；已维护的年份会保留。已有安排可点击“修改”，也可粘贴新内容重新核对。</small>
+      <details class="calendar-network-help">
+        <summary>联网要求与重试</summary>
+        <p>优先通过 GitHub 官方 API 读取 holiday-cn，原始文件地址备用；一次最多尝试 3 次，总时限 20 秒，无需连续点击。</p>
+        <p>服务器须放行 api.github.com 的 TCP 443；备用地址为 raw.githubusercontent.com 的 TCP 443。未发布该年数据、网络失败和数据校验失败会分别提示，也可粘贴或手动填写。</p>
+      </details>
     </section>
     <p
       v-if="!years.length && loaded"
@@ -808,6 +813,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
 .calendar-sync { padding: 16px; margin-bottom: 20px; background: var(--el-fill-color-light); border-radius: 6px; min-width: 0; }
 .calendar-sync-heading { display: flex; align-items: center; gap: 10px; }
 .calendar-sync p, .calendar-sync small { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.7; }
+.calendar-network-help { margin-top: 10px; }.calendar-network-help p { margin: 8px 0 0; }
 .calendar-sync-jobs { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 12px; }
 .calendar-sync.is-mobile .calendar-sync-jobs { grid-template-columns: minmax(0,1fr); }
 .calendar-sync-jobs li { padding: 10px 12px; background: var(--el-bg-color); border-radius: 4px; }

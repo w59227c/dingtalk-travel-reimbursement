@@ -16,6 +16,13 @@ import {
 import { getAdminExpenseSettings, updateExpenseSettings } from '@/api/settings'
 import SettingsAdminView from './SettingsAdminView.vue'
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
+import { useAuthStore } from '@/stores/auth'
+
+function adminPinia() {
+  const pinia = createPinia()
+  useAuthStore(pinia).session = { user: { userId: 'synthetic-admin', name: '合成管理员' }, departments: [], selectedDepartment: null, csrfToken: 'synthetic-csrf', isAdmin: true }
+  return pinia
+}
 
 vi.mock('@/api/attendanceCalendars', () => ({ listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), deleteAttendanceCalendar: vi.fn() }))
 vi.mock('@/api/expenses', () => ({ getExpenseCategories: vi.fn() }))
@@ -40,6 +47,16 @@ vi.mock('@/api/settings', async (importOriginal) => {
 })
 
 describe('SettingsAdminView receipt keywords', () => {
+  it.each([false, true])('does not mount any settings tool for an employee, mobile=%s', async (mobile) => {
+    const pinia = adminPinia(); useAuthStore(pinia).session!.isAdmin = false
+    const wrapper = mount(SettingsAdminView, { props: { mobile }, global: { plugins: [pinia, ElementPlus], stubs: { RouterLink: true } } })
+    await flushPromises()
+    expect(wrapper.find('main').exists()).toBe(false)
+    expect(getAdminExpenseSettings).not.toHaveBeenCalled()
+    expect(listReceiptKeywords).not.toHaveBeenCalled()
+    expect(listAttendanceCalendars).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(listAttendanceCalendars).mockResolvedValue([])
@@ -107,7 +124,7 @@ describe('SettingsAdminView receipt keywords', () => {
     const wrapper = mount(SettingsAdminView, {
       props: { mobile: true },
       global: {
-        plugins: [createPinia(), ElementPlus],
+        plugins: [adminPinia(), ElementPlus],
         stubs: {
           RouterLink: {
             props: ['to'],
@@ -125,7 +142,7 @@ describe('SettingsAdminView receipt keywords', () => {
   it.each([false, true])('includes approval diagnostics in both settings modes, mobile=%s', (mobile) => {
     const wrapper = mount(SettingsAdminView, {
       props: { mobile },
-      global: { plugins: [createPinia(), ElementPlus], stubs: { RouterLink: true } },
+      global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } },
     })
     expect(wrapper.get('#approval-diagnostics').text()).toContain('出差审批诊断')
     expect(wrapper.get('a[href="#approval-diagnostics"]').text()).toBe('审批诊断')
@@ -136,7 +153,7 @@ describe('SettingsAdminView receipt keywords', () => {
     vi.mocked(updateExpenseSettings).mockImplementation(async (input) => input)
     const wrapper = mount(SettingsAdminView, {
       props: { mobile },
-      global: { plugins: [createPinia(), ElementPlus], stubs: { RouterLink: true } },
+      global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } },
     })
     await flushPromises()
     const labels = [
@@ -165,7 +182,7 @@ describe('SettingsAdminView receipt keywords', () => {
   it('lets an administrator add a fallback classification keyword', async () => {
     const wrapper = mount(SettingsAdminView, {
       global: {
-        plugins: [createPinia(), ElementPlus],
+        plugins: [adminPinia(), ElementPlus],
         stubs: { RouterLink: { template: '<a><slot /></a>' } },
       },
     })
@@ -212,7 +229,7 @@ describe('SettingsAdminView receipt keywords', () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as Awaited<ReturnType<typeof ElMessageBox.confirm>>)
     const wrapper = mount(SettingsAdminView, {
       props: { mobile },
-      global: { plugins: [createPinia(), ElementPlus], stubs: { RouterLink: true } },
+      global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } },
     })
     await flushPromises()
     expect(wrapper.text()).toContain('出差审批诊断')
@@ -243,7 +260,7 @@ describe('SettingsAdminView receipt keywords', () => {
   it('shows an inline explanation when a one-character keyword is rejected', async () => {
     const wrapper = mount(SettingsAdminView, {
       global: {
-        plugins: [createPinia(), ElementPlus],
+        plugins: [adminPinia(), ElementPlus],
         stubs: { RouterLink: { template: '<a><slot /></a>' } },
       },
     })
@@ -271,7 +288,7 @@ describe('SettingsAdminView receipt keywords', () => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
     const wrapper = mount(SettingsAdminView, {
       global: {
-        plugins: [createPinia(), ElementPlus],
+        plugins: [adminPinia(), ElementPlus],
         stubs: { RouterLink: { template: '<a><slot /></a>' } },
       },
     })

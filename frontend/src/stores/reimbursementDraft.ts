@@ -113,6 +113,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   const loadError = ref('')
   const reimbursementOptionsError = ref('')
   const travelApprovalsError = ref('')
+  const travelApprovalsErrorCode = ref('')
   const mutationError = ref('')
   const revisionConflict = ref(false)
 
@@ -473,6 +474,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     activeTravelApprovalsController = context.controller
     loadingTravelApprovals.value = true
     travelApprovalsError.value = ''
+    travelApprovalsErrorCode.value = ''
     try {
       const result = await listOaTravelApprovals({
         ...query,
@@ -499,6 +501,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && requestVersion === travelApprovalsRequestVersion
         && !isCancellation(error)
       ) {
+        travelApprovalsErrorCode.value = apiErrorCode(error) ?? ''
         travelApprovalsError.value = apiErrorMessage(
           error,
           '出差审批加载失败，请重试',
@@ -1328,6 +1331,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadError.value = ''
     reimbursementOptionsError.value = ''
     travelApprovalsError.value = ''
+    travelApprovalsErrorCode.value = ''
     mutationError.value = ''
     revisionConflict.value = false
   }
@@ -1356,6 +1360,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadError,
     reimbursementOptionsError,
     travelApprovalsError,
+    travelApprovalsErrorCode,
     mutationError,
     revisionConflict,
     busy,

@@ -36,7 +36,14 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore(pinia)
+  const existingSession = !!auth.session
   await auth.bootstrap()
+  if (to.meta.requiresAdmin && existingSession) {
+    // Settings may have granted or revoked this user's role since bootstrap.
+    // Do not authorize an admin page from the cached client-side flag alone.
+    try { await auth.refreshMe() }
+    catch { return { name: to.name === 'mobile-admin-settings' ? 'mobile-reimburse' : 'reimburse' } }
+  }
   if (to.meta.requiresAdmin && !auth.isAdmin) {
     return { name: to.name === 'mobile-admin-settings' ? 'mobile-reimburse' : 'reimburse' }
   }

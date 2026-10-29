@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { diagnoseTravelApproval } from '@/api/approvalDiagnostics'
 import { apiErrorMessage } from '@/api/errors'
 import { useAuthStore } from '@/stores/auth'
+import { APPROVAL_QUERY_HINT, approvalQueryDateError, approvalQueryStartDisabled, approvalQueryEndDisabled } from '@/utils/approvalQueryDates'
 import type {
   ApprovalDiagnosticCheckStatus,
   ApprovalDiagnosticCounts,
@@ -19,6 +20,8 @@ const identifierKind = ref<ApprovalIdentifierKind>('auto')
 const fromDate = ref('')
 const toDate = ref('')
 const keyword = ref('')
+const startCalendarMonth = computed(() => toDate.value ? new Date(`${toDate.value}T00:00:00`) : undefined)
+const endCalendarMonth = computed(() => fromDate.value ? new Date(`${fromDate.value}T00:00:00`) : undefined)
 const loading = ref(false)
 const errorMessage = ref('')
 const report = ref<ApprovalDiagnosticReport | null>(null)
@@ -92,15 +95,8 @@ async function run(): Promise<void> {
     errorMessage.value = '请填写员工 userId 和审批编号或实例 ID'
     return
   }
-  if (Boolean(fromDate.value) !== Boolean(toDate.value)) {
-    errorMessage.value = '自定义查询范围需要同时填写开始和结束日期'
-    return
-  }
-  if (fromDate.value && (fromDate.value > toDate.value
-    || (Date.parse(toDate.value) - Date.parse(fromDate.value)) / 86400000 >= 180)) {
-    errorMessage.value = '查询范围必须连续且不超过 180 天'
-    return
-  }
+  const dateError = approvalQueryDateError(fromDate.value, toDate.value)
+  if (dateError) { errorMessage.value = dateError; return }
   controller = new AbortController()
   const activeController = controller
   const version = generation
@@ -181,7 +177,7 @@ async function copySummary(): Promise<void> {
       <details class="diagnostic-advanced">
         <summary>更多查询条件</summary>
         <p class="field-help">
-          默认按最近 180 天查询。可还原员工页面的日期范围和关键词；日期范围对应审批发起时间。
+          {{ APPROVAL_QUERY_HINT }}可还原员工页面的日期范围和关键词。
         </p>
         <div
           class="diagnostic-form-grid"
@@ -194,8 +190,12 @@ async function copySummary(): Promise<void> {
               value-format="YYYY-MM-DD"
               format="YYYY-MM-DD"
               aria-label="诊断查询开始日期"
+              popper-class="approval-query-picker"
               :disabled="loading"
               placeholder="默认最近 180 天"
+              :editable="false"
+              :disabled-date="(date: Date) => approvalQueryStartDisabled(date, toDate)"
+              :default-value="startCalendarMonth"
             />
           </el-form-item>
           <el-form-item label="查询结束日期">
@@ -205,8 +205,12 @@ async function copySummary(): Promise<void> {
               value-format="YYYY-MM-DD"
               format="YYYY-MM-DD"
               aria-label="诊断查询结束日期"
+              popper-class="approval-query-picker"
               :disabled="loading"
               placeholder="默认今天"
+              :editable="false"
+              :disabled-date="(date: Date) => approvalQueryEndDisabled(date, fromDate)"
+              :default-value="endCalendarMonth"
             />
           </el-form-item>
           <el-form-item label="原查询关键词">

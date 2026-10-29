@@ -8,6 +8,7 @@ import type {
   ReimbursementRelatedApprovalSelection,
 } from '@/types/reimbursements'
 import { mappedTravelTypeOption } from '@/utils/travelTypes'
+import { APPROVAL_QUERY_HINT, approvalQueryDateError, approvalQueryStartDisabled, approvalQueryEndDisabled } from '@/utils/approvalQueryDates'
 
 const props = withDefaults(defineProps<{
   modelValue: ReimbursementRelatedApprovalSelection[]
@@ -47,7 +48,13 @@ const drafts = useReimbursementDraftStore()
 const fromDate = ref('')
 const toDate = ref('')
 const keyword = ref('')
+const startCalendarMonth = computed(() => toDate.value ? new Date(`${toDate.value}T00:00:00`) : undefined)
+const endCalendarMonth = computed(() => fromDate.value ? new Date(`${fromDate.value}T00:00:00`) : undefined)
 const localError = ref('')
+const queryNeedsAdjustment = computed(() => !!approvalQueryDateError(fromDate.value, toDate.value) || [
+  'TRAVEL_APPROVAL_QUERY_HISTORY_UNAVAILABLE', 'TRAVEL_APPROVAL_QUERY_FUTURE',
+  'TRAVEL_APPROVAL_QUERY_WINDOW_INVALID', 'DINGTALK_QUERY_TIME_INVALID',
+].includes(drafts.travelApprovalsErrorCode))
 const candidateCache = new Map<string, OaTravelApproval>()
 
 const selectedIds = computed(() => new Set(
@@ -125,15 +132,8 @@ async function search(): Promise<void> {
   if (props.readonly) return
   localError.value = ''
   const hasFrom = Boolean(fromDate.value)
-  const hasTo = Boolean(toDate.value)
-  if (hasFrom !== hasTo) {
-    localError.value = '自定义日期范围需要同时填写开始和结束日期'
-    return
-  }
-  if (hasFrom && fromDate.value > toDate.value) {
-    localError.value = '开始日期不能晚于结束日期'
-    return
-  }
+  const dateError = approvalQueryDateError(fromDate.value, toDate.value)
+  if (dateError) { localError.value = dateError; return }
   await drafts.loadTravelApprovals({
     ...(hasFrom ? { from: fromDate.value, to: toDate.value } : {}),
     ...(keyword.value.trim() ? { query: keyword.value.trim() } : {}),
@@ -268,7 +268,11 @@ function accountingLabel(row: ApprovalRow): string {
           type="date"
           value-format="YYYY-MM-DD"
           :placeholder="props.mobile ? '开始日期' : '查询开始日期'"
+          :editable="false"
+          :disabled-date="(date: Date) => approvalQueryStartDisabled(date, toDate)"
+          :default-value="startCalendarMonth"
           aria-label="出差审批查询开始日期"
+          popper-class="approval-query-picker"
           class="full-width"
         />
         <el-date-picker
@@ -276,7 +280,11 @@ function accountingLabel(row: ApprovalRow): string {
           type="date"
           value-format="YYYY-MM-DD"
           :placeholder="props.mobile ? '结束日期' : '查询结束日期'"
+          :editable="false"
+          :disabled-date="(date: Date) => approvalQueryEndDisabled(date, fromDate)"
+          :default-value="endCalendarMonth"
           aria-label="出差审批查询结束日期"
+          popper-class="approval-query-picker"
           class="full-width"
         />
         <el-input
@@ -295,6 +303,9 @@ function accountingLabel(row: ApprovalRow): string {
           查询审批
         </el-button>
       </div>
+      <p class="travel-query-help">
+        {{ APPROVAL_QUERY_HINT }}
+      </p>
     </fieldset>
 
     <el-alert
@@ -307,7 +318,7 @@ function accountingLabel(row: ApprovalRow): string {
     >
       <template #default>
         <el-button
-          v-if="drafts.travelApprovalsError"
+          v-if="drafts.travelApprovalsError && !queryNeedsAdjustment"
           link
           type="primary"
           @click="search"
@@ -326,12 +337,12 @@ function accountingLabel(row: ApprovalRow): string {
     <el-empty
       v-else-if="rows.length === 0"
       :description="localError || drafts.travelApprovalsError
-        ? '审批查询未完成，请重试'
+        ? queryNeedsAdjustment ? '请调整查询日期后重新查询' : '审批查询未完成，请重试'
         : '当前查询范围内没有已通过的出差审批'"
       :image-size="72"
     >
       <el-button
-        v-if="!readonly"
+        v-if="!readonly && !queryNeedsAdjustment"
         :loading="drafts.loadingTravelApprovals"
         @click="search"
       >
@@ -385,6 +396,7 @@ function accountingLabel(row: ApprovalRow): string {
 </template>
 
 <style scoped>
+.travel-query-help { margin: 8px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 .plain-fieldset {
   min-width: 0;
   margin: 0;

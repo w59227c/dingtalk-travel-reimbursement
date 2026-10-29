@@ -18,6 +18,35 @@ from app.integrations.dingtalk.client import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["invalidEndTime", "invalidInstanceListIdsStartTime"])
+async def test_list_date_rejection_is_actionable_and_never_treated_as_an_outage(
+    settings_factory, code
+):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200, json={"access_token": "synthetic-token"})
+        calls.append(request.url.path)
+        return httpx.Response(400, json={"code": code, "message": "private diagnostic"})
+
+    client = DingTalkOpenAPIClient(settings_factory(), transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(DingTalkOpenAPIError) as caught:
+            await client.request_openapi_json(
+                "POST", "/v1.0/workflow/processes/instanceIds/query", retry_transient=True
+            )
+        assert caught.value.code == "DINGTALK_QUERY_TIME_INVALID"
+        assert caught.value.status_code == 422
+        assert caught.value.upstream_code == code
+        assert "365" in caught.value.message and "180" in caught.value.message
+        assert "private" not in caught.value.message
+        assert len(calls) == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method", "path", "expected_operation"),
     [

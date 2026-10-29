@@ -425,6 +425,14 @@ function visibleButton(wrapper: VueWrapper, label: string) {
 }
 
 describe('ReimburseView single-form OA flow', () => {
+  it.each([false, true])('shows settings only to administrators and links the correct presentation (mobile=%s)', async (mobile) => {
+    let authority!: ReturnType<typeof useAuthStore>
+    const { wrapper } = await mountView((auth) => { authority = auth; auth.session!.isAdmin = false }, false, mobile)
+    expect(wrapper.find('.hero-actions a').exists()).toBe(false)
+    authority.session!.isAdmin = true; await nextTick()
+    expect(wrapper.get('.hero-actions a').attributes('data-to')).toBe(mobile ? '/m/settings' : '/admin/settings')
+    wrapper.unmount()
+  })
   beforeEach(() => {
     document.body.innerHTML = '<div id="test-app"></div>'
     window.sessionStorage.clear()
