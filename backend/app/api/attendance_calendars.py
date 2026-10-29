@@ -1,7 +1,7 @@
 import asyncio
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from app.services.attendance_calendar import (
     NoticeApply,
     NoticeInput,
     apply_notice,
+    calendar_for_edit,
     delete_calendar,
     list_calendars,
     preview_notice,
@@ -78,7 +79,16 @@ async def parse_calendar(
     _current: Annotated[CurrentSession, Depends(require_admin_csrf)],
 ):
     body = await _body(request, NoticeInput)
-    return success(preview_notice(database, body.text, body.correction))
+    return success(preview_notice(database, body.text, body.correction, body.editContext))
+
+
+@router.get("/admin/attendance-calendars/{year}/edit")
+def get_calendar_for_edit(
+    year: Annotated[int, Path(ge=1, le=9999)],
+    database: Annotated[Session, Depends(get_db)],
+    _current: Annotated[CurrentSession, Depends(require_admin)],
+):
+    return success(calendar_for_edit(database, year))
 
 
 @router.post("/admin/attendance-calendars/apply")

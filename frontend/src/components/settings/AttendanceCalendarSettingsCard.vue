@@ -3,9 +3,9 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, useId, wat
 import { ElMessageBox } from 'element-plus'
 import { matchedRouteKey, onBeforeRouteLeave } from 'vue-router'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
-import { applyAttendanceNotice, deleteAttendanceCalendar, listAttendanceCalendars, parseAttendanceNotice, attendanceSyncStatus, checkAttendanceYear } from '@/api/attendanceCalendars'
+import { applyAttendanceNotice, deleteAttendanceCalendar, getAttendanceCalendarEditor, listAttendanceCalendars, parseAttendanceNotice, attendanceSyncStatus, checkAttendanceYear } from '@/api/attendanceCalendars'
 import { useAuthStore } from '@/stores/auth'
-import type { AttendanceCalendarCorrection, AttendanceCalendarDay, AttendanceCalendarYear, AttendanceNoticePreview, AttendanceSyncStatus } from '@/types/attendance'
+import type { AttendanceCalendarCorrection, AttendanceCalendarDay, AttendanceCalendarEditContext, AttendanceCalendarYear, AttendanceNoticePreview, AttendanceSyncStatus } from '@/types/attendance'
 import { calendarRanges } from '@/utils/calendarMaintenance'
 import CalendarArrangementPreview from './CalendarArrangementPreview.vue'
 import CalendarCorrectionEditor from './CalendarCorrectionEditor.vue'
@@ -24,6 +24,7 @@ const busy = ref(false), loaded = ref(false), error = ref(''), message = ref('')
 const mode = ref<'paste' | 'correct' | 'review' | 'view'>('paste'), text = ref('')
 const preview = ref<AttendanceNoticePreview | null>(null), viewed = ref<AttendanceCalendarYear | null>(null)
 const correction = ref<AttendanceCalendarCorrection | null>(null)
+const editing = ref<AttendanceCalendarEditContext | null>(null), editConflict = ref(false)
 const selectedYear = ref(0)
 const previewMonth = ref(1), viewMonth = ref(1), expandedSources = ref<number[]>([])
 const calendarPanel = ref<HTMLElement | null>(null)
@@ -33,7 +34,7 @@ watch(preview, () => { expandedSources.value = [] }, { flush: 'sync' })
 let controller: AbortController | null = null, generation = 0
 const unsaved = computed(() => open.value && mode.value !== 'view' && (!!text.value.trim() || standalone.value && JSON.stringify(correction.value) !== manualBaseline.value))
 const selectedChange = computed(() => preview.value?.changes.find((item) => item.year === selectedYear.value))
-const title = computed(() => mode.value === 'view' ? `${viewed.value?.year} 年安排` : mode.value === 'review' ? '核对年度安排' : mode.value === 'correct' ? standalone.value ? '手动填写年度安排' : '修正年度安排' : '录入年度安排')
+const title = computed(() => mode.value === 'view' ? `${viewed.value?.year} 年安排` : mode.value === 'review' ? '核对年度安排' : mode.value === 'correct' ? editing.value ? `修改 ${editing.value.year} 年安排` : standalone.value ? '手动填写年度安排' : '修正年度安排' : '录入年度安排')
 const correctionComplete = computed(() => !!correction.value?.year && !!correction.value.ranges.length && correction.value.ranges.every((item) => item.name.trim() && item.startDate && item.endDate))
 watch(correction, () => {
   if (mode.value === 'review' || mode.value === 'correct') { preview.value = null; mode.value = 'correct'; error.value = '' }
@@ -72,6 +73,7 @@ async function revealFeedback(): Promise<void> {
 function invalidate(): void {
   generation++; controller?.abort(); controller = null; busy.value = false; open.value = false
   text.value = ''; preview.value = null; correction.value = null; viewed.value = null; error.value = ''; message.value = ''
+  editing.value = null; editConflict.value = false
 }
 watch(() => [auth.session?.user.userId, auth.isAdmin], () => { invalidate(); years.value = []; loaded.value = false }, { flush: 'sync' })
 watch(text, () => { preview.value = null; correction.value = null; error.value = ''; if (mode.value === 'review' || mode.value === 'correct') mode.value = 'paste' }, { flush: 'sync' })
@@ -87,7 +89,7 @@ async function run(action: (signal: AbortSignal) => Promise<void>): Promise<void
   catch (failure) {
     if (version === generation && !active.signal.aborted) {
       error.value = apiErrorMessage(failure, '日历操作失败，请重试')
-      if (apiErrorCode(failure) === 'ATTENDANCE_CALENDAR_CONFLICT') { preview.value = null; mode.value = correction.value ? 'correct' : 'paste' }
+      if (apiErrorCode(failure) === 'ATTENDANCE_CALENDAR_CONFLICT') { preview.value = null; mode.value = correction.value ? 'correct' : 'paste'; editConflict.value = !!editing.value }
     }
   }
   finally {
@@ -103,12 +105,21 @@ async function discard(): Promise<boolean> {
   try { await ElMessageBox.confirm('年度安排尚未保存，是否放弃本次录入？', '未保存的年度安排', { confirmButtonText: '放弃录入', cancelButtonText: '继续核对', type: 'warning' }); return true }
   catch { return false }
 }
-function paste(): void { if (!busy.value) { standalone.value = false; text.value = ''; preview.value = null; correction.value = null; viewed.value = null; mode.value = 'paste'; error.value = ''; open.value = true } }
+function paste(): void { if (!busy.value) { standalone.value = false; editing.value = null; editConflict.value = false; text.value = ''; preview.value = null; correction.value = null; viewed.value = null; mode.value = 'paste'; error.value = ''; open.value = true } }
+function startManual(value: AttendanceCalendarCorrection, context: AttendanceCalendarEditContext | null = null): void {
+  text.value = ''; preview.value = null; viewed.value = null; error.value = ''
+  standalone.value = true; editing.value = context; editConflict.value = false
+  correction.value = value; manualBaseline.value = JSON.stringify(value); mode.value = 'correct'; open.value = true
+}
 function manual(): void {
   if (busy.value) return
-  paste(); standalone.value = true; mode.value = 'correct'
-  correction.value = { year: exampleYear, ranges: ['元旦', '春节', '清明节', '劳动节', '端午节', '中秋节', '国庆节'].map((name) => ({ name, startDate: '', endDate: '', working: false })) }
-  manualBaseline.value = JSON.stringify(correction.value)
+  startManual({ year: exampleYear, ranges: ['元旦', '春节', '清明节', '劳动节', '端午节', '中秋节', '国庆节'].map((name) => ({ name, startDate: '', endDate: '', working: false })) })
+}
+async function edit(item: AttendanceCalendarYear): Promise<void> {
+  await run(async (signal) => {
+    const initial = await getAttendanceCalendarEditor(item.year, signal)
+    if (!signal.aborted) startManual(initial.correction, initial.editContext)
+  })
 }
 const statusLabels = { scheduled: '等待年度获取开始', pending: '等待获取', running: '正在获取', retry: '等待重试', completed: '已维护，本轮已完成', paused: '已删除，自动获取已暂停' }
 function timeLabel(value: string | null): string { return value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : '—' }
@@ -176,12 +187,17 @@ function beginCorrection(): void {
   }
   correction.value = { year: original?.year ?? 0, ranges }
 }
-async function previewCorrection(): Promise<void> {
-  if (!correction.value || !correctionComplete.value) return
+async function previewCorrection(refreshBase = false): Promise<void> {
+  if (!correction.value || !correctionComplete.value || editConflict.value && !refreshBase) return
   const patch = { year: correction.value.year, ranges: correction.value.ranges.map((item) => ({ ...item })) }
   const original = text.value
   await run(async (signal) => {
-    const result = await parseAttendanceNotice(original, signal, patch)
+    if (refreshBase && editing.value) {
+      const latest = await getAttendanceCalendarEditor(editing.value.year, signal)
+      if (signal.aborted) return
+      editing.value = latest.editContext; editConflict.value = false
+    }
+    const result = editing.value ? await parseAttendanceNotice(original, signal, patch, editing.value) : await parseAttendanceNotice(original, signal, patch)
     if (signal.aborted || text.value !== original) return
     preview.value = result
     if (result.canSave) { selectPreviewYear(result.year!); mode.value = 'review' }
@@ -192,7 +208,7 @@ async function save(): Promise<void> {
   const plan = preview.value
   if (!plan?.canSave || mode.value !== 'review') return
   await run(async (signal) => {
-    const result = correction.value ? await applyAttendanceNotice(text.value, plan, signal, correction.value) : await applyAttendanceNotice(text.value, plan, signal)
+    const result = editing.value && correction.value ? await applyAttendanceNotice(text.value, plan, signal, correction.value, editing.value) : correction.value ? await applyAttendanceNotice(text.value, plan, signal, correction.value) : await applyAttendanceNotice(text.value, plan, signal)
     if (signal.aborted) return
     years.value = result.items; loaded.value = true; open.value = false; text.value = ''; preview.value = null
     message.value = result.unchanged ? `${result.year} 年安排与已保存内容一致，无需更新` : `${result.year} 年安排已保存，相关年度安排已同步更新`
@@ -296,7 +312,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
           刷新状态
         </el-button>
       </div>
-      <small>立即获取用于补齐缺失年份；已维护的年份会保留。修改已有安排请粘贴新内容或手动填写。</small>
+      <small>立即获取用于补齐缺失年份；已维护的年份会保留。已有安排可点击“修改”，也可粘贴新内容重新核对。</small>
     </section>
     <p
       v-if="!years.length && loaded"
@@ -328,6 +344,15 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
             @click="view(item)"
           >
             查看
+          </el-button><el-button
+            v-if="item.complete"
+            link
+            type="primary"
+            :disabled="busy"
+            :aria-label="`修改 ${item.year} 年安排`"
+            @click="edit(item)"
+          >
+            修改
           </el-button><el-button
             v-if="item.complete"
             link
@@ -389,7 +414,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
           aria-label="录入步骤"
         >
           <li :class="{ active: mode === 'paste' || mode === 'correct' }">
-            {{ standalone ? '1 手动填写日期' : '1 粘贴完整内容' }}
+            {{ editing ? '1 修改日期' : standalone ? '1 手动填写日期' : '1 粘贴完整内容' }}
           </li><li :class="{ active: mode === 'review' }">
             2 核对并保存
           </li>
@@ -479,7 +504,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
         </template>
         <template v-else-if="mode === 'correct' && correction">
           <div class="notice-correction-heading">
-            <p>{{ standalone ? '无需粘贴内容，填写完整年度放假及补班安排后生成预览。' : '修正结果需重新生成预览，确认后才会保存。' }}</p><el-button
+            <p>{{ editing ? `已带入 ${editing.year} 年原年度安排及其跨年日期。只修改本年度来源，其他年度通知的安排会保留；生成预览后核对差异再保存。` : standalone ? '无需粘贴内容，填写完整年度放假及补班安排后生成预览。' : '修正结果需重新生成预览，确认后才会保存。' }}</p><el-button
               v-if="!standalone"
               :disabled="busy"
               @click="editText"
@@ -498,6 +523,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
             :disabled="busy"
             :mobile="props.mobile"
             :standalone="standalone"
+            :year-locked="!!editing"
           />
           <div
             v-if="preview && !preview.canSave"
@@ -520,7 +546,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
           <div class="notice-review-heading">
             <div>
               <h3>{{ preview.year }} 年年度安排</h3><p class="notice-source-label">
-                {{ preview.sourceFormat === 'manual' ? standalone ? '手动填写，请核对全年安排' : '已手动修正，请对照来源核对' : `已识别：${preview.sourceLabel}` }}
+                {{ editing ? preview.unchanged ? '已带入原年度安排，请核对' : '已修改，请核对全年安排及本次差异' : preview.sourceFormat === 'manual' ? standalone ? '手动填写，请核对全年安排' : '已手动修正，请对照来源核对' : `已识别：${preview.sourceLabel}` }}
               </p><p>
                 {{ preview.sections.length }} 项节日安排 · 放假 {{ totalDays?.rest }} 天 · 补班 {{ totalDays?.work }} 天<template v-if="preview.changes.length > 1">
                   （含跨年日期）
@@ -531,7 +557,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
                 :disabled="busy"
                 @click="beginCorrection"
               >
-                {{ standalone ? '返回填写' : correction ? '继续修正日期' : '修正识别结果' }}
+                {{ editing ? '继续修改' : standalone ? '返回填写' : correction ? '继续修正日期' : '修正识别结果' }}
               </el-button><el-button
                 v-if="!standalone"
                 :disabled="busy"
@@ -730,12 +756,19 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
       </p>
       <template #footer>
         <div class="notice-footer">
-          <span>{{ mode === 'view' ? '日历仅供查看，可重新录入以更新安排' : mode === 'paste' ? '解析不会修改已保存的安排' : mode === 'correct' ? '请完整核对全年放假与补班安排' : preview?.unchanged ? '内容一致，已有日历无需更新' : '确认保存后生效，已有出勤选择保持不变' }}</span><div>
+          <span>{{ mode === 'view' ? viewed?.complete ? '可修改原年度安排，保存前需核对差异' : '跨年日期请到对应来源年度修改' : mode === 'paste' ? '解析不会修改已保存的安排' : mode === 'correct' ? '请完整核对全年放假与补班安排' : preview?.unchanged ? '内容一致，已有日历无需更新' : '确认保存后生效，已有出勤选择保持不变' }}</span><div>
             <el-button
               :disabled="busy"
               @click="close()"
             >
               {{ mode === 'view' ? '关闭' : '取消' }}
+            </el-button><el-button
+              v-if="mode === 'view' && viewed?.complete"
+              type="primary"
+              :disabled="busy"
+              @click="edit(viewed)"
+            >
+              修改安排
             </el-button><el-button
               v-if="mode === 'paste'"
               type="primary"
@@ -749,9 +782,9 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
               type="primary"
               :loading="busy"
               :disabled="busy || !correctionComplete"
-              @click="previewCorrection"
+              @click="previewCorrection(editConflict)"
             >
-              {{ standalone ? '生成预览' : '生成修正预览' }}
+              {{ editConflict ? '重新核对最新差异' : standalone ? '生成预览' : '生成修正预览' }}
             </el-button><el-button
               v-else-if="mode === 'review'"
               type="primary"
@@ -813,7 +846,7 @@ async function remove(item: AttendanceCalendarYear): Promise<void> {
 .notice-calendar-panel .calendar-footnote { margin: 0 0 12px; }
 .notice-differences { padding-top: 10px; margin-top: 20px; border-top: 1px solid var(--el-border-color-lighter); }.notice-differences h4 { margin: 8px 0 12px; }.notice-differences details { margin: 10px 0; line-height: 1.7; }.notice-differences ul { padding-left: 18px; font-size: 12px; }
 details { font-size: 12px; color: var(--el-text-color-secondary); }summary { cursor: pointer; }details p { white-space: pre-wrap; overflow-wrap: anywhere; }
-.notice-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }.notice-footer > span { font-size: 12px; color: var(--el-text-color-secondary); text-align: left; }.notice-footer > div { display: flex; margin-left: auto; }
+.notice-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }.notice-footer > span { font-size: 12px; color: var(--el-text-color-secondary); text-align: left; }.notice-footer > div { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }.notice-footer :deep(.el-button + .el-button) { margin-left: 0; }
 </style>
 <style>
 .calendar-notice-dialog { max-width: calc(100vw - 32px); max-height: calc(100dvh - 64px); margin: 32px auto; border-radius: 8px; display: flex; flex-direction: column; }

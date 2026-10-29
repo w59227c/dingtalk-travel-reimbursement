@@ -5,6 +5,8 @@ export interface AttendanceCalendar {
 export interface AttendanceCalendarDay { date: string; working: boolean; name: string }
 export interface AttendanceCorrectionRange { name: string; startDate: string; endDate: string; working: boolean }
 export interface AttendanceCalendarCorrection { year: number; ranges: AttendanceCorrectionRange[] }
+export interface AttendanceCalendarEditContext { year: number; expectedRevisions: Record<string, string | null> }
+export interface AttendanceCalendarEditor { correction: AttendanceCalendarCorrection; editContext: AttendanceCalendarEditContext }
 export interface AttendanceCalendarYear {
   year: number
   revision: string

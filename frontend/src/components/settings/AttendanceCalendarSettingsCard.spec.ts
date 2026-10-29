@@ -3,16 +3,17 @@ import { createPinia } from 'pinia'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DefineComponent } from 'vue'
-import { applyAttendanceNotice, deleteAttendanceCalendar, listAttendanceCalendars, parseAttendanceNotice, attendanceSyncStatus, checkAttendanceYear } from '@/api/attendanceCalendars'
+import { applyAttendanceNotice, deleteAttendanceCalendar, getAttendanceCalendarEditor, listAttendanceCalendars, parseAttendanceNotice, attendanceSyncStatus, checkAttendanceYear } from '@/api/attendanceCalendars'
 import { useAuthStore } from '@/stores/auth'
 import type { AttendanceCalendarCorrection, AttendanceCalendarYear, AttendanceNoticePreview } from '@/types/attendance'
 import AttendanceCalendarSettingsCard from './AttendanceCalendarSettingsCard.vue'
 import CalendarCorrectionEditor from './CalendarCorrectionEditor.vue'
-vi.mock('@/api/attendanceCalendars', () => ({ deleteAttendanceCalendar: vi.fn(), listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), attendanceSyncStatus: vi.fn(), checkAttendanceYear: vi.fn() }))
-const correctionEditor = CalendarCorrectionEditor as DefineComponent<{ modelValue: AttendanceCalendarCorrection; mobile?: boolean }>
+vi.mock('@/api/attendanceCalendars', () => ({ deleteAttendanceCalendar: vi.fn(), getAttendanceCalendarEditor: vi.fn(), listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), attendanceSyncStatus: vi.fn(), checkAttendanceYear: vi.fn() }))
+const correctionEditor = CalendarCorrectionEditor as DefineComponent<{ modelValue: AttendanceCalendarCorrection; mobile?: boolean; yearLocked?: boolean }>
 enableAutoUnmount(afterEach)
 afterEach(() => vi.restoreAllMocks())
 const saved: AttendanceCalendarYear = { year: 2042, revision: 'revision-one', updatedAt: '2041-12-01T01:02:03Z', days: [{ date: '2042-01-01', working: false, name: '元旦' }], complete: true, noticeTitle: '合成年度通知', sourceYears: [2042], legacy: false }
+const editForm = { correction: { year: 2042, ranges: [{ name: '元旦', startDate: '2042-01-01', endDate: '2042-01-01', working: false }] }, editContext: { year: 2042, expectedRevisions: { '2041': null, '2042': 'revision-one', '2043': null } } }
 const plan: AttendanceNoticePreview = { year: 2042, title: '合成年度通知', sourceFormat: 'notice', sourceLabel: '政府年度通知', canSave: true, previewDigest: 'a'.repeat(64), expectedRevisions: { '2042': 'revision-one' }, sections: [{ name: '元旦', source: '合成元旦原文', restDates: ['2042-01-01'], workDates: [] }], errors: [], warnings: [], changes: [{ year: 2042, mode: 'annual', complete: true, days: saved.days, added: saved.days, removed: [], modified: [], changed: true }], unchanged: false }
 function card(mobile: boolean, attachTo?: HTMLElement) { return mount(AttendanceCalendarSettingsCard, { attachTo, props: { mobile }, global: { plugins: [createPinia(), ElementPlus], stubs: { teleport: true } } }) }
 function button(wrapper: ReturnType<typeof card>, text: string) { return wrapper.findAll('button').find((item) => item.text() === text)! }
@@ -28,9 +29,90 @@ beforeEach(() => {
   vi.mocked(parseAttendanceNotice).mockResolvedValue(structuredClone(plan))
   vi.mocked(applyAttendanceNotice).mockResolvedValue({ items: [{ ...saved, revision: 'revision-two' }], year: 2042, unchanged: false })
   vi.mocked(deleteAttendanceCalendar).mockResolvedValue([])
+  vi.mocked(getAttendanceCalendarEditor).mockResolvedValue(structuredClone(editForm))
   vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
 })
 describe.each([false, true])('paste-only annual notice flow, mobile=%s', (mobile) => {
+  it('loads a saved annual source for editing with a fixed year and confirms the exact preview', async () => {
+    const wrapper = card(mobile); await flushPromises()
+    await wrapper.get('[aria-label="修改 2042 年安排"]').trigger('click'); await flushPromises()
+    expect(getAttendanceCalendarEditor).toHaveBeenCalledWith(2042, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('修改 2042 年安排')
+    expect(wrapper.text()).toContain('其他年度通知的安排会保留')
+    expect(wrapper.findComponent(correctionEditor).props('modelValue')).toEqual(editForm.correction)
+    expect(wrapper.findComponent(correctionEditor).props('yearLocked')).toBe(true)
+    expect(wrapper.find('textarea').exists()).toBe(false)
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+    const patch = { ...editForm.correction, ranges: [{ ...editForm.correction.ranges[0]!, endDate: '2042-01-02' }] }
+    wrapper.findComponent(correctionEditor).vm.$emit('update:modelValue', patch); await flushPromises()
+    await button(wrapper, '生成预览').trigger('click'); await flushPromises()
+    expect(parseAttendanceNotice).toHaveBeenCalledWith('', expect.any(AbortSignal), patch, editForm.editContext)
+    await button(wrapper, '继续修改').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent(correctionEditor).props('modelValue')).toEqual(patch)
+    await button(wrapper, '生成预览').trigger('click'); await flushPromises()
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(applyAttendanceNotice).toHaveBeenCalledWith('', plan, expect.any(AbortSignal), patch, editForm.editContext)
+  })
+  it('can start editing from read-only view but only edits complete annual sources', async () => {
+    vi.mocked(listAttendanceCalendars).mockResolvedValue([saved, { ...saved, year: 2041, complete: false, sourceYears: [2042] }])
+    const wrapper = card(mobile); await flushPromises()
+    expect(wrapper.find('[aria-label="修改 2041 年安排"]').exists()).toBe(false)
+    await wrapper.get('[aria-label="查看 2041 年日历"]').trigger('click'); await flushPromises()
+    expect(button(wrapper, '修改安排')).toBeUndefined()
+    expect(wrapper.text()).toContain('对应来源年度修改')
+    await button(wrapper, '关闭').trigger('click'); await flushPromises()
+    await wrapper.get('[aria-label="查看 2042 年日历"]').trigger('click'); await flushPromises()
+    await button(wrapper, '修改安排').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent(correctionEditor).props('modelValue')).toEqual(editForm.correction)
+    expect(applyAttendanceNotice).not.toHaveBeenCalled()
+  })
+  it('clears the saved edit scope when starting a new manual entry', async () => {
+    const wrapper = card(mobile); await flushPromises()
+    await wrapper.get('[aria-label="修改 2042 年安排"]').trigger('click'); await flushPromises()
+    await button(wrapper, '取消').trigger('click'); await flushPromises()
+    expect(ElMessageBox.confirm).not.toHaveBeenCalled()
+    await button(wrapper, '手动填写').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent(correctionEditor).props('yearLocked')).toBe(false)
+    wrapper.findComponent(correctionEditor).vm.$emit('update:modelValue', structuredClone(editForm.correction)); await flushPromises()
+    await button(wrapper, '生成预览').trigger('click'); await flushPromises()
+    expect(parseAttendanceNotice).toHaveBeenCalledWith('', expect.any(AbortSignal), editForm.correction)
+  })
+  it('preserves local edits on a conflict and explicitly previews again against the latest baseline', async () => {
+    const wrapper = card(mobile); await flushPromises()
+    await wrapper.get('[aria-label="修改 2042 年安排"]').trigger('click'); await flushPromises()
+    const patch = { ...editForm.correction, ranges: [{ ...editForm.correction.ranges[0]!, endDate: '2042-01-02' }] }
+    wrapper.findComponent(correctionEditor).vm.$emit('update:modelValue', patch); await flushPromises()
+    await button(wrapper, '生成预览').trigger('click'); await flushPromises()
+    vi.mocked(applyAttendanceNotice).mockRejectedValueOnce({ isAxiosError: true, response: { data: { error: { code: 'ATTENDANCE_CALENDAR_CONFLICT', message: '相关年度日历已变更' } } } })
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent(correctionEditor).props('modelValue')).toEqual(patch)
+    expect(button(wrapper, '确认保存')).toBeUndefined()
+    const latest = { ...editForm.editContext, expectedRevisions: { ...editForm.editContext.expectedRevisions, '2042': 'revision-two' } }
+    vi.mocked(getAttendanceCalendarEditor).mockResolvedValue({ ...editForm, editContext: latest })
+    await button(wrapper, '重新核对最新差异').trigger('click'); await flushPromises()
+    expect(getAttendanceCalendarEditor).toHaveBeenCalledTimes(2)
+    expect(parseAttendanceNotice).toHaveBeenLastCalledWith('', expect.any(AbortSignal), patch, latest)
+    expect(applyAttendanceNotice).toHaveBeenCalledTimes(1)
+    await button(wrapper, '确认保存').trigger('click'); await flushPromises()
+    expect(applyAttendanceNotice).toHaveBeenLastCalledWith('', plan, expect.any(AbortSignal), patch, latest)
+  })
+  it('protects unsaved changes and aborts a late edit response when identity changes', async () => {
+    const wrapper = card(mobile); await flushPromises()
+    await wrapper.get('[aria-label="修改 2042 年安排"]').trigger('click'); await flushPromises()
+    wrapper.findComponent(correctionEditor).vm.$emit('update:modelValue', { ...editForm.correction, ranges: [] }); await flushPromises()
+    vi.mocked(ElMessageBox.confirm).mockRejectedValueOnce('cancel')
+    await button(wrapper, '取消').trigger('click'); await flushPromises()
+    expect(wrapper.findComponent({ name: 'ElDialog' }).props('modelValue')).toBe(true)
+    await button(wrapper, '取消').trigger('click'); await flushPromises()
+    let resolve!: (value: typeof editForm) => void
+    vi.mocked(getAttendanceCalendarEditor).mockReturnValueOnce(new Promise((done) => { resolve = done }))
+    await wrapper.get('[aria-label="修改 2042 年安排"]').trigger('click'); await flushPromises()
+    const signal = vi.mocked(getAttendanceCalendarEditor).mock.calls.at(-1)![1]!
+    useAuthStore().session = { user: { userId: 'other-synthetic-admin', name: '合成管理员' }, departments: [], selectedDepartment: null, csrfToken: 'synthetic-csrf', isAdmin: true }
+    expect(signal.aborted).toBe(true)
+    resolve(structuredClone(editForm)); await flushPromises()
+    expect(wrapper.findComponent({ name: 'ElDialog' }).props('modelValue')).toBe(false)
+  })
   it('supports standalone entry without a pasted source, previews before saving and preserves edits', async () => {
     const wrapper = card(mobile); await flushPromises()
     await button(wrapper, '手动填写').trigger('click'); await flushPromises()

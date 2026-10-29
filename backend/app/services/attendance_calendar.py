@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -43,10 +43,17 @@ class CalendarDay(BaseModel):
         return value
 
 
+class CalendarEditContext(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    year: int = Field(ge=1, le=9999)
+    expectedRevisions: dict[str, str | None] = Field(max_length=3)
+
+
 class NoticeInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     text: str = Field(max_length=MAX_NOTICE_CHARS)
     correction: CalendarCorrection | None = None
+    editContext: CalendarEditContext | None = None
 
 
 class NoticeApply(NoticeInput):
@@ -57,7 +64,7 @@ class NoticeApply(NoticeInput):
 def _conflict() -> ApiError:
     return ApiError(
         "ATTENDANCE_CALENDAR_CONFLICT",
-        "相关年度日历已变更，原文仍保留；请重新解析并核对差异后保存",
+        "相关年度日历已变更，填写内容仍保留；请重新核对最新差异后保存",
         409,
     )
 
@@ -144,6 +151,86 @@ def list_calendars(database: Session) -> list[dict]:
     return [_public(data) for _, data in _records(database).values()]
 
 
+def _edit_revisions(records: dict, year: int) -> dict[str, str | None]:
+    return {
+        str(target): records[target][1]["revision"] if target in records else None
+        for target in range(max(1, year - 1), min(9999, year + 1) + 1)
+    }
+
+
+def _editable_record(records: dict, year: int) -> dict:
+    record = records.get(year, (None, None))[1]
+    if record is None or not record["complete"]:
+        raise ApiError(
+            "ATTENDANCE_CALENDAR_EDIT_UNAVAILABLE",
+            "该年没有完整年度安排，请修改对应来源年度，或使用手动填写重新录入",
+            409,
+        )
+    return record
+
+
+def calendar_for_edit(database: Session, year: int) -> dict:
+    records = _records(database)
+    record = _editable_record(records, year)
+    # Edit the annual source, not the composed display. Adjacent notices keep
+    # ownership of their own contributions, including overlapping December dates.
+    own_days = {day["date"]: day for day in record["legacyDays"]}
+    for _, value in records.values():
+        part = value["noticeParts"].get(str(year))
+        if part:
+            own_days.update((day["date"], day) for day in part["days"])
+    ranges = []
+    for day in sorted(own_days.values(), key=lambda item: item["date"]):
+        previous = ranges[-1] if ranges else None
+        current = date.fromisoformat(day["date"])
+        if (
+            previous
+            and previous["name"] == day["name"]
+            and previous["working"] == day["working"]
+            and (current - date.fromisoformat(previous["endDate"])).days == 1
+            and (current - date.fromisoformat(previous["startDate"])).days < 32
+        ):
+            previous["endDate"] = day["date"]
+        else:
+            ranges.append(
+                {
+                    "name": day["name"],
+                    "working": day["working"],
+                    "startDate": day["date"],
+                    "endDate": day["date"],
+                }
+            )
+    if len(ranges) > 80:
+        raise ApiError(
+            "ATTENDANCE_CALENDAR_EDIT_LIMIT",
+            "已保存内容超过 80 段，请通过粘贴年度内容重新录入",
+            422,
+        )
+    return {
+        "correction": {"year": year, "ranges": ranges},
+        "editContext": {"year": year, "expectedRevisions": _edit_revisions(records, year)},
+    }
+
+
+def _require_edit_base(records: dict, edit: CalendarEditContext) -> None:
+    _editable_record(records, edit.year)
+    if edit.expectedRevisions != _edit_revisions(records, edit.year):
+        raise _conflict()
+
+
+def _parse_input(
+    text: str, correction: CalendarCorrection | None, edit: CalendarEditContext | None
+) -> ParsedNotice:
+    if edit is not None and (correction is None or correction.year != edit.year or text.strip()):
+        raise ApiError("ATTENDANCE_NOTICE_INVALID", "修改年度安排时请保留原年份并核对日期", 422)
+    parsed = (
+        parse_calendar_content(text) if correction is None else corrected_calendar(text, correction)
+    )
+    if edit is not None:
+        parsed.title = f"{edit.year} 年年度安排（手动修改）"
+    return parsed
+
+
 def attendance_calendar(database: Session) -> dict[str, object]:
     calendars = list_calendars(database)
     return {
@@ -156,7 +243,7 @@ def attendance_calendar(database: Session) -> dict[str, object]:
     }
 
 
-def _plan(parsed: ParsedNotice, records: dict) -> dict[int, dict]:
+def _plan(parsed: ParsedNotice, records: dict, *, editing: bool = False) -> dict[int, dict]:
     source = str(parsed.year)
     grouped: dict[int, list] = {parsed.year: []}
     for day in parsed.days:
@@ -185,6 +272,23 @@ def _plan(parsed: ParsedNotice, records: dict) -> dict[int, dict]:
         if year in grouped:
             value["noticeParts"][source] = {"title": parsed.title, "days": grouped[year]}
         plan[year] = _compose(value)
+    if editing:
+        # Opening and confirming an unmodified editor is a no-op. A title-only
+        # change must not produce a "changed" plan with no visible date diff.
+        originals = {year: records.get(year, (None, {}))[1] for year in plan}
+        if all(
+            old.get("legacyDays", []) == value["legacyDays"]
+            and old.get("legacyComplete", False) == value["legacyComplete"]
+            and old.get("noticeParts", {}).get(source, {}).get("days")
+            == value["noticeParts"].get(source, {}).get("days")
+            for year, value in plan.items()
+            for old in [originals[year]]
+        ):
+            for year, value in plan.items():
+                if source in value["noticeParts"]:
+                    value["noticeParts"][source]["title"] = originals[year]["noticeParts"][source][
+                        "title"
+                    ]
     return plan
 
 
@@ -194,21 +298,26 @@ def _same(old: dict | None, new: dict) -> bool:
     return all(old[key] == new[key] for key in ("legacyDays", "legacyComplete", "noticeParts"))
 
 
-def _digest(text: str, correction: CalendarCorrection | None = None) -> str:
+def _digest(
+    text: str, correction: CalendarCorrection | None = None, edit: CalendarEditContext | None = None
+) -> str:
     content = (
         text
         if correction is None
         else _json({"text": text, "correction": correction.model_dump(mode="json")})
     )
+    if edit is not None:
+        content = _json({"content": content, "editContext": edit.model_dump(mode="json")})
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def preview_notice(
-    database: Session, text: str, correction: CalendarCorrection | None = None
+    database: Session,
+    text: str,
+    correction: CalendarCorrection | None = None,
+    edit: CalendarEditContext | None = None,
 ) -> dict:
-    parsed = (
-        parse_calendar_content(text) if correction is None else corrected_calendar(text, correction)
-    )
+    parsed = _parse_input(text, correction, edit)
     response = {
         "year": parsed.year,
         "title": parsed.title,
@@ -218,7 +327,7 @@ def preview_notice(
         "sections": parsed.sections,
         "errors": parsed.errors,
         "warnings": parsed.warnings,
-        "previewDigest": _digest(text, correction),
+        "previewDigest": _digest(text, correction, edit),
         "expectedRevisions": {},
         "changes": [],
         "unchanged": False,
@@ -226,7 +335,9 @@ def preview_notice(
     if not parsed.can_save:
         return response
     records = _records(database)
-    plan = _plan(parsed, records)
+    if edit is not None:
+        _require_edit_base(records, edit)
+    plan = _plan(parsed, records, editing=edit is not None)
     changes = []
     for year, value in plan.items():
         old = records.get(year, (None, None))[1]
@@ -287,18 +398,18 @@ def _write_plan(
 
 
 def apply_notice(database: Session, body: NoticeApply, *, commit: bool = True) -> dict:
-    parsed = (
-        parse_calendar_content(body.text)
-        if body.correction is None
-        else corrected_calendar(body.text, body.correction)
-    )
-    if not parsed.can_save or body.previewDigest != _digest(body.text, body.correction):
+    parsed = _parse_input(body.text, body.correction, body.editContext)
+    if not parsed.can_save or body.previewDigest != _digest(
+        body.text, body.correction, body.editContext
+    ):
         raise ApiError("ATTENDANCE_NOTICE_INVALID", "内容或预览已变化，请重新解析并核对后保存", 422)
     records = _records(database)
-    plan = _plan(parsed, records)
+    plan = _plan(parsed, records, editing=body.editContext is not None)
     unchanged = all(
         _same(records.get(year, (None, None))[1], value) for year, value in plan.items()
     )
+    if not unchanged and body.editContext is not None:
+        _require_edit_base(records, body.editContext)
     # A lost successful response may be retried with the same preview safely.
     if not unchanged and body.expectedRevisions != {
         str(year): records[year][1]["revision"] if year in records else None for year in plan

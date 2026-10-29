@@ -7,8 +7,15 @@ import CalendarCorrectionEditor from './CalendarCorrectionEditor.vue'
 
 enableAutoUnmount(afterEach)
 const value: AttendanceCalendarCorrection = { year: 2042, ranges: [{ name: '合成元旦', startDate: '2042-01-01', endDate: '2042-01-03', working: false }] }
-const component = CalendarCorrectionEditor as DefineComponent<{ modelValue: AttendanceCalendarCorrection; disabled?: boolean; mobile?: boolean }>
+const component = CalendarCorrectionEditor as DefineComponent<{ modelValue: AttendanceCalendarCorrection; disabled?: boolean; mobile?: boolean; yearLocked?: boolean }>
 describe.each([false, true])('correction fields, mobile=%s', (mobile) => {
+  it('locks only the source year when editing a saved annual calendar', () => {
+    const wrapper = mount(component, { props: { modelValue: structuredClone(value), mobile, yearLocked: true }, global: { plugins: [ElementPlus] } })
+    expect(wrapper.get('input[aria-label="修正安排的适用年份"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('input[aria-label="安排 1 节日名称"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.findAllComponents({ name: 'ElDatePicker' }).every((picker) => !picker.props('disabled'))).toBe(true)
+    expect(wrapper.get('[aria-label="删除修正安排 1"]').attributes('disabled')).toBeUndefined()
+  })
   it('edits names, adds and removes ranges without mutating the supplied preview', async () => {
     const input = structuredClone(value)
     const wrapper = mount(component, { props: { modelValue: input, mobile }, global: { plugins: [ElementPlus] } })

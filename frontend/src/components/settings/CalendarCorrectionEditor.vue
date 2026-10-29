@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import type { AttendanceCalendarCorrection, AttendanceCorrectionRange } from '@/types/attendance'
 
-const props = defineProps<{ modelValue: AttendanceCalendarCorrection; disabled?: boolean; mobile?: boolean; standalone?: boolean }>()
+const props = defineProps<{ modelValue: AttendanceCalendarCorrection; disabled?: boolean; mobile?: boolean; standalone?: boolean; yearLocked?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: AttendanceCalendarCorrection] }>()
 const year = computed(() => props.modelValue.year)
 function updateYear(value: number | undefined): void { emit('update:modelValue', { ...props.modelValue, year: value ?? 0 }) }
@@ -48,7 +48,7 @@ const endMonths = computed<Date[]>((previous) => props.modelValue.ranges.map((it
         :min="1"
         :max="9999"
         :precision="0"
-        :disabled="disabled"
+        :disabled="disabled || yearLocked"
         aria-label="修正安排的适用年份"
         @update:model-value="updateYear"
       /></label>
