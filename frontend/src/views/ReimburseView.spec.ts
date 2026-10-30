@@ -1590,6 +1590,35 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('previews locked attendance dates without reformatting, recalculating or saving, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const trip = {
+      relatedApprovalId: linkedApproval.processInstanceId, tripType: 'same_city_project' as const,
+      startDate: linkedApproval.startDate, startTime: '09:00', endDate: linkedApproval.endDate, endTime: '18:00',
+      attendanceDates: [linkedApproval.startDate, linkedApproval.endDate],
+    }
+    serverDraft = makeDraft({
+      status: 'LOCKED', lockedAt: '2026-09-04T00:01:00Z', relatedApprovalCount: 1,
+      relatedApprovals: [linkedApproval],
+      input: { ...structuredClone(baseInput), trip: null, trips: [trip], editingState: { includeSubsidy: true, trip, trips: [trip] } },
+      totals: { ...makeDraft().totals, subsidyTotal: '100.00', totalAmount: '144.89' },
+    })
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile, true)
+    const preview = vi.spyOn(drafts, mobile ? 'openExcelPreviewInDingTalk' : 'downloadExcelPreview').mockResolvedValue()
+    await vi.advanceTimersByTimeAsync(650)
+    expect(expense.subsidyTrips[0]!.attendanceDates).toEqual(trip.attendanceDates)
+    expect(wrapper.findComponent({ name: 'ExpenseSummaryCard' }).props('previewDisabledReason')).toBe('')
+    expect(wrapper.findComponent({ name: 'ExpenseSummaryCard' }).props('beforePreview')).toBeUndefined()
+    await visibleButton(wrapper, mobile ? '打开 Excel' : '预览 Excel').trigger('click')
+    await flushPromises()
+    expect(preview).toHaveBeenCalledOnce()
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    expect(calculateTotals).not.toHaveBeenCalled()
+    expect(expense.displaySubsidyTotal).toBe('100.00')
+    expect(expense.subsidyTrips[0]!.attendanceDates).toEqual(trip.attendanceDates)
+    wrapper.unmount()
+  })
+
   it.each([false, true])('autosaves and restores overlapping exclusion input for correction, mobile=%s', async (mobile) => {
     vi.useFakeTimers()
     const { wrapper, expense } = await mountView(undefined, false, mobile)

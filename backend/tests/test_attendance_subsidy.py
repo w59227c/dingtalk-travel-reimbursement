@@ -240,6 +240,7 @@ def attendance_source():
 def test_attendance_snapshot_freezes_dates_explanation_and_rejects_tampering():
     snapshot = build_snapshot(attendance_source())
     assert snapshot.snapshot_version == 11
+    assert snapshot.attendance_description_format == "monthly_ranges"
     assert snapshot.input.trip.attendance_dates == (date(2026, 9, 1), date(2026, 9, 3))
     raw = serialize_snapshot(snapshot)
     assert parse_snapshot(raw) == snapshot
@@ -265,7 +266,7 @@ def test_attendance_description_lists_exact_dates_for_excel_and_oa():
     )
     lines = subsidy_explanation(trip, calculation)
     assert "出勤2天" in lines[0] and "100.00元" in lines[0]
-    assert lines[1] == "出勤日期：2026-09-01、2026-09-03"
+    assert lines[1] == "出勤日期（2026年9月）：1日、3日"
 
 
 def test_attendance_excel_uses_frozen_dates_and_amount():
@@ -282,11 +283,12 @@ def test_attendance_excel_uses_frozen_dates_and_amount():
         subsidies=value.subsidies,
         totals=value.totals,
         detailed_subsidies=value.detailed_subsidies,
+        attendance_description_format=value.attendance_description_format,
     )
     workbook = load_workbook(BytesIO(result.content))
     texts = [str(cell.value) for row in workbook.active for cell in row if cell.value is not None]
     assert any("出勤2天" in text and "100.00元" in text for text in texts)
-    assert any("出勤日期：2026-09-01、2026-09-03" in text for text in texts)
+    assert any("出勤日期（2026年9月）：1日、3日" in text for text in texts)
     workbook.close()
 
 

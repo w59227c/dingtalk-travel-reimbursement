@@ -1,6 +1,10 @@
 """One authoritative adjustment explanation for OA and printable workbook rows."""
 
+from collections.abc import Iterable
+from datetime import date
 from decimal import Decimal
+from itertools import groupby
+from typing import Literal
 
 from app.domain.money import money_string
 from app.domain.subsidy import (
@@ -9,6 +13,27 @@ from app.domain.subsidy import (
     excluded_effective_days,
 )
 from app.schemas.expenses import TripInput
+
+AttendanceDescriptionFormat = Literal["individual_dates", "monthly_ranges"]
+CURRENT_ATTENDANCE_DESCRIPTION_FORMAT: AttendanceDescriptionFormat = "monthly_ranges"
+
+
+def attendance_date_lines(dates: Iterable[date]) -> tuple[str, ...]:
+    """Losslessly shorten actual attendance dates, keeping each year/month explicit."""
+    lines = []
+    for (year, month), days in groupby(sorted(dates), key=lambda day: (day.year, day.month)):
+        ranges: list[tuple[date, date]] = []
+        for day in days:
+            if ranges and day.toordinal() == ranges[-1][1].toordinal() + 1:
+                ranges[-1] = (ranges[-1][0], day)
+            else:
+                ranges.append((day, day))
+        labels = (
+            f"{start.day}—{end.day}日" if start != end else f"{start.day}日"
+            for start, end in ranges
+        )
+        lines.append(f"出勤日期（{year}年{month}月）：" + "、".join(labels))
+    return tuple(lines)
 
 
 def compact_days(value) -> str:
@@ -20,17 +45,26 @@ def _point(day, clock) -> str:
     return f"{day.year}/{day.month}/{day.day}{slot}"
 
 
-def subsidy_explanation(trip: TripInput, result: SubsidyCalculation) -> tuple[str, ...]:
+def subsidy_explanation(
+    trip: TripInput,
+    result: SubsidyCalculation,
+    *,
+    attendance_format: AttendanceDescriptionFormat = CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
+) -> tuple[str, ...]:
     """Summary first, then one complete non-financial line for every adjustment."""
     if trip.attendance_dates is not None:
         lines = [
             f"市内出差补助：出勤{compact_days(result.effective_days)}天 × "
             f"{money_string(result.daily_rate)}元/天 = {money_string(result.total)}元"
         ]
-        months: dict[str, list[str]] = {}
-        for day in sorted(trip.attendance_dates):
-            months.setdefault(day.strftime("%Y-%m"), []).append(day.isoformat())
-        lines.extend("出勤日期：" + "、".join(days) for days in months.values())
+        if attendance_format == "monthly_ranges":
+            lines.extend(attendance_date_lines(trip.attendance_dates))
+        else:
+            # Preserve the exact pre-format-marker text for immutable snapshots.
+            months: dict[str, list[str]] = {}
+            for day in sorted(trip.attendance_dates):
+                months.setdefault(day.strftime("%Y-%m"), []).append(day.isoformat())
+            lines.extend("出勤日期：" + "、".join(days) for days in months.values())
         return tuple(lines)
     original = result.effective_days + (result.excluded_days or 0)
     lines = [

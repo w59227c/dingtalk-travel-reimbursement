@@ -20,14 +20,13 @@ from starlette.datastructures import UploadFile
 
 from app.core.config import Settings
 from app.core.errors import ApiError
-from app.domain.expenses import ExpenseTotals, calculate_expense_totals
+from app.domain.expenses import calculate_expense_totals
 from app.domain.material_classification import (
     MATERIAL_CLASSIFICATION_KEY,
     PENDING_CLASSIFICATION_STATUSES,
     failed_material_classification,
     material_classification,
 )
-from app.domain.subsidy import SubsidyCalculation
 from app.models.reimbursement import (
     ReimbursementAttachmentKind,
     ReimbursementDraft,
@@ -49,7 +48,7 @@ from app.services.excel_generator import (
 )
 from app.services.multipart_uploads import prepare_spool_directory
 from app.services.oa_reimbursement_payload import (
-    draft_input_from_snapshot,
+    ExcelGenerationInput,
     parse_locked_submission_snapshot,
     snapshot_excel_input,
     verify_excel_template,
@@ -96,7 +95,11 @@ from app.services.reimbursement_staging import (
     StagingObjectExists,
     StagingObjectNotFound,
 )
-from app.services.subsidy_calculation import calculate_trip_subsidies, request_trips
+from app.services.subsidy_calculation import (
+    calculate_trip_subsidies,
+    merge_overlapping_subsidy_trips,
+    request_trips,
+)
 from app.services.temp_files import (
     StoredFile,
     validate_new_file,
@@ -149,13 +152,7 @@ class DraftFileDeletion:
 @dataclass(frozen=True, slots=True)
 class WorkbookPreviewSnapshot:
     canonical_input_json: str
-    input: ReimbursementDraftInput
-    employee_name: str
-    department_name: str
-    project: ResolvedProject
-    subsidy: SubsidyCalculation | None
-    subsidies: tuple[SubsidyCalculation, ...]
-    totals: ExpenseTotals
+    excel: ExcelGenerationInput
 
 
 def serialize_draft_file(
@@ -1088,15 +1085,17 @@ async def generate_draft_excel_preview(
     result = await asyncio.to_thread(
         generate_expense_workbook,
         template_path=settings.excel_template_path,
-        employee_name=snapshot.employee_name,
-        department_name=snapshot.department_name,
-        project=snapshot.project,
-        trip=snapshot.input.trip,
-        items=complete_expense_items(snapshot.input),
-        subsidy=snapshot.subsidy,
-        totals=snapshot.totals,
-        trips=snapshot.input.trips,
-        subsidies=snapshot.subsidies,
+        employee_name=snapshot.excel.employee_name,
+        department_name=snapshot.excel.department_name,
+        project=snapshot.excel.project,
+        trip=snapshot.excel.trip,
+        items=list(snapshot.excel.items),
+        subsidy=snapshot.excel.subsidy,
+        totals=snapshot.excel.totals,
+        trips=snapshot.excel.trips,
+        subsidies=snapshot.excel.subsidies,
+        detailed_subsidies=snapshot.excel.detailed_subsidies,
+        attendance_description_format=snapshot.excel.attendance_description_format,
     )
 
     # Do not serve a workbook calculated from a draft that changed during the
@@ -1137,17 +1136,9 @@ def _workbook_preview_snapshot(
             )
         submission_snapshot = parse_locked_submission_snapshot(draft, submission)
         verify_excel_template(submission_snapshot, settings.excel_template_path)
-        excel_input = snapshot_excel_input(submission_snapshot)
-        draft_input = draft_input_from_snapshot(submission_snapshot)
         return WorkbookPreviewSnapshot(
             canonical_input_json=draft.input_json,
-            input=draft_input,
-            employee_name=excel_input.employee_name,
-            department_name=excel_input.department_name,
-            project=excel_input.project,
-            subsidy=excel_input.subsidy,
-            subsidies=excel_input.subsidies,
-            totals=excel_input.totals,
+            excel=snapshot_excel_input(submission_snapshot),
         )
     try:
         draft_input = ReimbursementDraftInput.model_validate_json(draft.input_json)
@@ -1190,15 +1181,22 @@ def _workbook_preview_snapshot(
     )
     subsidy = subsidies[0] if draft_input.trip is not None and len(subsidies) == 1 else None
     totals = calculate_expense_totals(complete_expense_items(draft_input), subsidies)
+    output_trips = merge_overlapping_subsidy_trips(
+        request_trips(trip=draft_input.trip, trips=draft_input.trips)
+    )
     return WorkbookPreviewSnapshot(
         canonical_input_json=draft.input_json,
-        input=draft_input,
-        employee_name=employee_name,
-        department_name=draft.department_name,
-        project=project,
-        subsidy=subsidy,
-        subsidies=tuple(subsidies),
-        totals=totals,
+        excel=ExcelGenerationInput(
+            employee_name=employee_name,
+            department_name=draft.department_name,
+            project=project,
+            trip=output_trips[0] if draft_input.trip is not None and output_trips else None,
+            trips=tuple(output_trips) if draft_input.trips else (),
+            items=tuple(complete_expense_items(draft_input)),
+            subsidy=subsidy,
+            subsidies=tuple(subsidies),
+            totals=totals,
+        ),
     )
 
 

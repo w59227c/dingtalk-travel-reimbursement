@@ -33,7 +33,11 @@ from app.excel.template_contract import (
 )
 from app.schemas.excel import ExcelExpenseItemInput
 from app.schemas.expenses import TripInput
-from app.services.subsidy_description import subsidy_explanation
+from app.services.subsidy_description import (
+    CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
+    AttendanceDescriptionFormat,
+    subsidy_explanation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +164,7 @@ def _ordered_lines(
     trips: list[TripInput] | tuple[TripInput, ...] = (),
     subsidies: list[SubsidyCalculation] | tuple[SubsidyCalculation, ...] = (),
     detailed_subsidies: bool = True,
+    attendance_format: AttendanceDescriptionFormat = CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
 ) -> list[OutputLine]:
     indexed_lines = [
         (
@@ -186,7 +191,7 @@ def _ordered_lines(
         subsidy_pairs = []
     for index, (subsidy_trip, subsidy_item) in enumerate(subsidy_pairs):
         explanation = (
-            subsidy_explanation(subsidy_trip, subsidy_item)
+            subsidy_explanation(subsidy_trip, subsidy_item, attendance_format=attendance_format)
             if detailed_subsidies
             and (subsidy_trip.excluded_periods or subsidy_trip.attendance_dates is not None)
             else ()
@@ -341,6 +346,9 @@ def generate_expense_workbook(
     trips: list[TripInput] | tuple[TripInput, ...] = (),
     subsidies: list[SubsidyCalculation] | tuple[SubsidyCalculation, ...] = (),
     detailed_subsidies: bool = True,
+    attendance_description_format: AttendanceDescriptionFormat = (
+        CURRENT_ATTENDANCE_DESCRIPTION_FORMAT
+    ),
 ) -> WorkbookResult:
     workbook, worksheet = load_validated_template(template_path)
     try:
@@ -376,7 +384,10 @@ def generate_expense_workbook(
             worksheet.column_dimensions[key].width for key in ("D", "E", "F")
         )
         lines = _expand_subsidy_descriptions(
-            _ordered_lines(items, trip, subsidy, trips, subsidies, detailed_subsidies),
+            _ordered_lines(
+                items, trip, subsidy, trips, subsidies, detailed_subsidies,
+                attendance_description_format,
+            ),
             description_width,
         )
         layout = _prepare_output_layout(worksheet, len(lines))
