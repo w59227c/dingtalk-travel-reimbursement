@@ -46,7 +46,8 @@ def city_flow(client_factory, monkeypatch, request):
         ),
     )
     original = integration._draft_input
-    overlapping = getattr(request, "param", False)
+    mode = getattr(request, "param", None)
+    overlapping = mode == "overlap"
     instance_ids = (integration.TRAVEL_INSTANCE_ID,)
     if overlapping:
         instance_ids += (integration.TRAVEL_INSTANCE_ID_2,)
@@ -56,7 +57,9 @@ def city_flow(client_factory, monkeypatch, request):
         value = original(**kwargs)
         first = value.trip.model_copy(update={
             "trip_type": TripPurpose.SAME_CITY_PROJECT,
-            "attendance_dates": [date(2026, 9, 1), date(2026, 9, 3)],
+            "attendance_dates": [date(2026, 9, day) for day in (
+                (1, 2, 3) if mode == "consecutive" else (1, 3)
+            )],
         })
         if overlapping:
             return value.model_copy(update={"trip": None, "trips": [
@@ -85,7 +88,7 @@ def city_flow(client_factory, monkeypatch, request):
     return client, headers, draft_id, workflow
 
 
-@pytest.mark.parametrize("city_flow", [True], indirect=True)
+@pytest.mark.parametrize("city_flow", ["overlap"], indirect=True)
 def test_overlapping_approvals_preview_and_submission_use_one_exact_date_union(city_flow):
     client, headers, draft_id, workflow = city_flow
     preview = client.post(
@@ -96,7 +99,7 @@ def test_overlapping_approvals_preview_and_submission_use_one_exact_date_union(c
     workbook = load_workbook(BytesIO(preview.content))
     try:
         text = "\n".join(str(cell.value) for row in workbook.active for cell in row if cell.value)
-        assert text.count("出勤日期（2026年9月）：1—3日") == 1
+        assert text.count("出勤日期（2026年9月）：1-3日") == 1
         assert "出勤3天 × 50.00元/天 = 150.00元" in text
     finally:
         workbook.close()
@@ -114,7 +117,7 @@ def test_overlapping_approvals_preview_and_submission_use_one_exact_date_union(c
         description = next(
             field["value"] for field in value["formValues"] if field["logicalKey"] == "description"
         )
-        assert description.count("出勤日期（2026年9月）：1—3日") == 1
+        assert description.count("出勤日期（2026年9月）：1-3日") == 1
     worker = integration._worker(client, workflow, integration.LocalStorageBoundary())
     assert asyncio.run(worker.run_once())
     assert client.get(
@@ -155,26 +158,33 @@ def test_missing_calendar_blocks_excel_review_and_submit_without_locking_or_losi
     assert response.status_code == 200, response.text
 
 
-@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("frozen_format", [None, "monthly_ranges", "monthly_ranges_hyphen"])
+@pytest.mark.parametrize("city_flow", ["consecutive"], indirect=True)
 def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calendar_removal(
-    city_flow, monkeypatch, legacy,
+    city_flow, monkeypatch, frozen_format,
 ):
     client, headers, draft_id, workflow = city_flow
     path = f"/api/oa/reimbursements/{draft_id}/submit"
+    expected = {
+        None: "出勤日期：2026-09-01、2026-09-02、2026-09-03",
+        "monthly_ranges": "出勤日期（2026年9月）：1—3日",
+        "monthly_ranges_hyphen": "出勤日期（2026年9月）：1-3日",
+    }[frozen_format]
     # Model an old app's completed lock, then resume with all new code restored.
     def legacy_build(source):
         value = build_snapshot(source).model_dump(mode="json", by_alias=True)
         value.pop("attendanceDescriptionFormat", None)
+        if frozen_format is not None:
+            value["attendanceDescriptionFormat"] = frozen_format
         for field in value["formValues"]:
             if field["logicalKey"] == "description":
                 field["value"] = (
-                    "市内出差补助：出勤2天 × 50.00元/天 = 100.00元\n"
-                    "出勤日期：2026-09-01、2026-09-03\n合计：100.00"
+                    f"市内出差补助：出勤3天 × 50.00元/天 = 150.00元\n{expected}\n合计：150.00"
                 )
         return ReimbursementSnapshot.model_validate(value)
 
     with monkeypatch.context() as patch:
-        if legacy:
+        if frozen_format != "monthly_ranges_hyphen":
             patch.setattr("app.api.reimbursement_submissions.build_snapshot", legacy_build)
         submitted = client.post(path, json={"expectedRevision": 4}, headers=headers)
     assert submitted.status_code == 202, submitted.text
@@ -182,16 +192,13 @@ def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calend
     with client.app.state.database_session_factory() as database:
         row = database.get(ReimbursementSubmission, submission_id)
         frozen_json, frozen_digest = row.form_snapshot_json, row.snapshot_sha256
-    expected = (
-        "出勤日期：2026-09-01、2026-09-03" if legacy else "出勤日期（2026年9月）：1日、3日"
-    )
     assert expected in frozen_json
     remove_calendar(client)
     repeated = client.post(path, json={"expectedRevision": 4}, headers=headers)
     assert repeated.status_code == 202, repeated.text
     assert repeated.json()["data"]["submissionId"] == submission_id
     locked = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
-    assert locked["totals"]["subsidyTotal"] == "100.00"
+    assert locked["totals"]["subsidyTotal"] == "150.00"
     preview = client.post(
         f"/api/reimbursements/drafts/{draft_id}/excel-preview",
         json={"expectedRevision": locked["revision"]},
@@ -204,7 +211,7 @@ def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calend
         try:
             texts = [str(cell.value) for row in workbook.active for cell in row if cell.value]
             assert any(expected in text for text in texts)
-            if legacy:
+            if frozen_format is None:
                 assert not any("出勤日期（" in text for text in texts)
         finally:
             workbook.close()

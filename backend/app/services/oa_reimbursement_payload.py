@@ -97,6 +97,7 @@ from app.services.subsidy_calculation import (
 from app.services.subsidy_description import (
     CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
     AttendanceDescriptionFormat,
+    MonthlyAttendanceDescriptionFormat,
     subsidy_explanation,
 )
 
@@ -408,7 +409,7 @@ class ReimbursementSnapshot(_SnapshotModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
-    attendance_description_format: Literal["monthly_ranges"] | None = Field(
+    attendance_description_format: MonthlyAttendanceDescriptionFormat | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

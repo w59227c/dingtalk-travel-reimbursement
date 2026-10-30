@@ -14,11 +14,14 @@ from app.domain.subsidy import (
 )
 from app.schemas.expenses import TripInput
 
-AttendanceDescriptionFormat = Literal["individual_dates", "monthly_ranges"]
-CURRENT_ATTENDANCE_DESCRIPTION_FORMAT: AttendanceDescriptionFormat = "monthly_ranges"
+MonthlyAttendanceDescriptionFormat = Literal["monthly_ranges", "monthly_ranges_hyphen"]
+AttendanceDescriptionFormat = Literal["individual_dates", MonthlyAttendanceDescriptionFormat]
+CURRENT_ATTENDANCE_DESCRIPTION_FORMAT: MonthlyAttendanceDescriptionFormat = "monthly_ranges_hyphen"
 
 
-def attendance_date_lines(dates: Iterable[date]) -> tuple[str, ...]:
+def attendance_date_lines(
+    dates: Iterable[date], *, separator: Literal["-", "—"] = "-"
+) -> tuple[str, ...]:
     """Losslessly shorten actual attendance dates, keeping each year/month explicit."""
     lines = []
     for (year, month), days in groupby(sorted(dates), key=lambda day: (day.year, day.month)):
@@ -29,7 +32,7 @@ def attendance_date_lines(dates: Iterable[date]) -> tuple[str, ...]:
             else:
                 ranges.append((day, day))
         labels = (
-            f"{start.day}—{end.day}日" if start != end else f"{start.day}日"
+            f"{start.day}{separator}{end.day}日" if start != end else f"{start.day}日"
             for start, end in ranges
         )
         lines.append(f"出勤日期（{year}年{month}月）：" + "、".join(labels))
@@ -57,8 +60,9 @@ def subsidy_explanation(
             f"市内出差补助：出勤{compact_days(result.effective_days)}天 × "
             f"{money_string(result.daily_rate)}元/天 = {money_string(result.total)}元"
         ]
-        if attendance_format == "monthly_ranges":
-            lines.extend(attendance_date_lines(trip.attendance_dates))
+        if attendance_format in {"monthly_ranges", "monthly_ranges_hyphen"}:
+            separator = "—" if attendance_format == "monthly_ranges" else "-"
+            lines.extend(attendance_date_lines(trip.attendance_dates, separator=separator))
         else:
             # Preserve the exact pre-format-marker text for immutable snapshots.
             months: dict[str, list[str]] = {}

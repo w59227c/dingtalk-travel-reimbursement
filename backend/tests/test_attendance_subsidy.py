@@ -240,7 +240,7 @@ def attendance_source():
 def test_attendance_snapshot_freezes_dates_explanation_and_rejects_tampering():
     snapshot = build_snapshot(attendance_source())
     assert snapshot.snapshot_version == 11
-    assert snapshot.attendance_description_format == "monthly_ranges"
+    assert snapshot.attendance_description_format == "monthly_ranges_hyphen"
     assert snapshot.input.trip.attendance_dates == (date(2026, 9, 1), date(2026, 9, 3))
     raw = serialize_snapshot(snapshot)
     assert parse_snapshot(raw) == snapshot

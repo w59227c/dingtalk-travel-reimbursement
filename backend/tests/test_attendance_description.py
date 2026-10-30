@@ -29,14 +29,14 @@ FIXTURES = Path(__file__).parent / "fixtures" / "reimbursement_snapshots"
     [
         ([], ()),
         (["2026-09-01"], ("出勤日期（2026年9月）：1日",)),
-        (["2026-09-01", "2026-09-02"], ("出勤日期（2026年9月）：1—2日",)),
+        (["2026-09-01", "2026-09-02"], ("出勤日期（2026年9月）：1-2日",)),
         (
             ["2026-09-05", "2026-09-01", "2026-09-04", "2026-09-02"],
-            ("出勤日期（2026年9月）：1—2日、4—5日",),
+            ("出勤日期（2026年9月）：1-2日、4-5日",),
         ),
         (
             ["2026-09-30", "2026-10-01", "2026-10-02", "2026-10-07"],
-            ("出勤日期（2026年9月）：30日", "出勤日期（2026年10月）：1—2日、7日"),
+            ("出勤日期（2026年9月）：30日", "出勤日期（2026年10月）：1-2日、7日"),
         ),
         (
             ["2026-12-31", "2027-01-01"],
@@ -44,7 +44,7 @@ FIXTURES = Path(__file__).parent / "fixtures" / "reimbursement_snapshots"
         ),
         (
             ["2024-02-28", "2024-02-29", "2024-03-01"],
-            ("出勤日期（2024年2月）：28—29日", "出勤日期（2024年3月）：1日"),
+            ("出勤日期（2024年2月）：28-29日", "出勤日期（2024年3月）：1日"),
         ),
         (["0001-01-01", "9999-12-31"], (
             "出勤日期（1年1月）：1日", "出勤日期（9999年12月）：31日",
@@ -66,7 +66,7 @@ def test_expanding_ranges_recovers_every_selected_date_once(span):
         assert match
         year, month = int(match[1]), int(match[2])
         for token in match[3].split("、"):
-            endpoints = [int(value) for value in token.removesuffix("日").split("—")]
+            endpoints = [int(value) for value in token.removesuffix("日").split("-")]
             for day in range(endpoints[0], endpoints[-1] + 1):
                 expanded.append(date(year, month, day))
     assert expanded == selected
@@ -79,7 +79,7 @@ def test_leave_gaps_and_weekend_attendance_produce_the_agreed_monthly_example():
     ]
     assert len(selected) == 23
     assert attendance_date_lines(selected) == (
-        "出勤日期（2026年9月）：1—5日、7—12日、14—18日、20—25日、30日",
+        "出勤日期（2026年9月）：1-5日、7-12日、14-18日、20-25日、30日",
     )
 
 
@@ -130,12 +130,26 @@ def test_pre_change_v11_snapshot_keeps_canonical_json_sha_and_excel_description(
     assert "出勤2天 × 50.00元/天 = 100.00元" in text
 
 
+def test_frozen_monthly_snapshot_keeps_original_long_dash_and_sha():
+    raw = (FIXTURES / "attendance_monthly_v11.json").read_text(encoding="utf-8")
+    digest = (FIXTURES / "attendance_monthly_v11.sha256").read_text().strip()
+    restored = parse_snapshot(raw, expected_sha256=digest)
+    assert restored.attendance_description_format == "monthly_ranges"
+    assert serialize_snapshot(restored) == raw
+    assert snapshot_sha256(restored) == digest
+    expected = "出勤日期（2026年9月）：1—3日"
+    assert any(expected in item.value for item in restored.form_values)
+    text = workbook_text(restored)
+    assert expected in text and "1-3日" not in text
+    assert "出勤3天 × 50.00元/天 = 150.00元" in text
+
+
 def test_new_oa_and_excel_share_frozen_compact_format_and_same_amount():
     snapshot = build_snapshot(attendance_source())
     restored = parse_snapshot(
         serialize_snapshot(snapshot), expected_sha256=snapshot_sha256(snapshot)
     )
-    assert restored.attendance_description_format == "monthly_ranges"
+    assert restored.attendance_description_format == "monthly_ranges_hyphen"
     expected = "出勤日期（2026年9月）：1日、3日"
     description = next(
         item.value for item in restored.form_values if item.logical_key == "description"
@@ -146,9 +160,12 @@ def test_new_oa_and_excel_share_frozen_compact_format_and_same_amount():
     ).subsidy.total
 
 
-@pytest.mark.parametrize("change", ["remove", "unknown", "legacy_marker"])
+@pytest.mark.parametrize("change", ["remove", "unknown", "legacy_marker", "legacy_monthly_marker"])
 def test_description_format_tampering_is_rejected(change):
-    if change == "legacy_marker":
+    if change == "legacy_monthly_marker":
+        value = json.loads((FIXTURES / "attendance_monthly_v11.json").read_text(encoding="utf-8"))
+        value["attendanceDescriptionFormat"] = "monthly_ranges_hyphen"
+    elif change == "legacy_marker":
         value = json.loads((FIXTURES / "attendance_v11.json").read_text(encoding="utf-8"))
         value["attendanceDescriptionFormat"] = "monthly_ranges"
     else:
