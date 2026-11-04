@@ -3,23 +3,21 @@
   "models": {
     "detection": {
       "directoryName": "PP-OCRv6_small_det",
-      "sourceUrl": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_infer.tar",
-      "archiveSha256": "bfb7c1e59f0faa6b540ebdca93aea3f4b1f2477805b389fbee117820d68fe9f5",
-      "directoryManifestSha256": "9a4907f842ab84ec1d1fe58246ab83e7551d7fc3a5c14a4f2a9616d570356b14",
+      "sourceUrl": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_det_onnx_infer.tar",
+      "archiveSha256": "d218f6fbf0f1c23d2161bd6ac7f5eaa6104fa89955c09290497e31008e2618e4",
+      "directoryManifestSha256": "e57bebaf0c04a41b145bc16d1577e9241149c8db7dce0b1a182376bea6338e5f",
       "files": {
-        "inference.json": "89240f689a4a77aad75ef55a8df0a15c8e1d4980a327d17e58f24bbadde5aeab",
-        "inference.pdiparams": "5043d4ccc8d63402ccea8feefcee4db57077431a873e78d2191836a178a492da",
+        "inference.onnx": "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
         "inference.yml": "193f435274bf9f0b5f71a929bbfbcf148282df7e633b34e7c373e8f44741b516"
       }
     },
     "recognition": {
       "directoryName": "PP-OCRv6_small_rec",
-      "sourceUrl": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_infer.tar",
-      "archiveSha256": "da460f968ce9f88325ac3a34fa302077d6e9b0dcefb16ba3137cd7796f879d06",
-      "directoryManifestSha256": "ed6bb4122f42ab709d49c8a71b50f0e057b74dee52247bf04d2eeceebec5cb0c",
+      "sourceUrl": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_small_rec_onnx_infer.tar",
+      "archiveSha256": "d267ab077a44a0eedb1ea8f8c542d263f211de8e9d7a029bf9fcfff7e5a88fb1",
+      "directoryManifestSha256": "aadc6d8ab8bfad2ee884b3b161804f5068cd52ea9971b03bd4303a1c763e7a19",
       "files": {
-        "inference.json": "f0bf53c853937a917affdd74467472167727f8ab0f0f7bded01c4a16c27e46e6",
-        "inference.pdiparams": "406e1e689c9a7fbb04178007a3fe10cf852afe7bf8bb3bc6dbb9d532b13bd907",
+        "inference.onnx": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
         "inference.yml": "ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1"
       }
     }

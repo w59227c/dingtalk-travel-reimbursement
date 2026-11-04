@@ -25,7 +25,7 @@ ghcr.io/<owner>/dingtalk-travel-reimbursement-web
 
 ## OCR 模型
 
-模型二进制不提交到 Git。后端 Dockerfile 在独立构建阶段读取 `backend/app/ocr/model_manifest.json`，从清单中的官方地址下载 `PP-OCRv6_small_det` 和 `PP-OCRv6_small_rec`，校验归档与逐文件 SHA-256，再复制到最终镜像。
+模型二进制不提交到 Git。后端 Dockerfile 在独立构建阶段读取 `backend/app/ocr/model_manifest.json`，从官方地址下载两套 PP-OCRv6 small ONNX 模型，校验归档与逐文件 SHA-256，再复制到最终镜像。
 
 下载失败、hash 不一致、压缩包包含危险路径或文件集合不匹配都会终止构建。运行时只读取镜像中的固定模型目录，不联网下载，也不会回退到浮动版本。BuildKit 缓存以 manifest 和下载脚本为输入，普通业务代码变化通常可以复用模型层。
 
@@ -40,7 +40,7 @@ ghcr.io/<owner>/dingtalk-travel-reimbursement-web
 工作流先加载最终的 `linux/amd64` 镜像，再执行 `scripts/smoke-images.sh`。检查包括：
 
 - 镜像以非 root 用户运行，且不包含 `.env` 或测试凭据标记；
-- 后端在断网、只读根文件系统下完成真实 PaddleOCR 初始化和空白图推理；
+- 后端在断网、只读根文件系统下使用默认 ONNX Runtime CPU 引擎识别合成出租车票和扫描行程单，检查金额、日期、类型和路线；
 - 后端完成迁移并通过 production readiness；
 - Web 镜像通过 Nginx 配置检查，并能代理 `/api/ready`；
 - 推送后的 registry digest 对应刚刚通过测试的本地镜像。

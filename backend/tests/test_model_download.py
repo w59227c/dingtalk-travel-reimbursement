@@ -45,8 +45,7 @@ def _sha(content: bytes) -> str:
 @pytest.fixture
 def artifacts(tmp_path):
     files = {
-        "inference.json": b"{}",
-        "inference.pdiparams": b"model",
+        "inference.onnx": b"model",
         "inference.yml": b"name: OCR",
     }
     archive = _archive(files)
@@ -108,7 +107,7 @@ def test_download_verifies_and_publishes_both_models_read_only(
     # Reusing an existing download still validates every byte against the manifest.
     downloader.download_models(artifacts.manifest, output)
     assert len(requests) == 2
-    damaged = output / "pinned_recognition/inference.json"
+    damaged = output / "pinned_recognition/inference.onnx"
     damaged.chmod(0o644)
     damaged.write_bytes(b"broken")
     with pytest.raises(downloader.ModelDownloadError, match="existing model output failed"):
@@ -134,7 +133,7 @@ def test_file_and_directory_hashes_are_checked_before_publish(
     # Recognition fails after detection succeeds: neither model should be published.
     spec = artifacts.models["recognition"]
     if bad_hash == "file":
-        spec["files"]["inference.json"] = "0" * 64
+        spec["files"]["inference.onnx"] = "0" * 64
     else:
         spec["directoryManifestSha256"] = "0" * 64
     artifacts.manifest.write_text(json.dumps({"schemaVersion": 1, "models": artifacts.models}))
@@ -152,8 +151,8 @@ def test_file_and_directory_hashes_are_checked_before_publish(
         ("/absolute", tarfile.REGTYPE),
         ("official_model_infer/../escape", tarfile.REGTYPE),
         ("official_model_infer/extra", tarfile.REGTYPE),
-        ("official_model_infer/inference.json", tarfile.REGTYPE),
-        ("other_root/inference.json", tarfile.REGTYPE),
+        ("official_model_infer/inference.onnx", tarfile.REGTYPE),
+        ("other_root/inference.onnx", tarfile.REGTYPE),
         ("official_model_infer/link", tarfile.SYMTYPE),
         ("official_model_infer/link", tarfile.LNKTYPE),
         ("official_model_infer/device", tarfile.CHRTYPE),
@@ -178,7 +177,7 @@ def test_unsafe_or_unexpected_tar_members_are_rejected(
 
 def test_missing_archive_file_is_rejected(tmp_path, downloader, artifacts):
     archive = tmp_path / "missing.tar"
-    archive.write_bytes(_archive({"inference.json": b"{}"}))
+    archive.write_bytes(_archive({"inference.onnx": b"{}"}))
     with pytest.raises(downloader.ModelDownloadError, match="missing manifest files"):
         downloader._extract_archive(archive, tmp_path / "output", set(artifacts.files))
 

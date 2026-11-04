@@ -56,6 +56,8 @@ docker compose up -d --wait --wait-timeout 300
 
 镜像名和 `.env` 不需要随版本修改，`main` 会指向最新一次通过验证的主线镜像。
 
+OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX Runtime CPU。旧 `.env` 的 `OCR_ENGINE=paddle_static` 由新版映射到默认引擎，镜像内模型路径保持兼容。`OCR_CPU_THREADS` 控制每个模型的算子线程数，使用目标服务器的批量样本决定线程配置。
+
 ## 回滚
 
 把 `.env` 中的标签改为需要回滚的完整 commit，例如：
@@ -65,6 +67,8 @@ IMAGE_TAG=sha-38bc78ab5419d29611040b72728d6e483ac27740
 ```
 
 然后重新执行 `docker compose pull` 和 `docker compose up -d --wait --wait-timeout 300`。恢复自动跟随主线时改回 `IMAGE_TAG=main`。
+
+回滚至旧 Paddle 镜像时，从 `.env` 移除 `OCR_ENGINE=onnxruntime` 或改为 `paddle_static`，让旧镜像按原配置启动。
 
 ## 数据
 

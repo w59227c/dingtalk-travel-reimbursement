@@ -46,14 +46,14 @@ nginx-policy-check:
 
 ocr-models-check:
 	python3 scripts/check-ocr-models.py \
-		--detection backend/models/PP-OCRv6_small_det \
-		--recognition backend/models/PP-OCRv6_small_rec
+		--detection backend/models/onnx/PP-OCRv6_small_det \
+		--recognition backend/models/onnx/PP-OCRv6_small_rec
 
 ocr-runtime-check:
 	cd backend && PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1 \
 		uv run --frozen --extra dev --extra ocr python ../scripts/check-ocr-runtime.py \
-			--detection models/PP-OCRv6_small_det \
-			--recognition models/PP-OCRv6_small_rec
+			--detection models/onnx/PP-OCRv6_small_det \
+			--recognition models/onnx/PP-OCRv6_small_rec --fixtures tests/fixtures/ocr
 
 verify: backend-test backend-lint frontend-test frontend-typecheck frontend-lint frontend-build compose-config-development nginx-policy-check ocr-models-check
 

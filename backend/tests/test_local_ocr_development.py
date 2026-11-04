@@ -5,7 +5,8 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+
+from app.core.config import Settings
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -32,7 +33,7 @@ def test_ocr_extra_is_locked_for_linux_production_and_macos_arm_development() ->
     assert dependencies == [
         f"opencv-contrib-python==4.10.0.84; {platform_marker}",
         f"paddleocr==3.7.0; {platform_marker}",
-        f"paddlepaddle==3.3.1; {platform_marker}",
+        f"onnxruntime==1.23.2; {platform_marker}",
         f"pypdfium2==5.13.0; {platform_marker}",
     ]
 
@@ -43,7 +44,7 @@ def test_model_checker_rejects_files_that_do_not_match_fixed_manifest(tmp_path: 
     recognition = tmp_path / "rec"
     detection.mkdir()
     recognition.mkdir()
-    for name in ("inference.json", "inference.pdiparams", "inference.yml"):
+    for name in ("inference.onnx", "inference.yml"):
         (detection / name).write_bytes(b"det")
 
     invalid = subprocess.run(
@@ -59,7 +60,7 @@ def test_model_checker_rejects_files_that_do_not_match_fixed_manifest(tmp_path: 
         capture_output=True,
         text=True,
     )
-    for name in ("inference.json", "inference.pdiparams", "inference.yml"):
+    for name in ("inference.onnx", "inference.yml"):
         (recognition / name).write_bytes(b"rec")
     tampered = subprocess.run(
         [
@@ -81,25 +82,10 @@ def test_model_checker_rejects_files_that_do_not_match_fixed_manifest(tmp_path: 
 
 def test_runtime_checker_accepts_locked_macos_arm_cpu_runtime(monkeypatch) -> None:
     checker = _load_runtime_checker()
-    run_check_calls = 0
+    verified_engines = []
 
-    def run_check() -> None:
-        nonlocal run_check_calls
-        run_check_calls += 1
-
-    fake_paddle = ModuleType("paddle")
-    fake_paddle.utils = SimpleNamespace(run_check=run_check)
-
-    class FakeEngine:
-        def __init__(self, _config) -> None:
-            self.ready = False
-
-        def ensure_ready(self) -> None:
-            self.ready = True
-
-        def recognize(self, _path: str) -> list[object]:
-            assert self.ready
-            return []
+    async def verify_samples(settings, _fixtures) -> None:
+        verified_engines.append(settings.ocr_engine)
 
     monkeypatch.setattr(checker.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(checker.platform, "machine", lambda: "arm64")
@@ -109,17 +95,34 @@ def test_runtime_checker_accepts_locked_macos_arm_cpu_runtime(monkeypatch) -> No
         lambda package: {
             "opencv-contrib-python": "4.10.0.84",
             "paddleocr": "3.7.0",
-            "paddlepaddle": "3.3.1",
+            "onnxruntime": "1.23.2",
             "pypdfium2": "5.13.0",
         }[package],
     )
     monkeypatch.setenv("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "1")
-    monkeypatch.setitem(sys.modules, "paddle", fake_paddle)
-    monkeypatch.setattr(checker, "PaddleLocalOcrEngine", FakeEngine)
+    monkeypatch.delenv("OCR_ENGINE", raising=False)
+    monkeypatch.setattr(checker, "verify_samples", verify_samples)
     monkeypatch.setattr(checker, "model_directory_ready", lambda *_args: True)
 
-    assert checker.main(["--detection", "/models/det", "--recognition", "/models/rec"]) == 0
-    assert run_check_calls == 1
+    assert (
+        checker.main(
+            [
+                "--detection",
+                "/models/det",
+                "--recognition",
+                "/models/rec",
+                "--fixtures",
+                "/fixtures",
+            ]
+        )
+        == 0
+    )
+    assert verified_engines == ["onnxruntime"]
+
+
+def test_legacy_deployment_env_uses_the_new_engine(monkeypatch) -> None:
+    monkeypatch.setenv("OCR_ENGINE", "paddle_static")
+    assert Settings(_env_file=None, app_env="test").ocr_engine == "onnxruntime"
 
 
 def test_default_development_script_enables_verified_local_ocr() -> None:
@@ -127,6 +130,7 @@ def test_default_development_script_enables_verified_local_ocr() -> None:
 
     assert "export OCR_ENABLED=true" in default_script
     assert "export OCR_FAKE_ENABLED=false" in default_script
+    assert "export OCR_ENGINE=onnxruntime" in default_script
     assert "Darwin:arm64|Linux:x86_64|Linux:amd64" in default_script
     assert "check-ocr-models.py" in default_script
     assert "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1" in default_script
@@ -149,6 +153,7 @@ def test_normal_install_and_compose_enable_local_ocr_by_default() -> None:
     assert "INSTALL_OCR: ${INSTALL_OCR:-true}" in compose
     assert compose.count("platform: ${TARGET_PLATFORM:-linux/amd64}") == 2
     assert "OCR_ENABLED: ${OCR_ENABLED:-true}" in compose
+    assert "OCR_ENGINE: onnxruntime" in compose
     assert 'PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "1"' in compose
     assert "PADDLE_PDX_CACHE_HOME: /tmp/expense/.paddlex" in compose
     assert (

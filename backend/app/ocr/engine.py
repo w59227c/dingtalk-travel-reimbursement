@@ -57,8 +57,8 @@ class PaddleLocalOcrEngine:
             try:
                 if metadata.version("paddleocr") != "3.7.0":
                     raise OcrRuntimeError("PaddleOCR 版本与部署锁不一致")
-                if metadata.version("paddlepaddle") != "3.3.1":
-                    raise OcrRuntimeError("PaddlePaddle 版本与部署锁不一致")
+                if metadata.version("onnxruntime") != "1.23.2":
+                    raise OcrRuntimeError("ONNX Runtime 版本与部署锁不一致")
                 from paddleocr import PaddleOCR
             except metadata.PackageNotFoundError as exc:
                 raise OcrRuntimeError("本地 OCR 运行依赖未安装") from exc
@@ -68,12 +68,11 @@ class PaddleLocalOcrEngine:
                 self._pipeline = PaddleOCR(
                     device="cpu",
                     engine=self._settings.ocr_engine,
-                    cpu_threads=self._settings.ocr_cpu_threads,
-                    # PaddleOCR/PaddleX enables oneDNN on x86 CPUs by default.
-                    # PP-OCRv6 static models currently hit an unsupported PIR
-                    # attribute conversion in that execution path, while the
-                    # regular Paddle CPU path supports the same models.
-                    enable_mkldnn=False,
+                    engine_config={
+                        "providers": ["CPUExecutionProvider"],
+                        "intra_op_num_threads": self._settings.ocr_cpu_threads,
+                        "execution_mode": "sequential",
+                    },
                     text_detection_model_name="PP-OCRv6_small_det",
                     text_detection_model_dir=str(detection),
                     text_recognition_model_name="PP-OCRv6_small_rec",
