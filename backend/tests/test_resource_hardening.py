@@ -911,7 +911,7 @@ def test_ocr_worker_wrapper_sanitizes_memory_error(
         {
             "ocr_detection_model_dir": "/models/det",
             "ocr_recognition_model_dir": "/models/rec",
-            "ocr_engine": "paddle_static",
+            "ocr_engine": "onnxruntime",
             "ocr_cpu_threads": 1,
         },
         settings.pdf_limits,

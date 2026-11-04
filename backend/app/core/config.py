@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     ocr_queue_wait_seconds: int = 150
     ocr_timeout_seconds: int = 120
     ocr_cpu_threads: int = 4
-    ocr_engine: Literal["paddle_static"] = "paddle_static"
+    ocr_engine: Literal["onnxruntime"] = "onnxruntime"
     ocr_detection_model_dir: Path | None = None
     ocr_recognition_model_dir: Path | None = None
 
@@ -327,6 +327,12 @@ class Settings(BaseSettings):
         if not 1 <= value <= 600:
             raise ValueError("LOGOUT_FILE_WAIT_SECONDS must be between 1 and 600 seconds")
         return value
+
+    @field_validator("ocr_engine", mode="before")
+    @classmethod
+    def migrate_legacy_ocr_engine(cls, value: object) -> object:
+        # Existing deployments can keep their environment when pulling a new image.
+        return "onnxruntime" if value == "paddle_static" else value
 
     @field_validator("ocr_queue_max_waiters")
     @classmethod

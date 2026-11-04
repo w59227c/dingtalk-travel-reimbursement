@@ -345,7 +345,7 @@ def _ocr_readiness(settings: Settings) -> tuple[bool, str]:
         expected_versions = {
             "opencv-contrib-python": "4.10.0.84",
             "paddleocr": "3.7.0",
-            "paddlepaddle": "3.3.1",
+            "onnxruntime": "1.23.2",
             "pypdfium2": "5.13.0",
         }
         versions_match = all(

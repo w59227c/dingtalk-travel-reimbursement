@@ -301,7 +301,7 @@ def test_production_rejects_fake_and_missing_models(
         PaddleLocalOcrEngine(settings).ensure_ready()
 
 
-def test_paddle_static_cpu_runtime_disables_mkldnn(
+def test_default_onnx_runtime_selects_cpu_and_honors_thread_limit(
     monkeypatch,
     settings_factory,
     tmp_path: Path,
@@ -319,17 +319,23 @@ def test_paddle_static_cpu_runtime_disables_mkldnn(
     monkeypatch.setattr(
         engine_module.metadata,
         "version",
-        lambda package: {"paddleocr": "3.7.0", "paddlepaddle": "3.3.1"}[package],
+        lambda package: {"paddleocr": "3.7.0", "onnxruntime": "1.23.2"}[package],
     )
 
     PaddleLocalOcrEngine(
         settings_factory(
             ocr_detection_model_dir=tmp_path / "det",
             ocr_recognition_model_dir=tmp_path / "rec",
+            ocr_cpu_threads=3,
         )
     ).ensure_ready()
 
-    assert received["enable_mkldnn"] is False
+    assert received["engine"] == "onnxruntime"
+    assert received["engine_config"] == {
+        "providers": ["CPUExecutionProvider"],
+        "intra_op_num_threads": 3,
+        "execution_mode": "sequential",
+    }
 
 
 def test_paddle_result_contract_rejects_mismatch_without_runtime(

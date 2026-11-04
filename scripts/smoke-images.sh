@@ -133,12 +133,14 @@ backend_options=(
 )
 
 echo 'Checking real OCR initialization and inference with networking disabled'
-# Run the repository runtime checker from stdin; only the checker is injected,
-# while models and every runtime dependency must already be in the final image.
+# Mount the checker as a real script so its OCR worker can spawn. Only the
+# checker and synthetic inputs are mounted; the runtime and models are bundled.
 docker run --rm --name "$offline_container" --network none "${backend_options[@]}" \
-  --env TMPDIR=/tmp/expense --entrypoint python -i "$backend_image" - \
+  --mount "type=bind,src=$repository_root/scripts/check-ocr-runtime.py,dst=/ocr-check.py,readonly" \
+  --mount "type=bind,src=$repository_root/backend/tests/fixtures/ocr,dst=/ocr-fixtures,readonly" \
+  --env PYTHONPATH=/app --env TMPDIR=/tmp/expense --entrypoint python "$backend_image" /ocr-check.py \
   --detection /opt/expense/models/PP-OCRv6_small_det \
-  --recognition /opt/expense/models/PP-OCRv6_small_rec < "$repository_root/scripts/check-ocr-runtime.py"
+  --recognition /opt/expense/models/PP-OCRv6_small_rec --fixtures /ocr-fixtures
 
 # Internal Docker network gives the Web image access to the backend but no
 # external network. The production startup path runs migrations and OCR smoke.

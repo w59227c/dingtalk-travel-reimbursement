@@ -11,8 +11,8 @@ if [ "${1:-}" = prod ]; then
         exit 2
     fi
 fi
-DETECTION_MODEL_DIR="$PROJECT_DIR/backend/models/PP-OCRv6_small_det"
-RECOGNITION_MODEL_DIR="$PROJECT_DIR/backend/models/PP-OCRv6_small_rec"
+DETECTION_MODEL_DIR="$PROJECT_DIR/backend/models/onnx/PP-OCRv6_small_det"
+RECOGNITION_MODEL_DIR="$PROJECT_DIR/backend/models/onnx/PP-OCRv6_small_rec"
 
 if [ -f "$CONFIG_FILE" ]; then
     set -a
@@ -85,7 +85,7 @@ export REIMBURSEMENT_STAGING_MAX_BYTES=${REIMBURSEMENT_STAGING_MAX_BYTES:-429496
 export EXCEL_TEMPLATE_PATH=app/templates/expense_template.xlsx
 export OCR_ENABLED=true
 export OCR_FAKE_ENABLED=false
-export OCR_ENGINE=paddle_static
+export OCR_ENGINE=onnxruntime
 export OCR_DETECTION_MODEL_DIR="$DETECTION_MODEL_DIR"
 export OCR_RECOGNITION_MODEL_DIR="$RECOGNITION_MODEL_DIR"
 export PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1

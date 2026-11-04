@@ -3,8 +3,8 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 PROJECT_DIR=$(dirname "$SCRIPT_DIR")
-DETECTION_MODEL_DIR="$PROJECT_DIR/backend/models/PP-OCRv6_small_det"
-RECOGNITION_MODEL_DIR="$PROJECT_DIR/backend/models/PP-OCRv6_small_rec"
+DETECTION_MODEL_DIR="$PROJECT_DIR/backend/models/onnx/PP-OCRv6_small_det"
+RECOGNITION_MODEL_DIR="$PROJECT_DIR/backend/models/onnx/PP-OCRv6_small_rec"
 
 case "$(uname -s):$(uname -m)" in
     Darwin:arm64|Linux:x86_64|Linux:amd64)
@@ -42,7 +42,7 @@ export REIMBURSEMENT_STAGING_MAX_BYTES=4294967296
 export EXCEL_TEMPLATE_PATH=app/templates/expense_template.xlsx
 export OCR_ENABLED=true
 export OCR_FAKE_ENABLED=false
-export OCR_ENGINE=paddle_static
+export OCR_ENGINE=onnxruntime
 export OCR_DETECTION_MODEL_DIR="$DETECTION_MODEL_DIR"
 export OCR_RECOGNITION_MODEL_DIR="$RECOGNITION_MODEL_DIR"
 

@@ -32,7 +32,7 @@ dev = [
 ocr = [
   "opencv-contrib-python==4.10.0.84; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
   "paddleocr==3.7.0; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
-  "paddlepaddle==3.3.1; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+  "onnxruntime==1.23.2; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
   "pypdfium2==5.13.0; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
 ]
 

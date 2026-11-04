@@ -82,7 +82,7 @@ services:
       OCR_QUEUE_WAIT_SECONDS: ${OCR_QUEUE_WAIT_SECONDS:-150}
       OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-120}
       OCR_CPU_THREADS: ${OCR_CPU_THREADS:-4}
-      OCR_ENGINE: paddle_static
+      OCR_ENGINE: onnxruntime
       PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: "1"
       PADDLE_PDX_CACHE_HOME: /tmp/expense/.paddlex
       OCR_DETECTION_MODEL_DIR: ${OCR_DETECTION_MODEL_DIR:-/opt/expense/models/PP-OCRv6_small_det}
@@ -92,7 +92,7 @@ services:
       - reimbursement_staging:/app/staging
       - ./backend/app/templates/expense_template.xlsx:/app/app/templates/expense_template.xlsx:ro
       # Production OCR models are externally verified deployment inputs and mounted read-only.
-      - ${OCR_MODEL_HOST_DIR:-./backend/models}:/opt/expense/models:ro
+      - ${OCR_MODEL_HOST_DIR:-./backend/models/onnx}:/opt/expense/models:ro
     read_only: true
     mem_limit: ${BACKEND_MEMORY_LIMIT:-3g}
     pids_limit: ${BACKEND_PIDS_LIMIT:-128}
