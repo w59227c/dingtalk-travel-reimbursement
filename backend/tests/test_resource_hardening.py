@@ -846,9 +846,16 @@ async def test_resource_termination_has_stable_file_and_ocr_errors(
     assert ocr_error.value.code == "OCR_FAILED"
 
 
+@pytest.fixture
+def stub_worker_limits(monkeypatch):
+    # These wrapper tests inject errors in-process without changing pytest's resource limits.
+    monkeypatch.setattr(workers, "apply_worker_limits", lambda _limits: None)
+
+
 def test_pdf_worker_wrappers_sanitize_memory_error(
     settings_factory,
     monkeypatch,
+    stub_worker_limits,
 ) -> None:
     secret_path = "/private/receipt-sensitive.pdf"
 
@@ -872,6 +879,7 @@ def test_pdf_worker_wrappers_sanitize_memory_error(
 def test_image_worker_wrapper_sanitizes_memory_error(
     settings_factory,
     monkeypatch,
+    stub_worker_limits,
 ) -> None:
     secret_path = "/private/receipt-sensitive.png"
 
@@ -895,6 +903,7 @@ def test_image_worker_wrapper_sanitizes_memory_error(
 def test_ocr_worker_wrapper_sanitizes_memory_error(
     settings_factory,
     monkeypatch,
+    stub_worker_limits,
 ) -> None:
     secret_path = "/private/receipt-sensitive.png"
 

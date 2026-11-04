@@ -4,12 +4,11 @@ from test_itinerary_ocr import _digital_pdf
 
 from app.ocr.diagnostics import TEXT_LIMIT, RecognitionDiagnostics
 from app.ocr.engine import FakeOcrEngine
-from app.ocr.itinerary_worker import recognize_itinerary_worker
 from app.ocr.types import OcrLine
 
 
 def test_pdf_supplement_keeps_original_extractions_separate_from_derived_fields(
-    settings_factory, tmp_path, monkeypatch
+    settings_factory, tmp_path, monkeypatch, run_itinerary_in_process
 ):
     native = (
         "电子发票\n开票日期：2026-09-03\n乘车日期：2026-09-02\n"
@@ -34,8 +33,8 @@ def test_pdf_supplement_keeps_original_extractions_separate_from_derived_fields(
         FakeOcrEngine({"*": [OcrLine(scanned, 1)]}),
         True,
     )
-    normal = recognize_itinerary_worker(*args)
-    diagnosed = recognize_itinerary_worker(*args, diagnostics=True)
+    normal = run_itinerary_in_process(*args)
+    diagnosed = run_itinerary_in_process(*args, diagnostics=True)
     assert "diagnostic" not in normal
     assert normal["expense"] == diagnosed["expense"]
     trace = diagnosed["diagnostic"]

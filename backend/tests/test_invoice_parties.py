@@ -19,7 +19,6 @@ from app.ocr.invoice_parties import (
     invoice_seller_from_pdf,
     invoice_seller_name,
 )
-from app.ocr.itinerary_worker import recognize_itinerary_worker
 from app.ocr.parsers import ReceiptParserRegistry
 from app.ocr.types import OcrLine, ParseContext, ReceiptKeywordRule
 from app.ocr.workers import _append_passenger_fields
@@ -151,7 +150,9 @@ def test_pdf_seller_rejects_missing_or_conflicting_party_labels(tmp_path, change
     assert invoice_seller_from_pdf(str(path)) is None
 
 
-def test_material_worker_recovers_native_seller_without_scanning(settings_factory, tmp_path):
+def test_material_worker_recovers_native_seller_without_scanning(
+    settings_factory, tmp_path, run_itinerary_in_process
+):
     class NoScan(FakeOcrEngine):
         def recognize(self, path):
             raise AssertionError("Native seller coordinates should not need OCR")
@@ -163,7 +164,7 @@ def test_material_worker_recovers_native_seller_without_scanning(settings_factor
         ReceiptKeywordRule("客运服务费", ExpenseCategory.LOCAL_TRANSPORT),
         ReceiptKeywordRule("航空", ExpenseCategory.AIRFARE),
     )
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(path), "pdf", {}, settings.pdf_limits, settings.ocr_worker_limits, 2026,
         NoScan(), classify=True, keyword_rules=rules,
     )

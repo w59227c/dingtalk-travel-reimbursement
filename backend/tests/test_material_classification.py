@@ -17,7 +17,6 @@ from app.domain.material_classification import material_classification
 from app.models.reimbursement import ReimbursementDraft, ReimbursementDraftFile
 from app.ocr.engine import FakeOcrEngine, OcrRuntimeError
 from app.ocr.itinerary import ItineraryPage
-from app.ocr.itinerary_worker import recognize_itinerary_worker
 from app.ocr.materials import classify_material
 from app.ocr.parsers import ReceiptParserRegistry
 from app.ocr.types import InvoiceQrEvidence, OcrLine, ParseContext
@@ -67,7 +66,7 @@ def test_multi_page_invoice_and_mixed_documents_are_not_silently_first_page_expe
 
 
 def test_photographed_meter_receipt_with_obscured_title_uses_one_ocr_pass(
-    settings_factory, tmp_path
+    settings_factory, tmp_path, run_itinerary_in_process
 ):
     # The stamp obscures 机打 in the title; tilted OCR places the total before its label.
     text = (
@@ -87,7 +86,7 @@ def test_photographed_meter_receipt_with_obscured_title_uses_one_ocr_pass(
     image.write_bytes(_image_bytes())
     engine = CountingOcr()
     settings = settings_factory()
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(image),
         "jpg",
         {},
@@ -115,7 +114,7 @@ def test_meter_fields_without_invoice_evidence_still_require_material_confirmati
 
 @pytest.mark.parametrize("font_failure", [False, True])
 def test_native_pdf_classifies_and_parses_in_one_extraction(
-    settings_factory, tmp_path, monkeypatch, font_failure
+    settings_factory, tmp_path, monkeypatch, font_failure, run_itinerary_in_process
 ):
     if font_failure:
         from pypdf import PageObject
@@ -135,7 +134,7 @@ def test_native_pdf_classifies_and_parses_in_one_extraction(
         tmp_path / "irrelevant-name.pdf",
         ("Guest Invoice\nDate: 2026-09-03\nTotal amount: 97600000 VND",),
     )
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(stored.path),
         "pdf",
         {},
@@ -172,6 +171,7 @@ def test_auto_pdf_recovers_missing_fields_once_and_keeps_native_evidence(
     settings_factory,
     tmp_path,
     monkeypatch,
+    run_itinerary_in_process,
     native,
     scanned,
     expected_amount,
@@ -194,7 +194,7 @@ def test_auto_pdf_recovers_missing_fields_once_and_keeps_native_evidence(
             return [OcrLine(line, 1) for line in scanned.splitlines()]
 
     engine = CountingOcr()
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(stored.path),
         "pdf",
         {},
@@ -213,7 +213,9 @@ def test_auto_pdf_recovers_missing_fields_once_and_keeps_native_evidence(
     assert engine.calls == 1
 
 
-def test_auto_expense_retains_local_qr_evidence(settings_factory, tmp_path, monkeypatch):
+def test_auto_expense_retains_local_qr_evidence(
+    settings_factory, tmp_path, monkeypatch, run_itinerary_in_process
+):
     settings = settings_factory()
     stored = _digital_pdf(tmp_path / "invoice.pdf", ("valid fixture",))
     native = "电子发票\n开票日期：2026-09-03\n餐饮服务\n金额未能读取"
@@ -228,7 +230,7 @@ def test_auto_expense_retains_local_qr_evidence(settings_factory, tmp_path, monk
         lambda *_args, **_kwargs: InvoiceQrEvidence(Decimal("123.45"), date(2026, 9, 3)),
         raising=False,
     )
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(stored.path),
         "pdf",
         {},
@@ -247,6 +249,7 @@ def test_failed_supplemental_ocr_keeps_native_invoice_candidate(
     settings_factory,
     tmp_path,
     monkeypatch,
+    run_itinerary_in_process,
 ):
     settings = settings_factory()
     stored = _digital_pdf(tmp_path / "invoice.pdf", ("valid fixture",))
@@ -262,7 +265,7 @@ def test_failed_supplemental_ocr_keeps_native_invoice_candidate(
         def recognize(self, _path):
             raise OcrRuntimeError("测试补读失败")
 
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(stored.path),
         "pdf",
         {},
@@ -277,11 +280,13 @@ def test_failed_supplemental_ocr_keeps_native_invoice_candidate(
     assert result["expense"].date == date(2026, 9, 3)
 
 
-def test_auto_scan_cap_and_all_page_safety_are_retained(settings_factory, tmp_path):
+def test_auto_scan_cap_and_all_page_safety_are_retained(
+    settings_factory, tmp_path, run_itinerary_in_process
+):
     settings = settings_factory()
     engine = FakeOcrEngine({"*": [OcrLine(line, 1) for line in ITINERARY.splitlines()]})
     stored = _digital_pdf(tmp_path / "scan.pdf", ("",) * 6)
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(stored.path),
         "pdf",
         {},
@@ -297,7 +302,7 @@ def test_auto_scan_cap_and_all_page_safety_are_retained(settings_factory, tmp_pa
     writer.add_blank_page(width=100000, height=100000)
     with stored.path.open("wb") as handle:
         writer.write(handle)
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(stored.path),
         "pdf",
         {},

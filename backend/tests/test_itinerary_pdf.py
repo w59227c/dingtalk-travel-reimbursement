@@ -7,7 +7,6 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from app.ocr.engine import FakeOcrEngine
 from app.ocr.itinerary import ItineraryPage, parse_itinerary_pages
 from app.ocr.itinerary_pdf import positioned_itinerary_layout
-from app.ocr.itinerary_worker import recognize_itinerary_worker
 from app.ocr.types import OcrLine
 
 
@@ -102,7 +101,7 @@ def test_positioned_extraction_respects_character_budget(tmp_path):
 
 @pytest.mark.parametrize("classify", [False, True])
 def test_worker_uses_positioned_native_table_before_loading_ocr(
-    settings_factory, tmp_path, classify
+    settings_factory, tmp_path, classify, run_itinerary_in_process
 ):
     class NoScan(FakeOcrEngine):
         def recognize(self, path):
@@ -110,7 +109,7 @@ def test_worker_uses_positioned_native_table_before_loading_ocr(
 
     path = _table_pdf(tmp_path / "table.pdf")
     settings = settings_factory()
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(path),
         "pdf",
         {},

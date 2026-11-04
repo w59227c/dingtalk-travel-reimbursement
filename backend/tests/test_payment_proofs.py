@@ -10,7 +10,6 @@ from test_reimbursement_files import _image_bytes, _insert_draft
 
 from app.models.reimbursement import ReimbursementDraft
 from app.ocr.engine import FakeOcrEngine
-from app.ocr.itinerary_worker import recognize_itinerary_worker
 from app.ocr.materials import classify_material
 from app.ocr.payment_proofs import payment_proof_details
 from app.ocr.types import OcrLine
@@ -34,7 +33,7 @@ BANK_PURCHASE = (
 
 
 def test_posted_bank_purchase_is_payment_proof_with_optional_manual_entry_hints(
-    settings_factory, tmp_path
+    settings_factory, tmp_path, run_itinerary_in_process
 ):
     class CountingOcr(FakeOcrEngine):
         calls = 0
@@ -47,7 +46,7 @@ def test_posted_bank_purchase_is_payment_proof_with_optional_manual_entry_hints(
     path.write_bytes(_image_bytes())
     settings = settings_factory()
     engine = CountingOcr()
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(path),
         "jpg",
         {},
@@ -146,7 +145,7 @@ def test_conflicting_dates_descriptions_or_multiple_pages_are_not_prefilled():
 
 
 def test_electronic_payment_receipt_uses_native_text_and_never_returns_expense(
-    settings_factory, tmp_path, monkeypatch
+    settings_factory, tmp_path, monkeypatch, run_itinerary_in_process
 ):
     path = tmp_path / "payment.pdf"
     _digital_pdf(path, ("valid fixture",))
@@ -162,7 +161,7 @@ def test_electronic_payment_receipt_uses_native_text_and_never_returns_expense(
             raise AssertionError("An electronic payment receipt must not invoke image OCR")
 
     settings = settings_factory()
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(path),
         "pdf",
         {},
@@ -178,7 +177,9 @@ def test_electronic_payment_receipt_uses_native_text_and_never_returns_expense(
     assert "expense" not in result
 
 
-def test_photographed_payment_receipt_uses_only_one_ocr_pass(settings_factory, tmp_path):
+def test_photographed_payment_receipt_uses_only_one_ocr_pass(
+    settings_factory, tmp_path, run_itinerary_in_process
+):
     class CountingOcr(FakeOcrEngine):
         calls = 0
 
@@ -190,7 +191,7 @@ def test_photographed_payment_receipt_uses_only_one_ocr_pass(settings_factory, t
     path.write_bytes(_image_bytes())
     settings = settings_factory()
     engine = CountingOcr()
-    result = recognize_itinerary_worker(
+    result = run_itinerary_in_process(
         str(path),
         "jpg",
         {},

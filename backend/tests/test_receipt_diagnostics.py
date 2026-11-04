@@ -215,9 +215,9 @@ def test_trace_reports_actual_decisions_without_changing_parser_result(content, 
     assert trace["finalCategory"] == parsed.category.value
 
 
-def test_regular_recognition_never_returns_diagnostic_text(settings_factory, tmp_path):
-    from app.ocr.itinerary_worker import recognize_itinerary_worker
-
+def test_regular_recognition_never_returns_diagnostic_text(
+    settings_factory, tmp_path, run_itinerary_in_process
+):
     settings = settings_factory()
     image = tmp_path / "receipt.png"
     image.write_bytes(_image_bytes())
@@ -231,8 +231,8 @@ def test_regular_recognition_never_returns_diagnostic_text(settings_factory, tmp
         FakeOcrEngine({"*": [OcrLine(line, 1) for line in TEXT.splitlines()]}),
         True,
     )
-    normal = recognize_itinerary_worker(*args)
-    diagnostic = recognize_itinerary_worker(*args, diagnostics=True)
+    normal = run_itinerary_in_process(*args)
+    diagnostic = run_itinerary_in_process(*args, diagnostics=True)
     assert "diagnostic" not in normal
     assert normal["expense"] == diagnostic["expense"]
     assert diagnostic["diagnostic"]["recognizedText"] == TEXT

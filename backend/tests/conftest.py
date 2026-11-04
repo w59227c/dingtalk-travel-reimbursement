@@ -10,7 +10,15 @@ from sqlalchemy import text
 from app.core.config import Settings
 from app.database.base import Base
 from app.main import create_app
+from app.ocr import itinerary_worker
 from app.ocr.types import LocalOcrEngine
+
+
+@pytest.fixture
+def run_itinerary_in_process(monkeypatch):
+    # These tests exercise recognition directly. Real workers set limits in a child process.
+    monkeypatch.setattr(itinerary_worker, "apply_worker_limits", lambda _limits: None)
+    return itinerary_worker.recognize_itinerary_worker
 
 
 @pytest.fixture
