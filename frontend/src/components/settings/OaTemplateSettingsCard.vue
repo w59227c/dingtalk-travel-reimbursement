@@ -668,15 +668,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
         show-icon
         :closable="false"
         class="oa-template-alert"
-      >
-        <el-button
-          :loading="inspecting"
-          :disabled="loading || saving || inspecting"
-          @click="inspectCatalog"
-        >
-          读取并检查模板
-        </el-button>
-      </el-alert>
+      />
       <el-alert
         v-if="catalogWarning"
         :title="catalogWarning"
@@ -962,6 +954,13 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
             role="status"
           >{{ saveDisabledReason }}</span>
           <el-button
+            :loading="inspecting"
+            :disabled="loading || saving || inspecting"
+            @click="inspectCatalog"
+          >
+            读取并检查模板
+          </el-button>
+          <el-button
             type="primary"
             :loading="saving"
             :disabled="Boolean(saveDisabledReason) || saving || inspecting"
@@ -1046,6 +1045,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
 }
 
 .oa-template-schema-summary code {
+  display: block;
   overflow-wrap: anywhere;
 }
 
