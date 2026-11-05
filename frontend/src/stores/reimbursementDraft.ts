@@ -85,13 +85,17 @@ function inputAfterRemovingFiles(input: ReimbursementDraftInput, ids: ReadonlySe
   const retain = (id: string) => !ids.has(id)
   return {
     ...input,
-    items: input.items.filter((item) => !item.sourceFileId || retain(item.sourceFileId)).map((item) => ({
-      ...item,
-      itineraryFileIds: item.itineraryFileIds?.filter(retain),
-      paymentProofFileIds: item.paymentProofFileIds?.filter(retain),
-      hotelBillFileIds: item.hotelBillFileIds?.filter(retain),
-      receiptAttachmentFileIds: item.receiptAttachmentFileIds?.filter(retain),
-    })),
+    items: input.items.filter((item) => !item.sourceFileId || retain(item.sourceFileId)).map((item) => {
+      const receipts = item.receiptAttachmentFileIds?.filter(retain)
+      return {
+        ...item,
+        itineraryFileIds: item.itineraryFileIds?.filter(retain),
+        paymentProofFileIds: item.paymentProofFileIds?.filter(retain),
+        hotelBillFileIds: item.hotelBillFileIds?.filter(retain),
+        // The backend omits this optional field after the last receipt is removed.
+        receiptAttachmentFileIds: receipts?.length ? receipts : undefined,
+      }
+    }),
     dismissedOcrFileIds: input.dismissedOcrFileIds.filter(retain),
   }
 }

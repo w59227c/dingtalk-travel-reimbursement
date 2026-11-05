@@ -390,7 +390,8 @@ function sessionScope(): string {
 function tripSignature(trip: TripInput | null | undefined): object | null {
   if (!trip) return null
   return {
-    relatedApprovalId: trip.relatedApprovalId,
+    // The API writes an absent editingState approval ID as null.
+    relatedApprovalId: trip.relatedApprovalId ?? undefined,
     tripType: trip.tripType,
     startDate: trip.startDate,
     startTime: trip.startTime,
@@ -402,6 +403,15 @@ function tripSignature(trip: TripInput | null | undefined): object | null {
     noSubsidyException: trip.noSubsidyException ?? false,
     excludedPeriods: (trip.excludedPeriods ?? []).map(adjustmentPayload),
   }
+}
+function amountSignature(value: string | null | undefined): string | null | undefined {
+  if (typeof value !== 'string') return value
+  const match = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/.exec(value)
+  if (!match) return value
+  // Compare decimal strings without losing precision on large original amounts.
+  const whole = match[1]!
+  const fraction = (match[2] ?? '').replace(/0+$/, '')
+  return fraction ? `${whole}.${fraction}` : whole
 }
 function inputSignature(input: ReimbursementDraftInput): string {
   // Project is server-derived from budget, never a second employee input.
@@ -429,7 +439,7 @@ function inputSignature(input: ReimbursementDraftInput): string {
       railType: item.railType ?? 'unknown',
       requiresItinerary: item.requiresItinerary ?? false,
       originalCurrency: item.originalCurrency,
-      originalAmount: item.originalAmount,
+      originalAmount: amountSignature(item.originalAmount),
       originalDetailsEdited: item.originalDetailsEdited ?? false,
       cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
       requiresCnyConfirmation: item.requiresCnyConfirmation ?? false,
@@ -437,7 +447,7 @@ function inputSignature(input: ReimbursementDraftInput): string {
       date: item.date,
       displayDate: item.displayDate,
       description: item.description,
-      amount: item.amount,
+      amount: amountSignature(item.amount),
       receiptCount: item.receiptCount,
     })),
     dismissedOcrFileIds: input.dismissedOcrFileIds,

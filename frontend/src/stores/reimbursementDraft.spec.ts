@@ -1087,6 +1087,33 @@ describe('persistent reimbursement draft store', () => {
     expect(store.draftListTotal).toBe(0)
   })
 
+  it.each([false, true].flatMap((changed) => [
+    { changed, remaining: [] as string[] }, { changed, remaining: ['file-2'] },
+  ]))('compares canonical receipt references after a lost deletion response, changed=$changed remaining=$remaining', async ({ changed, remaining }) => {
+    const before = structuredClone(input)
+    Object.assign(before.items[0]!, {
+      itineraryFileIds: [], paymentProofFileIds: [], hotelBillFileIds: [],
+      receiptAttachmentFileIds: ['file-1', ...remaining],
+    })
+    const after = structuredClone(before)
+    if (remaining.length) after.items[0]!.receiptAttachmentFileIds = remaining
+    else delete after.items[0]!.receiptAttachmentFileIds
+    if (changed) after.items[0]!.amount = '88.88'
+    vi.mocked(createReimbursementDraft).mockResolvedValue({ ...draft(), input: before })
+    vi.mocked(deleteReimbursementDraftFile).mockRejectedValueOnce(new Error('response lost'))
+    vi.mocked(getReimbursementDraft).mockResolvedValue({ ...draft('draft-1', 2), input: after })
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({ draftId: 'draft-1', revision: 2,
+      items: remaining.map((id) => ({ ...serverFile(id), role: 'ATTACHMENT_ONLY' })) })
+    const store = useReimbursementDraftStore()
+    await store.createDraft(before)
+    store.files = ['file-1', ...remaining].map((id) => ({ ...serverFile(id), role: 'ATTACHMENT_ONLY' }))
+    await expect(store.removeFile('file-1')).rejects.toThrow('response lost')
+    expect(store.currentDraft?.input.items[0]?.receiptAttachmentFileIds).toEqual(remaining.length ? remaining : undefined)
+    expect(store.revisionConflict).toBe(changed)
+    expect(store.currentDraft?.input.items[0]?.amount).toBe(changed ? '88.88' : '44.89')
+    expect(deleteReimbursementDraftFile).toHaveBeenCalledOnce()
+  })
+
   it('reloads a deleting file after any remove failure without replaying DELETE', async () => {
     vi.mocked(createReimbursementDraft).mockResolvedValue(draft())
     const failure = responseError(

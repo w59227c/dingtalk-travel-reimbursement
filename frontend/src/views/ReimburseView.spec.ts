@@ -954,6 +954,119 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('keeps approval selection editable after a canonical server save of an unbound trip, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    vi.mocked(updateReimbursementDraft).mockImplementation(async (_id, revision, input) => {
+      // Pydantic emits null for the optional relatedApprovalId in editingState.trip.
+      const canonicalInput = JSON.parse(JSON.stringify({
+        ...input,
+        editingState: {
+          ...input.editingState,
+          trip: { ...input.editingState!.trip, relatedApprovalId: input.editingState!.trip.relatedApprovalId ?? null },
+        },
+      })) as ReimbursementDraftInput
+      serverDraft = { ...serverDraft, revision: revision + 1, input: canonicalInput }
+      return serverDraft
+    })
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    expense.items[0]!.description = '选择审批前已保存的说明'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    await flushPromises()
+    expect(updateReimbursementDraft).toHaveBeenCalled()
+    const selector = wrapper.findComponent(TravelApprovalSelectorStub)
+    for (const selections of [[selection], [], [selection]]) {
+      selector.vm.$emit('update:modelValue', selections)
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('报销内容已更新，请核对最新报销内容')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+      expect(expense.items[0]?.description).toBe('选择审批前已保存的说明')
+    }
+    expect(serverDraft.relatedApprovals.map((approval) => approval.processInstanceId)).toEqual([selection.processInstanceId])
+    wrapper.unmount()
+  })
+
+  it.each([false, true].flatMap((mobile) => [
+    { mobile, entered: '100', canonical: '100.00' },
+    { mobile, entered: '12.3', canonical: '12.30' },
+    { mobile, entered: '999999999999999.9', canonical: '999999999999999.90' },
+  ]))('accepts canonical decimal precision in saved original currency, $entered mobile=$mobile', async ({ mobile, entered, canonical }) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    vi.mocked(updateReimbursementDraft).mockImplementation(async (_id, revision, input) => {
+      const canonicalInput = structuredClone(input)
+      canonicalInput.items[0]!.originalAmount = canonical
+      serverDraft = { ...serverDraft, revision: revision + 1, input: canonicalInput }
+      return serverDraft
+    })
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    expense.upsertManualItem({ ...expense.items[0]!, originalCurrency: 'USD', originalAmount: entered,
+      originalDetailsEdited: true, cnyAmountConfirmed: true })
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    await flushPromises()
+    expect(serverDraft.input.items[0]?.originalAmount).toBe(canonical)
+    wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('报销内容已更新，请核对最新报销内容')
+    expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+    expect(expense.items[0]?.originalAmount).toBe(entered)
+    wrapper.unmount()
+  })
+
+  it.each([false, true].flatMap((mobile) => ['100.000', '0100.00'].map((invalid) => ({ mobile, invalid }))))(
+    'does not skip server validation for unsupported original amount format, $invalid mobile=$mobile', async ({ mobile, invalid }) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    Object.assign(serverDraft.input.items[0]!, { originalCurrency: 'USD', originalAmount: '100.00',
+      originalDetailsEdited: true, cnyAmountConfirmed: true, requiresCnyConfirmation: true })
+    const { wrapper, expense } = await mountView(undefined, false, mobile)
+    await vi.advanceTimersByTimeAsync(650)
+    await flushPromises()
+    vi.mocked(updateReimbursementDraft).mockClear()
+    vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(new Error('原币金额格式不符合要求'))
+    expense.upsertManualItem({ ...expense.items[0]!, originalAmount: invalid })
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(650)
+    await flushPromises()
+    expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    expect(wrapper.text()).toContain('原币金额格式不符合要求')
+    expect(expense.items[0]?.originalAmount).toBe(invalid)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('keeps editing after completed manual receipt clearing loses its response, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    delete serverDraft.input.items[0]!.sourceFileId
+    serverDraft.input.items[0]!.receiptAttachmentFileIds = ['file-1']
+    serverFiles = [{ ...activeFile, role: 'ATTACHMENT_ONLY', ocrStatus: 'NOT_REQUESTED' }]
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
+    vi.mocked(clearReimbursementDraftFiles).mockImplementationOnce(async () => {
+      const input = structuredClone(serverDraft.input)
+      delete input.items[0]!.receiptAttachmentFileIds
+      serverDraft = { ...serverDraft, revision: serverDraft.revision + 1, input }
+      serverFiles = []
+      throw new Error('删除响应连接中断')
+    })
+    const { wrapper, expense, drafts } = await mountView(undefined, true, mobile)
+    if (mobile) await wrapper.findAll('.mobile-step-nav button')[2]!.trigger('click')
+    await visibleButton(wrapper, '清空文件').trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(650)
+    await flushPromises()
+    expect(clearReimbursementDraftFiles).toHaveBeenCalledOnce()
+    expect(drafts.revisionConflict).toBe(false)
+    expect(wrapper.text()).not.toContain('报销内容已更新，请核对最新报销内容')
+    expect(visibleButton(wrapper, '手动添加').attributes('disabled')).toBeUndefined()
+    expect(expense.items[0]?.receiptAttachmentFileIds ?? []).toEqual([])
+    expect(serverDraft.input.items[0]?.amount).toBe('44.89')
+    wrapper.unmount()
+  })
+
   it('derives read-only accounting from approvals and clears it without losing expenses or subsidy edits', async () => {
     serverDraft.input = { ...serverDraft.input, companyValue: '', budgetCodeValue: '' }
     const { wrapper, expense } = await mountView()
@@ -2714,13 +2827,20 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
-  it.each([false, true])('pauses autosave when an approval timeout reads another tab’s expense edits, mobile=%s', async (mobile) => {
+  it.each([false, true].flatMap((mobile) => (['amount', 'originalAmount', 'relatedApprovalId'] as const)
+    .map((field) => ({ mobile, field }))))('pauses autosave when an approval timeout reads another tab’s $field edits, mobile=$mobile', async ({ mobile, field }) => {
     vi.useFakeTimers()
     serverDraft.input = canonicalNoSubsidyInput()
+    if (field === 'originalAmount') Object.assign(serverDraft.input.items[0]!, {
+      originalCurrency: 'USD', originalAmount: '999999999999999.90',
+    })
+    if (field === 'relatedApprovalId') serverDraft.input.editingState!.trip.relatedApprovalId = 'saved-approval'
     const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
     expense.items[0]!.description = '本页尚未保存的说明'
     const concurrent = structuredClone(serverDraft.input)
-    concurrent.items[0]!.amount = '88.88'
+    if (field === 'amount') concurrent.items[0]!.amount = '88.88'
+    else if (field === 'originalAmount') concurrent.items[0]!.originalAmount = '999999999999999.91'
+    else concurrent.editingState!.trip.relatedApprovalId = 'other-approval'
     serverDraft = { ...serverDraft, revision: 2, input: concurrent }
     vi.mocked(replaceReimbursementRelatedApprovals).mockRejectedValueOnce(new Error('审批保存响应超时'))
     wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
@@ -2730,7 +2850,7 @@ describe('ReimburseView single-form OA flow', () => {
     expect(expense.items[0]?.description).toBe('本页尚未保存的说明')
     expect(visibleButton(wrapper, '核对最新报销内容').isVisible()).toBe(true)
     expect(updateReimbursementDraft).not.toHaveBeenCalled()
-    expect(serverDraft.input.items[0]?.amount).toBe('88.88')
+    expect(serverDraft.input).toEqual(concurrent)
     wrapper.unmount()
   })
 
