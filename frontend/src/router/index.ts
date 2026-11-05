@@ -6,6 +6,9 @@ import ReimburseView from '@/views/ReimburseView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
+  scrollBehavior(to) {
+    if (to.hash === '#oa-template-catalog') return { el: to.hash, top: 16 }
+  },
   routes: [
     {
       path: '/',

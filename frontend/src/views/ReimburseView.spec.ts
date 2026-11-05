@@ -2439,6 +2439,73 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('lets an administrator enter settings to repair unavailable OA templates after confirming unsaved input, mobile=%s', async (mobile) => {
+    const unavailable = Object.assign(new Error('请先确认 OA 表单'), {
+      isAxiosError: true,
+      response: { data: { error: { code: 'OA_TEMPLATE_CONFIRMATION_REQUIRED', message: '请先确认 OA 表单' } } },
+    })
+    vi.mocked(getOaReimbursementOptions).mockRejectedValue(unavailable)
+    const { wrapper, expense, router } = await mountView(undefined, false, mobile)
+    expense.items[0]!.description = '表单不可用时仍保留的本页说明'
+    await nextTick()
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValueOnce(undefined as never)
+    await router.push(mobile ? '/m/settings' : '/admin/settings')
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(router.currentRoute.value.path).toBe(mobile ? '/m/settings' : '/admin/settings')
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    expect(serverDraft.input.items[0]?.description).not.toBe('表单不可用时仍保留的本页说明')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('opens template settings from a blocked restored draft without treating normalization as an edit, mobile=%s', async (mobile) => {
+    const unavailable = Object.assign(new Error('请先确认 OA 表单'), {
+      isAxiosError: true,
+      response: { data: { error: { code: 'OA_TEMPLATE_CONFIRMATION_REQUIRED', message: '请先确认 OA 表单' } } },
+    })
+    vi.mocked(getOaReimbursementOptions).mockRejectedValue(unavailable)
+    const { wrapper, router } = await mountView(undefined, false, mobile)
+    expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(true)
+    const confirm = vi.spyOn(ElMessageBox, 'confirm')
+    await visibleButton(wrapper, '重新检查表单').trigger('click')
+    await flushPromises()
+    expect(getOaReimbursementOptions).toHaveBeenCalledTimes(2)
+    await visibleButton(wrapper, '前往系统设置确认表单').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe(mobile ? '/m/settings' : '/admin/settings')
+    expect(router.currentRoute.value.hash).toBe('#oa-template-catalog')
+    expect(confirm).not.toHaveBeenCalled()
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    vi.mocked(getOaReimbursementOptions).mockResolvedValue(options)
+    await router.push(mobile ? '/m' : '/')
+    await flushPromises()
+    expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('keeps real unsaved input when the administrator cancels opening template settings, mobile=%s', async (mobile) => {
+    const { wrapper, expense, drafts, router } = await mountView(undefined, false, mobile)
+    expense.items[0]!.description = '需要保留的本页修改'
+    drafts.reimbursementOptionsError = 'OA 表单需要确认'
+    drafts.reimbursementOptionsErrorCode = 'OA_TEMPLATE_CONFIRMATION_REQUIRED'
+    await nextTick()
+    vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+    await router.push(mobile ? '/m/settings' : '/admin/settings')
+    expect(router.currentRoute.value.path).toBe(mobile ? '/m' : '/')
+    expect(expense.items[0]?.description).toBe('需要保留的本页修改')
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('asks a non-administrator to contact an administrator when OA confirmation is required, mobile=%s', async (mobile) => {
+    const { wrapper, drafts } = await mountView((auth) => { auth.session!.isAdmin = false }, false, mobile)
+    drafts.reimbursementOptionsError = 'OA 表单需要确认'
+    drafts.reimbursementOptionsErrorCode = 'OA_TEMPLATE_CONFIRMATION_REQUIRED'
+    await nextTick()
+    expect(wrapper.text()).toContain('请联系管理员确认 OA 表单')
+    expect(wrapper.findAll('button').some((button) => button.text() === '前往系统设置确认表单')).toBe(false)
+    wrapper.unmount()
+  })
+
   it.each([false, true])('makes invalid accounting options actionable from the review step, mobile=%s', async (mobile) => {
     serverDraft = makeDraft({
       input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: true },

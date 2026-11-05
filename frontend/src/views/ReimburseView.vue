@@ -3,7 +3,7 @@ import { adjustmentPayload } from '@/utils/subsidyAdjustments'
 import { ArrowLeft, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
 import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vue'
@@ -46,6 +46,7 @@ const props = withDefaults(defineProps<{
 })
 
 const auth = useAuthStore()
+const router = useRouter()
 const expense = useExpenseStore()
 const health = useHealthStore()
 const drafts = useReimbursementDraftStore()
@@ -70,6 +71,7 @@ const refreshingMaterialStatus = ref(false)
 const deferredMaterialRevision = ref<string | null>(null)
 const saveError = ref('')
 const saveRequiresReload = ref(false)
+const editableInputBaseline = ref('')
 const expiredDraftId = ref('')
 const workspaceActionError = ref('')
 const confirmingDraftReload = ref(false)
@@ -207,7 +209,12 @@ const formReadOnlyReason = computed(() => {
   if (draftExpired.value) return '本次填写内容已过期，请重新填写'
   if (drafts.currentDraft.status === 'LOCKED' || trackedSubmission.value) return '本次报销内容已锁定，请查看提交进度'
   if (saveRequiresReload.value) return '报销内容已更新，请核对最新报销内容'
-  if (reimbursementOptionsUnavailable.value) return '当前 OA 模板或选项不可用，请重新加载后继续填写'
+  if (reimbursementOptionsUnavailable.value) {
+    if (templateNeedsAdmin.value) return auth.isAdmin
+      ? 'OA 表单需要确认，请前往系统设置处理'
+      : 'OA 表单需要管理员确认，请联系管理员处理'
+    return '当前 OA 模板或选项不可用，请重新加载后继续填写'
+  }
   if (templateMismatch.value) return 'OA 表单已更新，请按新表单重新填写'
   return ''
 })
@@ -447,6 +454,10 @@ function acceptDerivedAccounting(): void {
     const saved = JSON.parse(savedInputSignature.value) as ReimbursementDraftInput
     savedInputSignature.value = inputSignature({ ...saved, companyValue: input.companyValue, budgetCodeValue: input.budgetCodeValue })
   }
+  if (editableInputBaseline.value) {
+    const baseline = JSON.parse(editableInputBaseline.value) as ReimbursementDraftInput
+    editableInputBaseline.value = inputSignature({ ...baseline, companyValue: input.companyValue, budgetCodeValue: input.budgetCodeValue })
+  }
 }
 function shanghaiDate(milliseconds: number): string {
   const parts = new Intl.DateTimeFormat('en', {
@@ -578,6 +589,12 @@ function hydrate(draft: ReimbursementDraft): void {
   expiredDraftId.value = ''
   relatedApprovalVerificationError.value = ''
   relatedApprovalRetry.value = null
+  const scope = sessionScope()
+  void nextTick(() => {
+    if (!disposed && scope === sessionScope() && drafts.currentDraft?.id === draft.id) {
+      editableInputBaseline.value = inputSignature(currentFormInput.value)
+    }
+  })
 }
 async function loadSubmittedReceipt(): Promise<void> {
   const result = submittedResult.value
@@ -707,6 +724,7 @@ async function flushAutosave(options: { includeRelated?: boolean } = {}): Promis
           await drafts.saveDraft(snapshot)
           if (drafts.currentDraft?.id !== draftId || sessionScope() !== scope) return
           savedInputSignature.value = inputSignature(snapshot)
+          editableInputBaseline.value = savedInputSignature.value
           acceptDerivedAccounting()
         }
       }
@@ -721,7 +739,7 @@ async function flushAutosave(options: { includeRelated?: boolean } = {}): Promis
     } finally { saving.value = false }
   })
 }
-onBeforeRouteLeave(async () => {
+onBeforeRouteLeave(async (to) => {
   if (submitFlowPending.value || bindingApprovalDepartment.value || replacingTemplate.value
     || initializingWorkspace.value || verifyingRelatedApprovals.value || pendingDepartmentApproval.value) {
     ElMessage.warning('请等待当前操作完成，或先完成部门选择')
@@ -729,6 +747,26 @@ onBeforeRouteLeave(async () => {
   }
   if (!sessionScope() || drafts.currentDraft?.status === 'LOCKED' || trackedSubmission.value
     || (!formDirty.value && !savePromise)) return true
+  if (auth.isAdmin && templateNeedsAdmin.value
+    && to.path === (props.mobile ? '/m/settings' : '/admin/settings')) {
+    if (drafts.busy || saving.value) {
+      ElMessage.warning('请等待当前保存或材料处理完成后再进入设置')
+      return false
+    }
+    // Hydrating older saved input can normalize defaults without an employee edit.
+    if (!relatedDirty.value && inputSignature(currentFormInput.value) === editableInputBaseline.value) return true
+    const scope = sessionScope()
+    const draftId = drafts.currentDraft?.id
+    try {
+      await ElMessageBox.confirm(
+        '当前 OA 表单尚未确认，暂时无法保存本页修改。进入系统设置后，本页尚未保存的修改会被舍弃，请先留存需要的内容。服务器已保存的报销和材料会保留。',
+        '前往系统设置处理表单',
+        { confirmButtonText: '舍弃本页修改并前往设置', cancelButtonText: '保留本页', type: 'warning' },
+      )
+      return !disposed && scope === sessionScope() && draftId === drafts.currentDraft?.id
+        && !drafts.busy && !saving.value
+    } catch { return false }
+  }
   if (formReadOnly.value && !saveRequiresReload.value) {
     ElMessage.warning('本页还有未保存的修改，请先处理后再离开。')
     return false
@@ -861,9 +899,17 @@ async function refreshFormOptions(): Promise<void> {
   if (!scope || drafts.loadingReimbursementOptions) return
   await drafts.loadReimbursementOptions()
   await nextTick()
+  if (scope === sessionScope() && !disposed && templateNeedsAdmin.value) {
+    ElMessage.warning(auth.isAdmin ? 'OA 表单仍需确认，请前往系统设置处理' : 'OA 表单仍需管理员确认，请联系管理员处理')
+  }
   if (scope === sessionScope() && !disposed && !formReadOnly.value) {
     await approvalSelector.value?.search?.()
   }
+}
+
+function openTemplateSettings(): void {
+  if (!auth.isAdmin) return
+  void router.push({ path: props.mobile ? '/m/settings' : '/admin/settings', hash: '#oa-template-catalog' })
 }
 
 async function recoverAccountingOptions(): Promise<void> {
@@ -1561,19 +1607,28 @@ onBeforeUnmount(() => {
         </el-alert>
         <el-alert
           v-if="drafts.currentDraft && reimbursementOptionsUnavailable"
-          :title="templateNeedsAdmin ? '请联系管理员确认 OA 表单' : '暂时无法读取报销表单'"
+          :title="templateNeedsAdmin ? (auth.isAdmin ? '请前往系统设置确认 OA 表单' : '请联系管理员确认 OA 表单') : '暂时无法读取报销表单'"
           :description="drafts.reimbursementOptionsError"
           type="warning"
           :closable="false"
           class="workspace-alert"
         >
-          <el-button
-            type="primary"
-            :loading="drafts.loadingReimbursementOptions"
-            @click="refreshFormOptions"
-          >
-            {{ templateNeedsAdmin ? '重新检查表单' : '刷新表单与审批' }}
-          </el-button>
+          <div class="form-options-actions">
+            <el-button
+              v-if="templateNeedsAdmin && auth.isAdmin"
+              type="primary"
+              @click="openTemplateSettings"
+            >
+              前往系统设置确认表单
+            </el-button>
+            <el-button
+              :type="templateNeedsAdmin && auth.isAdmin ? 'default' : 'primary'"
+              :loading="drafts.loadingReimbursementOptions"
+              @click="refreshFormOptions"
+            >
+              {{ templateNeedsAdmin ? '重新检查表单' : '刷新表单与审批' }}
+            </el-button>
+          </div>
         </el-alert>
         <section
           v-if="accountingOptionsChanged || needsApprovalReconfirmation"
@@ -2625,6 +2680,9 @@ onBeforeUnmount(() => {
 .department-choice-copy { margin: 0 0 16px; color: var(--el-text-color-regular); line-height: 1.7; }
 .department-choice-select { width: 100%; }
 .identity-grid { margin-bottom: 0; }
+.form-options-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.form-options-actions .el-button { margin: 0; }
+.page-shell--mobile .form-options-actions .el-button { flex: 1 1 160px; min-height: 44px; }
 .plain-fieldset, .editor-fieldset { min-width: 0; padding: 0; margin: 0; border: 0; }
 .editor-fieldset { display: flex; flex-direction: column; gap: var(--workspace-gap); }
 .accounting-verification-alert {
