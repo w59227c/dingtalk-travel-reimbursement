@@ -150,6 +150,7 @@ async function recoverNotCreated(
 
 <template>
   <el-card
+    id="submission-recovery"
     shadow="never"
     class="submission-recovery-card"
   >

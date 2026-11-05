@@ -40,6 +40,9 @@ const props = withDefaults(defineProps<{
           </RouterLink>
           <a href="#approval-diagnostics">审批诊断</a>
           <a href="#receipt-diagnostics">票据诊断</a>
+          <a href="#attendance-calendar">节假日与调休</a>
+          <a href="#submission-recovery">异常提交恢复</a>
+          <a href="#oa-template-catalog">OA 模板目录</a>
         </nav>
         <h1>系统设置</h1>
       </div>

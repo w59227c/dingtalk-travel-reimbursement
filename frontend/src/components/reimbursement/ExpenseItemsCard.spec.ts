@@ -1201,6 +1201,128 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('selects and changes itineraries without opening or saving expense fields (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const invoice = taxiInvoice()
+    drafts.files = [invoice, recognizedItinerary(), recognizedItinerary('proof-2')]
+    expense.upsertDraftOcrItem(invoice)
+    const item = expense.items[0]!
+    item.itineraryAutoMatchDisabled = true
+    const before = { ...item, itineraryFileIds: [] }
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    const row = () => wrapper.get(mobile ? '.expense-mobile-card' : '.el-table__row')
+    const field = () => wrapper.findAllComponents({ name: 'ElFormItem' })
+      .find((entry) => entry.props('label') === '对应行程单')!
+    const dialog = () => wrapper.findAllComponents({ name: 'ElDialog' }).find((entry) => entry.props('modelValue'))!
+    const button = (label: string) => dialog().findAll('button').find((entry) => entry.text().trim() === label)!
+    const clickRow = (label: string) => row().findAll('button').find((entry) => entry.text().trim() === label)!.trigger('click')
+    await flushPromises()
+
+    await clickRow('选择行程单')
+    expect(dialog().props('title')).toBe('关联行程单')
+    expect(dialog().findAllComponents({ name: 'ElFormItem' }).map((entry) => entry.props('label'))).toEqual(['对应行程单'])
+    const summary = wrapper.get('[data-testid="itinerary-picker-summary"]').text()
+    expect(summary).toContain(item.displayDate)
+    expect(summary).toContain(item.description)
+    expect(summary).toContain('¥60.00')
+    expect(button('保存关联').attributes('disabled')).toBeDefined()
+    const selector = () => field().findComponent({ name: 'ElSelect' })
+    const choose = (selection: string | string[]) => selector().vm.$emit('update:modelValue', selection)
+    await button('关联多个已上传文件').trigger('click')
+    expect(selector().props('multiple')).toBe(true)
+    await button('切回单选').trigger('click')
+    expect(selector().props('multiple')).toBe(false)
+    expect(selector().props('modelValue')).toBeUndefined()
+
+    choose('proof-1')
+    await flushPromises()
+    await button('关联多个已上传文件').trigger('click')
+    expect(selector().props('modelValue')).toEqual(['proof-1'])
+    await button('切回单选').trigger('click')
+    expect(selector().props('modelValue')).toBe('proof-1')
+
+    await button('关联多个已上传文件').trigger('click')
+    choose(['proof-2', 'proof-1'])
+    await flushPromises()
+    await button('切回单选').trigger('click')
+    expect(selector().props('placeholder')).toBe('选择要保留的一份')
+    expect(button('保存关联').attributes('disabled')).toBeDefined()
+    await button('取消切换').trigger('click')
+    expect(selector().props('modelValue')).toEqual(['proof-2', 'proof-1'])
+    await button('切回单选').trigger('click')
+    choose('proof-1')
+    await flushPromises()
+    expect(selector().props('multiple')).toBe(false)
+    expect(selector().props('modelValue')).toBe('proof-1')
+    expect(item.itineraryFileIds).toEqual([])
+    await button('保存关联').trigger('click')
+    await flushPromises()
+    expect(item).toEqual({ ...before, itineraryFileIds: ['proof-1'] })
+
+    await clickRow('更改关联')
+    expect(dialog().props('title')).toBe('关联行程单')
+    expect(field().findComponent({ name: 'ElSelect' }).props('modelValue')).toBe('proof-1')
+    choose('proof-2')
+    await button('取消').trigger('click')
+    expect(item.itineraryFileIds).toEqual(['proof-1'])
+    await clickRow('更改关联')
+    choose('proof-2')
+    await flushPromises()
+    drafts.files = drafts.files.filter((file) => file.id !== 'proof-2')
+    await flushPromises()
+    await button('保存关联').trigger('click')
+    expect(item.itineraryFileIds).toEqual(['proof-1'])
+    expect(dialog().props('title')).toBe('关联行程单')
+    await button('取消').trigger('click')
+
+    await clickRow('编辑')
+    expect(dialog().props('title')).toBe('编辑费用明细')
+    expect(dialog().findAllComponents({ name: 'ElFormItem' }).map((entry) => entry.props('label')))
+      .toEqual(expect.arrayContaining(['费用类别', '对应行程单']))
+    expect(wrapper.find('[data-testid="itinerary-picker-summary"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('uploads from an empty picker without auto-linking, even after reopening (mobile=%s)', async (mobile) => {
+    const expense = useExpenseStore()
+    expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const invoice = taxiInvoice()
+    drafts.files = [invoice]
+    expense.upsertDraftOcrItem(invoice)
+    const proof = { ...recognizedItinerary(), materialClassification: {
+      status: 'confirmed', kind: 'itinerary', reason: null, pageCount: 1, manualAssociation: true,
+    } as const }
+    vi.mocked(uploadReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2,
+      file: { ...proof, ocrResult: null, ocrStatus: 'NOT_REQUESTED' } })
+    vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 3, file: proof })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+    await wrapper.get(mobile ? '.expense-mobile-card' : '.el-table__row').findAll('button')
+      .find((entry) => entry.text() === '选择行程单')!.trigger('click')
+    expect(wrapper.text()).toContain('还没有可关联的行程单')
+    await wrapper.get('[data-testid="editor-itinerary-upload"]').trigger('click')
+    await selectFiles(wrapper, 'durable-itinerary-input', [new File(['pdf'], proof.name, { type: 'application/pdf' })])
+    await flushPromises()
+    expect(uploadReimbursementDraftFile).toHaveBeenCalledWith('draft-1', 1, expect.any(File),
+      expect.objectContaining({ role: 'ATTACHMENT_ONLY', attachmentKind: 'itinerary', manualItineraryAssociation: true }))
+    expect(recognizeReimbursementDraftFile).toHaveBeenCalledOnce()
+    expect(expense.items[0]!.itineraryFileIds).toEqual([])
+    const field = wrapper.findAllComponents({ name: 'ElFormItem' }).find((entry) => entry.props('label') === '对应行程单')!
+    expect(field.findComponent({ name: 'ElOption' }).props('value')).toBe(proof.id)
+    await wrapper.findAll('button').find((entry) => entry.text().trim() === '取消')!.trigger('click')
+    expect(expense.items[0]!.itineraryAutoMatchDisabled).toBe(false)
+    wrapper.unmount()
+    const reopened = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+    expect(expense.items[0]!.itineraryFileIds).toEqual([])
+    reopened.unmount()
+  })
+
   it.each(['invoice_first', 'itinerary_first'])('matches itinerary OCR without creating an expense in %s order and persists through hydration', async (order) => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
@@ -2863,6 +2985,74 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('shows submitted expenses and retained file names without edit actions, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = { ...draft(8), status: 'LOCKED' }
+    const source = recognizedFile('file-1', '已提交发票.pdf', '10.00')
+    drafts.files = [{ ...source, status: 'PURGED' },
+      serverFile('extra', '已提交的附加材料.pdf', 'ATTACHMENT_ONLY', { status: 'PURGED' })]
+    useExpenseStore().upsertDraftOcrItem(source)
+    const wrapper = mount(ExpenseItemsCard, {
+      props: { mobile, readonly: true, submitted: true },
+      global: { plugins: [pinia, ElementPlus] },
+    })
+    await flushPromises()
+    expect(wrapper.text()).toContain('已提交发票.pdf')
+    const materials = wrapper.get('[data-testid="material-workbench"]')
+    expect(materials.text()).toContain('随报销提交的材料')
+    expect(materials.text()).not.toContain('待处理材料')
+    expect(wrapper.text()).toContain('已提交的附加材料.pdf')
+    const extra = wrapper.get('[data-material-file-id="extra"]')
+    expect(extra.get('.receipt-tags').text()).toContain('原件已清理')
+    expect(extra.get('button').attributes()).toHaveProperty('disabled')
+    expect(wrapper.text()).toContain('10.00')
+    expect(wrapper.get(mobile ? '.expense-mobile-card .expense-date' : '.expense-table .expense-date').text())
+      .toBe(source.ocrResult?.date)
+    expect(wrapper.text()).not.toContain('手动添加')
+    expect(wrapper.text()).not.toContain('上传报销材料')
+    expect(wrapper.findAll('button').some((button) => ['编辑', '删除'].includes(button.text()))).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('can retry failed material preview in the dialog, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    drafts.files = [serverFile('file-1', '发票.png', 'ATTACHMENT_ONLY', { mediaType: 'image/png' })]
+    vi.mocked(getReimbursementFileContent)
+      .mockRejectedValueOnce(new Error('材料暂时无法读取'))
+      .mockResolvedValueOnce(new Blob(['fixture'], { type: 'image/png' }))
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = vi.fn().mockReturnValue('blob:retry-preview')
+      static revokeObjectURL = vi.fn()
+    })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await wrapper.get('[aria-label="预览材料 发票.png"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.receipt-preview-surface').text()).toContain('材料暂时无法读取')
+    await wrapper.get('.receipt-preview-surface button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="receipt-preview-page"]').attributes('src')).toBe('blob:retry-preview')
+    expect(wrapper.get('.receipt-preview-surface').text()).not.toContain('材料暂时无法读取')
+    expect(getReimbursementFileContent).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('shows upload reservations as progress without material actions, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(2)
+    drafts.pendingUploads = [{ id: 'reserved-1', name: '其他页面的材料.png', status: 'WRITING' }]
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    const progress = wrapper.get('[data-pending-uploads]')
+    expect(progress.element.nextElementSibling?.classList.contains('upload-guidance')).toBe(true)
+    expect(progress.text()).toContain('还有 1 份材料尚未完成上传')
+    expect(progress.text()).toContain('其他页面的材料.png · 正在上传')
+    expect(progress.get('button').text()).toBe('刷新材料状态')
+    expect(wrapper.find('.receipt-row').exists()).toBe(false)
+    await progress.get('button').trigger('click')
+    expect(wrapper.emitted('refresh-material-status')).toHaveLength(1)
+    wrapper.unmount()
+  })
+
   it('retries one transient compatible PDF render failure without leaving a blank preview', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
@@ -3039,7 +3229,7 @@ describe('ExpenseItemsCard durable files', () => {
     expect(operationColumn?.props('width')).toBe(145)
     const columns = wrapper.findAllComponents({ name: 'ElTableColumn' })
     expect(columns.find((column) => column.props('label') === '类型')?.props('width')).toBe(120)
-    expect(columns.find((column) => column.props('label') === '日期')?.props('width')).toBe(105)
+    expect(columns.find((column) => column.props('label') === '日期')?.props('width')).toBe(120)
     expect(columns.find((column) => column.props('label') === '说明')?.props('minWidth')).toBe(200)
     expect(columns.find((column) => column.props('label') === '金额 / 张数')?.props('width')).toBe(120)
     expect(wrapper.getComponent({ name: 'ElTable' }).props('tableLayout')).toBe('fixed')

@@ -6,10 +6,14 @@ import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 
 const props = withDefaults(defineProps<{
   mobile?: boolean
+  readonly?: boolean
+  previewOnly?: boolean
   previewDisabledReason?: string
   beforePreview?: () => Promise<void>
 }>(), {
   mobile: false,
+  readonly: false,
+  previewOnly: false,
   previewDisabledReason: '',
   beforePreview: undefined,
 })
@@ -56,8 +60,12 @@ async function downloadExcel(): Promise<void> {
     v-loading="expense.calculating"
     shadow="never"
     class="content-card summary-card"
+    :class="{ 'summary-card--preview-only': props.previewOnly }"
   >
-    <div class="totals-grid">
+    <div
+      v-if="!props.previewOnly"
+      class="totals-grid"
+    >
       <div><span>票据金额</span><strong>¥{{ expense.displayExpenseTotal }}</strong></div>
       <div><span>出差补助</span><strong>{{ expense.missingCalendarYears.length ? '待核对' : `¥${expense.displaySubsidyTotal}` }}</strong></div>
       <div><span>票据张数</span><strong>{{ expense.displayReceiptCount }} 张</strong></div>
@@ -66,11 +74,19 @@ async function downloadExcel(): Promise<void> {
       </div>
     </div>
     <el-alert
-      v-if="summaryCalculationError"
+      v-if="!props.previewOnly && summaryCalculationError"
       :title="summaryCalculationError"
       type="error"
       :closable="false"
-    />
+    >
+      <el-button
+        v-if="!props.readonly && !expense.itemReadinessError"
+        :loading="expense.calculating"
+        @click="expense.refreshCalculations()"
+      >
+        重新计算
+      </el-button>
+    </el-alert>
     <div class="excel-download-action">
       <el-button
         :loading="drafts.downloadingPreview"
@@ -87,7 +103,7 @@ async function downloadExcel(): Promise<void> {
         {{ disabledReason }}
       </p>
       <p
-        v-else
+        v-else-if="!props.previewOnly"
         class="field-help excel-preview-help"
       >
         {{ props.mobile
@@ -95,10 +111,16 @@ async function downloadExcel(): Promise<void> {
           : '预览前会自动保存当前内容。' }}
       </p>
     </div>
+    <slot name="submission" />
   </el-card>
 </template>
 
 <style scoped>
+.summary-card--preview-only { margin: 0; border: 0; border-radius: 0; background: transparent; overflow: visible; }
+.summary-card.summary-card--preview-only :deep(.el-card__body) { padding: 0; }
+.summary-card--preview-only .excel-download-action { margin: 0; justify-items: start; }
+.summary-card--preview-only .excel-download-action :deep(.el-button) { min-width: 0; width: auto; }
+.summary-card--preview-only .field-error { margin: 6px 0 0; }
 .excel-preview-help {
   max-width: 520px;
   text-align: right;

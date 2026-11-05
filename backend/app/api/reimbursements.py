@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError
 from app.database.session import get_db
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
 from app.schemas.common import success
@@ -15,10 +16,12 @@ from app.schemas.reimbursements import (
     UpdateReimbursementDraftRequest,
 )
 from app.services.reimbursement_drafts import (
+    DraftActor,
     create_reimbursement_draft,
     draft_actor,
     get_reimbursement_draft,
     list_reimbursement_drafts,
+    list_reimbursement_submission_history,
     mark_reimbursement_draft_review_ready,
     replace_related_approvals,
     update_reimbursement_draft,
@@ -29,6 +32,20 @@ from app.services.sessions import CurrentSession, get_current_session, require_c
 router = APIRouter(tags=["reimbursement-drafts"])
 
 
+def _checked_actor(
+    current: CurrentSession, expected_id: str | None, expected_name: str | None,
+) -> DraftActor:
+    actor = draft_actor(current)
+    if (
+        (expected_id is not None and actor.department_id != expected_id)
+        or (expected_name is not None and actor.department_name != expected_name)
+    ):
+        raise ApiError(
+            "REIMBURSEMENT_DEPARTMENT_CHANGED", "当前报销部门已变化，请刷新页面后重试", 409,
+        )
+    return actor
+
+
 @router.post("/reimbursements/drafts", status_code=status.HTTP_201_CREATED)
 def create_draft(
     body: CreateReimbursementDraftRequest,
@@ -36,13 +53,15 @@ def create_draft(
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(require_csrf)],
 ) -> dict[str, object]:
+    actor = _checked_actor(current, body.expected_department_id, body.expected_department_name)
     return success(
         create_reimbursement_draft(
             database,
-            actor=draft_actor(current),
+            actor=actor,
             draft_input=body.input,
             ttl_days=request.app.state.settings.reimbursement_draft_ttl_days,
             max_items=request.app.state.settings.expense_max_items,
+            reuse_existing=body.reuse_existing,
         )
     )
 
@@ -53,13 +72,34 @@ def list_drafts(
     current: Annotated[CurrentSession, Depends(get_current_session)],
     offset: Annotated[int, Query(ge=0, le=10_000)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    expected_id: Annotated[str | None, Query(alias="expectedDepartmentId", max_length=128)] = None,
+    expected_name: Annotated[
+        str | None, Query(alias="expectedDepartmentName", max_length=255)
+    ] = None,
 ) -> dict[str, object]:
     return success(
         list_reimbursement_drafts(
             database,
-            actor=draft_actor(current),
+            actor=_checked_actor(current, expected_id, expected_name),
             offset=offset,
             limit=limit,
+        )
+    )
+
+
+@router.get("/reimbursements/submission-history")
+def list_submission_history(
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(get_current_session)],
+    expected_id: Annotated[str | None, Query(alias="expectedDepartmentId", max_length=128)] = None,
+    expected_name: Annotated[
+        str | None, Query(alias="expectedDepartmentName", max_length=255)
+    ] = None,
+) -> dict[str, object]:
+    return success(
+        list_reimbursement_submission_history(
+            database,
+            actor=_checked_actor(current, expected_id, expected_name),
         )
     )
 

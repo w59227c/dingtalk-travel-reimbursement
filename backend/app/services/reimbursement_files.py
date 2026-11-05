@@ -227,28 +227,40 @@ def list_draft_files(
     *,
     draft_id: str,
     actor: DraftActor,
-) -> tuple[int, list[DraftFileSnapshot]]:
+) -> tuple[int, list[DraftFileSnapshot], list[dict[str, str]]]:
     draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    pending_statuses = {
+        ReimbursementDraftFileStatus.RESERVED.value,
+        ReimbursementDraftFileStatus.WRITING.value,
+    }
     visible_file_status = ReimbursementDraftFile.file_status.in_(
         {
             ReimbursementDraftFileStatus.ACTIVE.value,
             ReimbursementDraftFileStatus.DELETING.value,
-        }
+        } | pending_statuses
     )
     if draft.status == ReimbursementDraftStatus.LOCKED.value:
-        locked_input = ReimbursementDraftInput.model_validate_json(draft.input_json)
-        referenced_file_ids = {
-            file_id
-            for item in locked_input.items
-            for file_id in (
-                item.source_file_id,
-                *item.itinerary_file_ids,
-                *item.payment_proof_file_ids,
-                *item.hotel_bill_file_ids,
-                *item.receipt_attachment_file_ids,
-            )
-            if file_id is not None
-        }
+        submission = database.scalar(
+            select(ReimbursementSubmission).where(ReimbursementSubmission.draft_id == draft.id)
+        )
+        if submission is not None:
+            snapshot = parse_locked_submission_snapshot(draft, submission)
+            referenced_file_ids = {item.draft_file_id for item in snapshot.original_files}
+        else:
+            # A legacy lock without a snapshot can only identify files linked to its input.
+            locked_input = ReimbursementDraftInput.model_validate_json(draft.input_json)
+            referenced_file_ids = {
+                file_id
+                for item in locked_input.items
+                for file_id in (
+                    item.source_file_id,
+                    *item.itinerary_file_ids,
+                    *item.payment_proof_file_ids,
+                    *item.hotel_bill_file_ids,
+                    *item.receipt_attachment_file_ids,
+                )
+                if file_id is not None
+            }
         if referenced_file_ids:
             visible_file_status = or_(
                 visible_file_status,
@@ -263,7 +275,14 @@ def list_draft_files(
         )
         .order_by(ReimbursementDraftFile.sort_order, ReimbursementDraftFile.id)
     ).all()
-    return draft.revision, [_snapshot(item) for item in files]
+    complete = []
+    pending = []
+    for file in files:
+        if file.file_status in pending_statuses:
+            pending.append({"id": file.id, "name": file.original_name, "status": file.file_status})
+        else:
+            complete.append(_snapshot(file))
+    return draft.revision, complete, pending
 
 
 def read_draft_file_content(
@@ -321,6 +340,7 @@ async def persist_draft_upload(
     process_runner: KillableProcessRunner,
     attachment_kind: ReimbursementAttachmentKind = ReimbursementAttachmentKind.OTHER,
     auto_classify: bool = False,
+    manual_itinerary_association: bool = False,
 ) -> DraftFileMutationResult:
     if auto_classify and (
         processing_role is not ReimbursementDraftFileRole.ATTACHMENT_ONLY
@@ -329,6 +349,11 @@ async def persist_draft_upload(
         raise ApiError("VALIDATION_ERROR", "自动分类材料请使用未指定用途的附件上传", 422)
     if processing_role is ReimbursementDraftFileRole.EXPENSE_SOURCE and attachment_kind != "other":
         raise ApiError("VALIDATION_ERROR", "费用来源文件不能指定证明材料用途", 422)
+    if manual_itinerary_association and (
+        processing_role is not ReimbursementDraftFileRole.ATTACHMENT_ONLY
+        or attachment_kind != ReimbursementAttachmentKind.ITINERARY
+    ):
+        raise ApiError("VALIDATION_ERROR", "仅行程单可要求手动关联", 422)
     size_bytes, first_bytes, worker_path = _inspect_upload_spool(upload, settings=settings)
     upload_type = validate_upload_type(upload.filename, first_bytes)
     page_count = await validate_new_file(
@@ -404,25 +429,26 @@ async def persist_draft_upload(
     )
     reservation: QuotaReservation | None = None
     finalized = False
+    metadata: dict[str, object] = {}
+    if auto_classify:
+        metadata = {
+            _PIPELINE_INPUT_HASH_KEY: pipeline_input_hash,
+            MATERIAL_CLASSIFICATION_KEY: {
+                "status": "pending", "kind": "unknown", "reason": None, "pageCount": page_count,
+            },
+        }
+    elif manual_itinerary_association:
+        metadata[MATERIAL_CLASSIFICATION_KEY] = {
+            "status": "confirmed", "kind": "itinerary", "reason": None,
+            "pageCount": page_count, "manualAssociation": True,
+        }
     try:
         reservation = quota.reserve_draft_file(
             owner,
             sort_order=sort_order,
             processing_role=processing_role,
             attachment_kind=attachment_kind.value,
-            ocr_result_json=json.dumps(
-                {
-                    _PIPELINE_INPUT_HASH_KEY: pipeline_input_hash,
-                    MATERIAL_CLASSIFICATION_KEY: {
-                        "status": "pending",
-                        "kind": "unknown",
-                        "reason": None,
-                        "pageCount": page_count,
-                    },
-                }
-            )
-            if auto_classify
-            else None,
+            ocr_result_json=json.dumps(metadata) if metadata else None,
             original_name=upload_type.original_name,
             extension=upload_type.extension,
             media_type=upload_type.media_type,
@@ -545,12 +571,18 @@ def update_draft_file(
         file.ocr_result_json = None
     if confirms_purpose:
         payload = json.loads(file.ocr_result_json) if file.ocr_result_json else {}
-        payload[MATERIAL_CLASSIFICATION_KEY] = {
+        next_classification = {
             "status": "confirmed",
             "kind": "expense" if next_role == "EXPENSE_SOURCE" else next_kind,
             "reason": None,
             "pageCount": classification.get("pageCount") if classification else None,
         }
+        if (
+            next_kind == "itinerary" and classification
+            and classification.get("manualAssociation") is True
+        ):
+            next_classification["manualAssociation"] = True
+        payload[MATERIAL_CLASSIFICATION_KEY] = next_classification
         file.ocr_result_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     new_revision = bump_owned_draft_revision(

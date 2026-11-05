@@ -1,4 +1,5 @@
 :root {
+  --expense-amount-color: #166adb;
   color: #172033;
   background: #f4f7fb;
   font-family:
@@ -131,7 +132,7 @@ a {
   background: #f0f7ff;
   color: #475467;
 }
-.subsidy-preview strong { margin-left: auto; color: #0958d9; }
+.subsidy-preview strong { margin-left: auto; color: var(--expense-amount-color); }
 .section-note { margin-left: 10px; color: #98a2b3; font-size: 13px; }
 .visually-hidden {
   position: absolute;
@@ -260,7 +261,7 @@ a {
 }
 .totals-grid span { color: #667085; font-size: 13px; }
 .totals-grid strong { font-size: 18px; }
-.totals-grid .grand-total { background: #eaf3ff; color: #0958d9; }
+.totals-grid .grand-total { background: #eaf3ff; color: var(--expense-amount-color); }
 .excel-download-action {
   display: grid;
   justify-items: end;

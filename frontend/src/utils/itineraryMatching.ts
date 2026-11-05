@@ -69,7 +69,7 @@ export function matchItineraries(items: readonly ExpenseItem[], files: readonly 
   })
   const itineraries: ItineraryEvidence[] = files.flatMap((file) => {
     const result = file.ocrResult
-    if (!isActiveProof(file, 'itinerary') || !isItineraryOcrResult(result)
+    if (!isActiveProof(file, 'itinerary') || file.materialClassification?.manualAssociation || !isItineraryOcrResult(result)
       || result.fileId !== file.id || result.status !== 'recognized' || !result.complete
       || result.processedPageCount !== result.pageCount || result.warnings.length || result.error) return []
     const tokens = identifiers(result.summary)

@@ -87,6 +87,23 @@ describe.each([false, true])('approval query bounds, mobile=%s', (mobile) => {
     expect(load).toHaveBeenCalledWith({ from: '2025-10-30', to: '2026-04-27' })
     wrapper.unmount()
   })
+  it('refreshes template options before retrying a stale approval search with the same filters', async () => {
+    const drafts = useReimbursementDraftStore()
+    drafts.travelApprovalsError = '审批模板配置已更新'
+    drafts.travelApprovalsErrorCode = 'OA_TEMPLATE_CONFIGURATION_CHANGED'
+    const calls: string[] = []
+    vi.spyOn(drafts, 'loadReimbursementOptions').mockImplementation(async () => { calls.push('options') })
+    const load = vi.spyOn(drafts, 'loadTravelApprovals').mockImplementation(async () => { calls.push('approvals') })
+    const wrapper = mount(TravelApprovalSelector, { props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] } })
+    await wrapper.get('input[aria-label="搜索出差审批"]').setValue('合肥')
+    await nextTick()
+    await wrapper.get('.travel-query-alert button').trigger('click')
+    await nextTick()
+    expect(calls).toEqual(['options', 'approvals'])
+    expect(load).toHaveBeenCalledWith({ query: '合肥' })
+    wrapper.unmount()
+  })
+
   it('keeps upstream date rejections actionable instead of offering blind retries', () => {
     const drafts = useReimbursementDraftStore()
     drafts.travelApprovalsError = '钉钉拒绝当前查询日期，请调整日期'
@@ -109,13 +126,17 @@ describe('TravelApprovalSelector', () => {
     }
   })
 
-  it('uses an explicit mobile query layout instead of relying on the WebView viewport', () => {
+  it.each([false, true])('uses the matching approval header and query layout, mobile=%s', (mobile) => {
     const wrapper = mount(TravelApprovalSelector, {
-      props: { modelValue: [], mobile: true },
+      props: { modelValue: [selection], mobile },
       global: { plugins: [ElementPlus] },
     })
 
-    expect(wrapper.get('.travel-query-grid').classes()).toContain('travel-query-grid--mobile')
+    const header = wrapper.get('.travel-approval-heading')
+    expect(header.classes().includes('travel-approval-heading--mobile')).toBe(mobile)
+    expect(header.get('h2').text()).toBe('关联已通过的出差审批')
+    expect(header.get('.travel-approval-count').text()).toBe('已选 1 张')
+    expect(wrapper.get('.travel-query-grid').classes().includes('travel-query-grid--mobile')).toBe(mobile)
     expect(wrapper.get('.travel-query-button').classes()).toContain('travel-query-button')
     wrapper.unmount()
   })

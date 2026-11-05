@@ -113,7 +113,7 @@ def get_files(
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(get_current_session)],
 ) -> dict[str, object]:
-    revision, files = list_draft_files(
+    revision, files, pending_uploads = list_draft_files(
         database,
         draft_id=draft_id,
         actor=draft_actor(current),
@@ -131,6 +131,7 @@ def get_files(
                 )
                 for item in files
             ],
+            **({"pendingUploads": pending_uploads} if pending_uploads else {}),
         }
     )
 
@@ -153,6 +154,9 @@ async def upload_file(
         ReimbursementAttachmentKind, Query(alias="attachmentKind")
     ] = ReimbursementAttachmentKind.OTHER,
     auto_classify: Annotated[bool, Query(alias="autoClassify")] = False,
+    manual_itinerary_association: Annotated[
+        bool, Query(alias="manualItineraryAssociation")
+    ] = False,
 ) -> dict[str, object]:
     _require_multipart(request)
     actor = draft_actor(current)
@@ -193,6 +197,7 @@ async def upload_file(
                 processing_role=role,
                 attachment_kind=attachment_kind,
                 auto_classify=auto_classify,
+                manual_itinerary_association=manual_itinerary_association,
                 settings=settings,
                 session_factory=session_factory,
                 quota=quota,

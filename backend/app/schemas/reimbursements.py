@@ -256,6 +256,13 @@ class CreateReimbursementDraftRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     expected_revision: int = Field(alias="expectedRevision", ge=0, le=0, strict=True)
+    reuse_existing: bool = Field(default=False, alias="reuseExisting", strict=True)
+    expected_department_id: str | None = Field(
+        default=None, alias="expectedDepartmentId", max_length=128,
+    )
+    expected_department_name: str | None = Field(
+        default=None, alias="expectedDepartmentName", max_length=255,
+    )
     input: ReimbursementDraftInput
 
 

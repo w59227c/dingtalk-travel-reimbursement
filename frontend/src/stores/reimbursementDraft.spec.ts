@@ -685,7 +685,25 @@ describe('persistent reimbursement draft store', () => {
     expect(listReimbursementDraftFiles).toHaveBeenCalledOnce()
     expect(store.currentDraft?.revision).toBe(3)
     expect(store.revisionConflict).toBe(true)
-    expect(store.mutationError).toContain('已加载最新内容')
+    expect(store.mutationError).toContain('核对最新报销内容')
+  })
+
+  it('flags changed business input read back after a file upload loses its response', async () => {
+    vi.mocked(createReimbursementDraft).mockResolvedValue(draft())
+    vi.mocked(uploadReimbursementDraftFile).mockRejectedValueOnce(new Error('上传连接中断'))
+    vi.mocked(getReimbursementDraft).mockResolvedValue({ ...draft('draft-1', 2), input: {
+      ...input, items: [{ ...input.items[0]!, amount: '88.88' }],
+    } })
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({ draftId: 'draft-1', revision: 2, items: [] })
+    const store = useReimbursementDraftStore()
+    await store.createDraft(input)
+
+    await expect(store.uploadFile(new File(['proof'], 'proof.pdf'), 'ATTACHMENT_ONLY', 'itinerary'))
+      .rejects.toThrow('上传连接中断')
+
+    expect(store.currentDraft?.input.items[0]?.amount).toBe('88.88')
+    expect(store.revisionConflict).toBe(true)
+    expect(store.mutationError).toContain('核对最新报销内容')
   })
 
   it('deletes one expected revision and removes or clears its local state', async () => {

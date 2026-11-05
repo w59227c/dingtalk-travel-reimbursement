@@ -47,6 +47,18 @@ vi.mock('@/api/settings', async (importOriginal) => {
 })
 
 describe('SettingsAdminView receipt keywords', () => {
+  it.each([false, true])('links to the template, calendar and submission recovery controls, mobile=%s', async (mobile) => {
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile }, global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } },
+    })
+    await flushPromises()
+    for (const id of ['attendance-calendar', 'submission-recovery', 'oa-template-catalog']) {
+      expect(wrapper.find(`a[href="#${id}"]`).exists()).toBe(true)
+      expect(wrapper.find(`#${id}`).exists()).toBe(true)
+    }
+    wrapper.unmount()
+  })
+
   it.each([false, true])('does not mount any settings tool for an employee, mobile=%s', async (mobile) => {
     const pinia = adminPinia(); useAuthStore(pinia).session!.isAdmin = false
     const wrapper = mount(SettingsAdminView, { props: { mobile }, global: { plugins: [pinia, ElementPlus], stubs: { RouterLink: true } } })

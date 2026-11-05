@@ -99,6 +99,7 @@ export interface ReimbursementDraft extends ReimbursementDraftSummary {
   input: ReimbursementDraftInput
   totals: ExpenseTotals
   attachmentMode?: 'excel_only' | 'bundle_and_excel'
+  submittedDetails?: { employeeName: string; companyLabel: string; budgetLabel: string; travelTypeLabel: string }
   relatedApprovals: ReimbursementRelatedApproval[]
   relatedApprovalSummary: ReimbursementRelatedApprovalSummary | null
 }
@@ -108,6 +109,12 @@ export interface ReimbursementDraftList {
   offset: number
   limit: number
   total: number
+}
+
+export interface ReimbursementSubmissionHistoryEntry {
+  id: string
+  lockedAt: string
+  relatedApprovalCount: number
 }
 
 export interface OaReimbursementTravelProfile {
@@ -223,6 +230,7 @@ export interface ReimbursementDraftFile {
     kind: 'expense' | 'itinerary' | 'payment_proof' | 'hotel_bill' | 'other' | 'unknown'
     reason: string | null
     pageCount: number | null
+    manualAssociation?: boolean
     error?: {
       code: string
       message: string
@@ -239,6 +247,13 @@ export interface ReimbursementDraftFileList {
   draftId: string
   revision: number
   items: ReimbursementDraftFile[]
+  pendingUploads?: ReimbursementPendingUpload[]
+}
+
+export interface ReimbursementPendingUpload {
+  id: string
+  name: string
+  status: 'RESERVED' | 'WRITING'
 }
 
 export interface ReimbursementDraftFileMutation {

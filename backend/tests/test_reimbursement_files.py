@@ -167,6 +167,42 @@ def test_upload_is_durable_private_and_recovers_after_restart(client_factory) ->
     }
 
 
+@pytest.mark.parametrize("status", ["RESERVED", "WRITING"])
+def test_lists_owned_upload_progress_without_exposing_incomplete_content(
+    client_factory,
+    status: str,
+) -> None:
+    client = client_factory(auth_mock_enabled=True)
+    mock_login(client)
+    draft_id = _insert_draft(client)
+    coordinator = client.app.state.reimbursement_quota
+    owner = DraftFileOwner("corp-fixed", "mock-user", draft_id, 1)
+    reservation = coordinator.reserve_draft_file(
+        owner,
+        sort_order=0,
+        processing_role=ReimbursementDraftFileRole.EXPENSE_SOURCE,
+        original_name="正在上传的票据.png",
+        extension="png",
+        media_type="image/png",
+        reserved_bytes=256,
+        expires_at=utc_now() + timedelta(minutes=5),
+    )
+    if status == "WRITING":
+        coordinator.mark_writing(owner, reservation)
+
+    files_url = f"/api/reimbursements/drafts/{draft_id}/files"
+    listed = client.get(files_url)
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"]["revision"] == 2
+    assert listed.json()["data"]["items"] == []
+    (item,) = listed.json()["data"]["pendingUploads"]
+    assert item["id"] == reservation.record_id
+    assert item["status"] == status
+    assert item["name"] == "正在上传的票据.png"
+    assert "storage" not in listed.text.lower()
+    assert client.get(f"{files_url}/{reservation.record_id}/content").status_code == 404
+
+
 def test_upload_rejects_duplicate_content_without_changing_the_draft(client_factory) -> None:
     client = client_factory(auth_mock_enabled=True)
     csrf = str(mock_login(client)["csrfToken"])

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import type {
@@ -54,6 +54,9 @@ const localError = ref('')
 const queryNeedsAdjustment = computed(() => !!approvalQueryDateError(fromDate.value, toDate.value) || [
   'TRAVEL_APPROVAL_QUERY_HISTORY_UNAVAILABLE', 'TRAVEL_APPROVAL_QUERY_FUTURE',
   'TRAVEL_APPROVAL_QUERY_WINDOW_INVALID', 'DINGTALK_QUERY_TIME_INVALID',
+].includes(drafts.travelApprovalsErrorCode))
+const optionsNeedRefresh = computed(() => [
+  'OA_TEMPLATE_CONFIGURATION_CHANGED', 'OA_TEMPLATE_SCHEMA_CHANGED', 'OA_TEMPLATE_CONFIRMATION_REQUIRED',
 ].includes(drafts.travelApprovalsErrorCode))
 const candidateCache = new Map<string, OaTravelApproval>()
 
@@ -139,6 +142,18 @@ async function search(): Promise<void> {
     ...(keyword.value.trim() ? { query: keyword.value.trim() } : {}),
   })
 }
+
+async function retrySearch(): Promise<void> {
+  if (drafts.loadingReimbursementOptions || drafts.loadingTravelApprovals) return
+  if (optionsNeedRefresh.value) {
+    await drafts.loadReimbursementOptions()
+    await nextTick()
+    if (drafts.reimbursementOptionsError) return
+  }
+  await search()
+}
+
+defineExpose({ search })
 
 function selectionForRow(row: ApprovalRow): ReimbursementRelatedApprovalSelection | null {
   const existing = props.modelValue.find(
@@ -235,7 +250,10 @@ function accountingLabel(row: ApprovalRow): string {
     aria-labelledby="travel-approval-heading"
     :aria-busy="busy"
   >
-    <div class="card-header travel-approval-heading">
+    <div
+      class="card-header travel-approval-heading"
+      :class="{ 'travel-approval-heading--mobile': props.mobile }"
+    >
       <div>
         <h2 id="travel-approval-heading">
           {{ props.single ? '选择本次出差申请' : '关联已通过的出差审批' }}
@@ -248,6 +266,7 @@ function accountingLabel(row: ApprovalRow): string {
         </p>
       </div>
       <el-tag
+        class="travel-approval-count"
         :type="modelValue.length ? 'success' : 'warning'"
         effect="light"
       >
@@ -293,12 +312,12 @@ function accountingLabel(row: ApprovalRow): string {
           maxlength="100"
           placeholder="标题或审批编号"
           aria-label="搜索出差审批"
-          @keyup.enter="search"
+          @keyup.enter="retrySearch"
         />
         <el-button
           class="travel-query-button"
           :loading="drafts.loadingTravelApprovals"
-          @click="search"
+          @click="retrySearch"
         >
           查询审批
         </el-button>
@@ -318,12 +337,13 @@ function accountingLabel(row: ApprovalRow): string {
     >
       <template #default>
         <el-button
-          v-if="drafts.travelApprovalsError && !queryNeedsAdjustment"
+          v-if="!queryNeedsAdjustment"
           link
           type="primary"
-          @click="search"
+          :loading="drafts.loadingReimbursementOptions || drafts.loadingTravelApprovals"
+          @click="retrySearch"
         >
-          重新加载
+          {{ optionsNeedRefresh ? '刷新表单与审批' : '重新加载' }}
         </el-button>
       </template>
     </el-alert>
@@ -343,8 +363,8 @@ function accountingLabel(row: ApprovalRow): string {
     >
       <el-button
         v-if="!readonly && !queryNeedsAdjustment"
-        :loading="drafts.loadingTravelApprovals"
-        @click="search"
+        :loading="drafts.loadingReimbursementOptions || drafts.loadingTravelApprovals"
+        @click="retrySearch"
       >
         重新加载
       </el-button>
@@ -427,6 +447,16 @@ function accountingLabel(row: ApprovalRow): string {
   font-size: 13px;
   line-height: 1.55;
 }
+
+.travel-approval-heading--mobile {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+}
+.travel-approval-heading--mobile > div { display: contents; }
+.travel-approval-heading--mobile p { grid-column: 1 / -1; grid-row: 2; margin: 0; }
+.travel-approval-heading--mobile .travel-approval-count { grid-column: 2; grid-row: 1; }
 
 .travel-query-grid {
   display: grid;

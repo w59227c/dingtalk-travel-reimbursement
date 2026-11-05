@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -74,6 +74,7 @@ class DraftCalculation:
     input_data: dict[str, object]
     totals_data: dict[str, object]
     attachment_mode: str | None = None
+    submitted_details: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,9 +203,9 @@ def create_reimbursement_draft(
     draft_input: ReimbursementDraftInput,
     ttl_days: int,
     max_items: int,
+    reuse_existing: bool = False,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    created_at = now or utc_now()
     if _draft_file_reference_ids(draft_input) or any(
         item.itinerary_file_ids or item.payment_proof_file_ids or item.hotel_bill_file_ids
         or item.receipt_attachment_file_ids
@@ -221,6 +222,7 @@ def create_reimbursement_draft(
         }
     )
     catalog = require_submission_ready_catalog(database)
+    # Calculating subsidies can seed settings and commit on an empty database.
     calculation = validate_and_calculate_input(
         database,
         catalog=catalog,
@@ -228,24 +230,49 @@ def create_reimbursement_draft(
         max_items=max_items,
         allow_partial=True,
     )
-    binding = CatalogBinding.from_catalog(catalog)
-    draft = ReimbursementDraft(
-        corp_id=actor.corp_id,
-        owner_user_id=actor.user_id,
-        status=ReimbursementDraftStatus.DRAFT.value,
-        revision=1,
-        department_id=actor.department_id,
-        department_name=actor.department_name,
-        template_process_code=binding.process_code,
-        template_config_version=binding.config_version,
-        schema_fingerprint=binding.schema_fingerprint,
-        input_json=calculation.canonical_json,
-        related_instance_ids_json="[]",
-        expires_at=created_at + timedelta(days=ttl_days),
-        created_at=created_at,
-        updated_at=created_at,
-    )
     try:
+        if reuse_existing:
+            # Serialize the lookup and insert across tabs and application workers.
+            database.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            catalog = require_submission_ready_catalog(database)
+        created_at = now or utc_now()
+        binding = CatalogBinding.from_catalog(catalog)
+        if reuse_existing:
+            existing = database.scalar(
+                select(ReimbursementDraft)
+                .where(
+                    ReimbursementDraft.corp_id == actor.corp_id,
+                    ReimbursementDraft.owner_user_id == actor.user_id,
+                    ReimbursementDraft.department_id == actor.department_id,
+                    ReimbursementDraft.department_name == actor.department_name,
+                    ReimbursementDraft.status.in_(_MUTABLE_STATUSES),
+                    ReimbursementDraft.locked_at.is_(None),
+                    ReimbursementDraft.expires_at > created_at,
+                    ReimbursementDraft.template_process_code == binding.process_code,
+                    ReimbursementDraft.template_config_version == binding.config_version,
+                )
+                .order_by(ReimbursementDraft.updated_at.desc(), ReimbursementDraft.id.desc())
+                .limit(1)
+            )
+            if existing is not None:
+                database.commit()
+                return draft_data(database, existing, now=created_at)
+        draft = ReimbursementDraft(
+            corp_id=actor.corp_id,
+            owner_user_id=actor.user_id,
+            status=ReimbursementDraftStatus.DRAFT.value,
+            revision=1,
+            department_id=actor.department_id,
+            department_name=actor.department_name,
+            template_process_code=binding.process_code,
+            template_config_version=binding.config_version,
+            schema_fingerprint=binding.schema_fingerprint,
+            input_json=calculation.canonical_json,
+            related_instance_ids_json="[]",
+            expires_at=created_at + timedelta(days=ttl_days),
+            created_at=created_at,
+            updated_at=created_at,
+        )
         database.add(draft)
         database.commit()
         database.refresh(draft)
@@ -263,12 +290,7 @@ def list_reimbursement_drafts(
     limit: int,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    statement = select(ReimbursementDraft).where(
-        ReimbursementDraft.corp_id == actor.corp_id,
-        ReimbursementDraft.owner_user_id == actor.user_id,
-        ReimbursementDraft.department_id == actor.department_id,
-        ReimbursementDraft.department_name == actor.department_name,
-    )
+    statement = _department_drafts(actor)
     total = database.scalar(select(func.count()).select_from(statement.subquery())) or 0
     drafts = database.scalars(
         statement.order_by(
@@ -285,6 +307,39 @@ def list_reimbursement_drafts(
         "limit": limit,
         "total": total,
     }
+
+
+def list_reimbursement_submission_history(
+    database: Session,
+    *,
+    actor: DraftActor,
+) -> list[dict[str, object]]:
+    rows = database.scalars(
+        _department_drafts(actor)
+        .where(
+            ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
+            ReimbursementDraft.locked_at.is_not(None),
+        )
+        .order_by(ReimbursementDraft.locked_at.desc(), ReimbursementDraft.id.desc())
+        .limit(10)
+    ).all()
+    return [
+        {
+            "id": draft.id,
+            "lockedAt": _timestamp(draft.locked_at),
+            "relatedApprovalCount": _related_id_count(draft.related_instance_ids_json),
+        }
+        for draft in rows
+    ]
+
+
+def _department_drafts(actor: DraftActor) -> Select[tuple[ReimbursementDraft]]:
+    return select(ReimbursementDraft).where(
+        ReimbursementDraft.corp_id == actor.corp_id,
+        ReimbursementDraft.owner_user_id == actor.user_id,
+        ReimbursementDraft.department_id == actor.department_id,
+        ReimbursementDraft.department_name == actor.department_name,
+    )
 
 
 def get_reimbursement_draft(
@@ -944,6 +999,10 @@ def draft_data(
         "input": calculation.input_data,
         "totals": calculation.totals_data,
         **({"attachmentMode": calculation.attachment_mode} if calculation.attachment_mode else {}),
+        **(
+            {"submittedDetails": calculation.submitted_details}
+            if calculation.submitted_details else {}
+        ),
         "relatedApprovals": [_related_data(item) for item in related],
         "relatedApprovalSummary": _related_summary(related),
     }
@@ -980,6 +1039,12 @@ def _locked_draft_calculation(
         input_data=_canonical_input_data(stored_input),
         totals_data=totals,
         attachment_mode=snapshot.attachment_mode or "bundle_and_excel",
+        submitted_details={
+            "employeeName": snapshot.identity.name,
+            "companyLabel": snapshot.selections.company.label,
+            "budgetLabel": snapshot.selections.budget_code.label,
+            "travelTypeLabel": snapshot.selections.travel_type.label,
+        },
     )
 
 

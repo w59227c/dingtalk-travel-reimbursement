@@ -30,6 +30,7 @@ import type {
   OaTravelApproval,
   OaTravelApprovalQueryWindow,
   ReimbursementDraft,
+  ReimbursementDraftDepartment,
   ReimbursementDraftDeletion,
   ReimbursementDraftFile,
   ReimbursementDraftFileDeletion,
@@ -38,6 +39,7 @@ import type {
   ReimbursementDraftFileUpdate,
   ReimbursementDraftInput,
   ReimbursementDraftSummary,
+  ReimbursementPendingUpload,
   ReimbursementRelatedApprovalSelection,
 } from '@/types/reimbursements'
 
@@ -59,6 +61,12 @@ interface DraftReadGuard {
   stateGeneration: number
 }
 
+interface DraftRead {
+  draft: ReimbursementDraft
+  files: ReimbursementDraftFile[]
+  pendingUploads: ReimbursementPendingUpload[]
+}
+
 interface RevisionedResult {
   revision: number
 }
@@ -66,8 +74,26 @@ interface RevisionedResult {
 interface MutationOptions {
   reloadAfterFailure?: boolean
   retryRevisionConflictOnce?: boolean
+  reconcileApprovalReadback?: boolean
+  removingFileIds?: readonly string[]
   pipeline?: FilePipeline
   benignErrorCodes?: readonly string[]
+}
+
+function inputAfterRemovingFiles(input: ReimbursementDraftInput, ids: ReadonlySet<string>): ReimbursementDraftInput {
+  if (!ids.size) return input
+  const retain = (id: string) => !ids.has(id)
+  return {
+    ...input,
+    items: input.items.filter((item) => !item.sourceFileId || retain(item.sourceFileId)).map((item) => ({
+      ...item,
+      itineraryFileIds: item.itineraryFileIds?.filter(retain),
+      paymentProofFileIds: item.paymentProofFileIds?.filter(retain),
+      hotelBillFileIds: item.hotelBillFileIds?.filter(retain),
+      receiptAttachmentFileIds: item.receiptAttachmentFileIds?.filter(retain),
+    })),
+    dismissedOcrFileIds: input.dismissedOcrFileIds.filter(retain),
+  }
 }
 
 interface FilePipeline {
@@ -99,6 +125,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   const travelApprovalTemplateConfigVersion = ref<number | null>(null)
   const currentDraft = ref<ReimbursementDraft | null>(null)
   const files = ref<ReimbursementDraftFile[]>([])
+  const pendingUploads = ref<ReimbursementPendingUpload[]>([])
   const loadingDrafts = ref(false)
   const loadingCurrentDraft = ref(false)
   const loadingReimbursementOptions = ref(false)
@@ -112,6 +139,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   const listError = ref('')
   const loadError = ref('')
   const reimbursementOptionsError = ref('')
+  const reimbursementOptionsErrorCode = ref('')
   const travelApprovalsError = ref('')
   const travelApprovalsErrorCode = ref('')
   const mutationError = ref('')
@@ -135,7 +163,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   let activeReimbursementOptionsController: AbortController | null = null
   let activeTravelApprovalsController: AbortController | null = null
   let activePreviewController: AbortController | null = null
-  let fileRefreshFlight: Promise<void> | null = null
+  let fileRefreshFlight: Promise<'revision-changed' | undefined> | null = null
   const controllers = new Set<AbortController>()
 
   const busy = computed(() =>
@@ -240,7 +268,10 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
           || JSON.stringify(result.draft.input) !== pipeline.inputSignature) {
           throw new Error('报销内容已发生变化，请刷新检查后继续')
         }
-        if (adoptDraft(result.draft, context, pipeline.draftId)) files.value = result.files
+        if (adoptDraft(result.draft, context, pipeline.draftId)) {
+          files.value = result.files
+          pendingUploads.value = result.pendingUploads
+        }
       }
       return true
     } catch (error) {
@@ -317,6 +348,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       activePreviewController = null
       currentDraft.value = null
       files.value = []
+      pendingUploads.value = []
       loadingCurrentDraft.value = false
       downloadingPreview.value = false
       uploading.value = false
@@ -376,13 +408,14 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   }
 
   function adoptDraftRead(
-    result: { draft: ReimbursementDraft; files: ReimbursementDraftFile[] },
+    result: DraftRead,
     context: RequestContext,
     guard: DraftReadGuard,
   ): boolean {
     if (result.draft.id !== guard.draftId || !acceptsDraftRead(context, guard)) return false
     if (!adoptDraft(result.draft, context, guard.draftId)) return false
     files.value = result.files
+    pendingUploads.value = result.pendingUploads
     return true
   }
 
@@ -429,7 +462,6 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     const context = requestContext()
     activeReimbursementOptionsController = context.controller
     loadingReimbursementOptions.value = true
-    reimbursementOptionsError.value = ''
     try {
       const result = await getOaReimbursementOptions({
         signal: context.controller.signal,
@@ -443,12 +475,15 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && travelApprovalTemplateConfigVersion.value !== result.templateConfigVersion
       ) clearTravelApprovals()
       reimbursementOptions.value = result
+      reimbursementOptionsError.value = ''
+      reimbursementOptionsErrorCode.value = ''
     } catch (error) {
       if (
         accepts(context)
         && requestVersion === reimbursementOptionsRequestVersion
         && !isCancellation(error)
       ) {
+        reimbursementOptionsErrorCode.value = apiErrorCode(error) ?? ''
         reimbursementOptionsError.value = apiErrorMessage(
           error,
           '报销选项加载失败，请重试',
@@ -489,6 +524,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && result.templateConfigVersion !== reimbursementOptions.value.templateConfigVersion
       ) {
         clearTravelApprovals()
+        travelApprovalsErrorCode.value = 'OA_TEMPLATE_CONFIGURATION_CHANGED'
         travelApprovalsError.value = '审批模板配置已更新，请重新加载报销选项和出差审批'
         return
       }
@@ -518,7 +554,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     }
   }
 
-  async function loadDrafts(offset = 0, limit = 50): Promise<void> {
+  async function loadDrafts(offset = 0, limit = 50, expectedDepartment?: ReimbursementDraftDepartment): Promise<void> {
     const collectionVersion = draftCollectionVersion
     const requestVersion = ++listRequestVersion
     activeListController?.abort()
@@ -530,6 +566,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       const result = await listReimbursementDrafts({
         offset,
         limit,
+        ...(expectedDepartment ? { expectedDepartment } : {}),
         signal: context.controller.signal,
       })
       if (
@@ -558,28 +595,29 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   async function readConsistentDraft(
     draftId: string,
     signal: AbortSignal,
-  ): Promise<{ draft: ReimbursementDraft; files: ReimbursementDraftFile[] }> {
+  ): Promise<DraftRead> {
     for (let attempt = 0; attempt < CONSISTENT_READ_ATTEMPTS; attempt += 1) {
       const [draft, fileList] = await Promise.all([
         getReimbursementDraft(draftId, { signal }),
         listReimbursementDraftFiles(draftId, { signal }),
       ])
       if (fileList.draftId === draft.id && fileList.revision === draft.revision) {
-        return { draft, files: fileList.items }
+        return { draft, files: fileList.items, pendingUploads: fileList.pendingUploads ?? [] }
       }
     }
     throw new Error('报销内容读取期间持续发生变化，请稍后重试')
   }
 
-  async function loadDraft(draftId: string): Promise<void> {
+  async function loadDraft(draftId: string, keepCurrent = false): Promise<void> {
     if (filePipeline) cancelFilePipeline(filePipeline.id)
     const previousDraftId = currentDraft.value?.id
     const intentVersion = previousDraftId === draftId
       ? currentIntentVersion
       : ++currentIntentVersion
-    if (previousDraftId !== undefined && previousDraftId !== draftId) {
+    if (!keepCurrent && previousDraftId !== undefined && previousDraftId !== draftId) {
       currentDraft.value = null
       files.value = []
+      pendingUploads.value = []
     }
     invalidateDetailRead()
     const requestVersion = ++detailRequestVersion
@@ -621,7 +659,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     }
   }
 
-  async function refreshCurrentFiles(): Promise<void> {
+  async function refreshCurrentFiles(): Promise<'revision-changed' | undefined> {
     if (fileRefreshFlight) return fileRefreshFlight
     const target = requireCurrentDraft()
     const draftId = target.id
@@ -641,10 +679,12 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
           && currentDraft.value?.id === draftId
           && currentDraft.value.revision === revision
           && result.draftId === draftId
-          && result.revision === revision
         ) {
+          if (result.revision !== revision) return 'revision-changed' as const
           files.value = result.items
+          pendingUploads.value = result.pendingUploads ?? []
         }
+        return undefined
       } finally {
         releaseRequest(context)
       }
@@ -655,7 +695,11 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     return operation
   }
 
-  async function createDraft(input: ReimbursementDraftInput): Promise<ReimbursementDraft> {
+  async function createDraft(
+    input: ReimbursementDraftInput,
+    reuseExisting = false,
+    expectedDepartment?: ReimbursementDraftDepartment,
+  ): Promise<ReimbursementDraft> {
     const intentVersion = ++currentIntentVersion
     invalidateDetailRead()
     const context = requestContext()
@@ -666,12 +710,27 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     try {
       const created = await createReimbursementDraft(input, {
         signal: context.controller.signal,
+        ...(reuseExisting ? { reuseExisting: true } : {}),
+        ...(expectedDepartment ? { expectedDepartment } : {}),
       })
+      if (expectedDepartment && (created.department.id !== expectedDepartment.id
+        || created.department.name !== expectedDepartment.name)) {
+        throw new Error('当前报销部门已变化，请刷新页面后重试')
+      }
       createdDraftId = created.id
+      if (reuseExisting && accepts(context) && intentVersion === currentIntentVersion) {
+        const guard = draftReadGuard(created.id, intentVersion)
+        const result = await readConsistentDraft(created.id, context.controller.signal)
+        adoptDraftRead(result, context, guard)
+        return result.draft
+      }
       if (
         intentVersion === currentIntentVersion
         && adoptDraft(created, context)
-      ) files.value = []
+      ) {
+        files.value = []
+        pendingUploads.value = []
+      }
       return created
     } catch (error) {
       if (
@@ -809,12 +868,20 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
               refreshGuard,
             )
             : false
-          const refreshedRevision = currentDraft.value?.id === draftId
-            ? currentDraft.value.revision
-            : null
+          const readback = currentDraft.value?.id === draftId ? currentDraft.value : null
+          const refreshedRevision = readback?.revision ?? null
+          const removedFileIds = new Set(options.removingFileIds?.filter((id) =>
+            !files.value.some((file) => file.id === id && file.status === 'ACTIVE')))
+          // A newer revision is safe to reuse only if the server still holds the
+          // same business input. The view may still be editing the old snapshot.
+          const inputChanged = refreshed && readback !== null && !options.reconcileApprovalReadback
+            && (JSON.stringify(readback.input) !== JSON.stringify(inputAfterRemovingFiles(target.input, removedFileIds))
+              || JSON.stringify(readback.relatedApprovals) !== JSON.stringify(target.relatedApprovals)
+              || !['DRAFT', 'REVIEW_READY'].includes(readback.status))
           if (
             conflict
             && refreshed
+            && !inputChanged
             && canRetryRevisionConflict
             && refreshedRevision !== null
             && refreshedRevision !== expectedRevision
@@ -833,10 +900,10 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
           ) {
             if (benign) {
               mutationError.value = ''
-            } else if (conflict) {
+            } else if (conflict || inputChanged) {
               revisionConflict.value = true
               mutationError.value = refreshed
-                ? '报销内容在操作期间已更新，已加载最新内容；请检查后重新操作'
+                ? '报销内容在操作期间已更新，请核对最新报销内容后重新操作'
                 : '报销内容在操作期间已更新，但最新内容加载失败；请手动重新加载'
             } else {
               const message = apiErrorMessage(error, fallbackMessage)
@@ -987,7 +1054,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       ),
       applyDraftMutation,
       '关联出差审批保存失败，请重试',
-      { reloadAfterFailure: true },
+      { reloadAfterFailure: true, reconcileApprovalReadback: true },
     )
   }
 
@@ -1010,6 +1077,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     attachmentKind: ReimbursementDraftFile['attachmentKind'] = 'other',
     autoClassify = false,
     pipelineId?: number,
+    manualItineraryAssociation = false,
   ): Promise<ReimbursementDraftFileMutation> {
     if (uploading.value) throw new Error('已有文件正在上传，请稍后再试')
     const pipeline = pipelineId === undefined ? null : requireFilePipeline(pipelineId)
@@ -1028,6 +1096,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
             role,
             attachmentKind,
             ...(autoClassify ? { autoClassify: true } : {}),
+            ...(manualItineraryAssociation ? { manualItineraryAssociation: true } : {}),
             signal,
             onProgress: (percent) => {
               if (
@@ -1095,7 +1164,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         }
       },
       '文件删除失败，请重试',
-      { reloadAfterFailure: true },
+      { reloadAfterFailure: true, removingFileIds: [fileId] },
     )
   }
 
@@ -1110,7 +1179,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         }
       },
       '清空文件失败，请重试',
-      { reloadAfterFailure: true },
+      { reloadAfterFailure: true, removingFileIds: files.value
+        .filter((file) => file.status === 'ACTIVE' || file.status === 'DELETING').map((file) => file.id) },
     )
   }
 
@@ -1318,6 +1388,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     clearTravelApprovals()
     currentDraft.value = null
     files.value = []
+    pendingUploads.value = []
     loadingDrafts.value = false
     loadingCurrentDraft.value = false
     loadingReimbursementOptions.value = false
@@ -1330,6 +1401,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     listError.value = ''
     loadError.value = ''
     reimbursementOptionsError.value = ''
+    reimbursementOptionsErrorCode.value = ''
     travelApprovalsError.value = ''
     travelApprovalsErrorCode.value = ''
     mutationError.value = ''
@@ -1347,6 +1419,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     travelApprovalTemplateConfigVersion,
     currentDraft,
     files,
+    pendingUploads,
     loadingDrafts,
     loadingCurrentDraft,
     loadingReimbursementOptions,
@@ -1359,6 +1432,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     listError,
     loadError,
     reimbursementOptionsError,
+    reimbursementOptionsErrorCode,
     travelApprovalsError,
     travelApprovalsErrorCode,
     mutationError,

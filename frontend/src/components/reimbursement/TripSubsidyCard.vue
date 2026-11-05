@@ -374,7 +374,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           <AttendanceDatesPicker
             v-if="attendanceMode(group)"
             :model-value="groupAttendanceDates(group)"
-            :calendar="expense.attendanceCalendar"
+            :calendar="props.readonly ? undefined : expense.attendanceCalendar"
             :start-date="subsidyWindow(group).startDate"
             :end-date="subsidyWindow(group).endDate"
             :readonly="props.readonly"
@@ -384,7 +384,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
             @refresh="refreshCalendar"
           />
           <p
-            v-if="attendanceMode(group) && drafts.reimbursementOptionsError"
+            v-if="!props.readonly && attendanceMode(group) && drafts.reimbursementOptionsError"
             class="subsidy-window-error"
             role="alert"
           >
@@ -511,7 +511,15 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
           type="error"
           :closable="false"
           class="subsidy-calculation-error"
-        />
+        >
+          <el-button
+            :disabled="props.readonly"
+            :loading="expense.calculating"
+            @click="expense.refreshCalculations()"
+          >
+            重新计算
+          </el-button>
+        </el-alert>
       </template>
     </el-form>
   </el-card>

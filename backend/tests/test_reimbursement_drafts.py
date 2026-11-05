@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -414,6 +416,158 @@ def test_create_list_read_and_update_draft_are_persistent_and_canonical(
             separators=(",", ":"),
             sort_keys=True,
         )
+
+
+def test_open_editable_draft_is_atomic_and_preserves_saved_content(
+    client_factory, monkeypatch,
+) -> None:
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    blank = {
+        "expectedRevision": 0,
+        "reuseExisting": True,
+        "input": {**_input(), "items": [], "trip": None},
+    }
+    barrier = Barrier(2)
+
+    def open_draft():
+        barrier.wait(timeout=5)
+        return client.post(
+            "/api/reimbursements/drafts",
+            json=blank,
+            headers=headers,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        requests = [pool.submit(open_draft) for _ in range(2)]
+        first, second = [request.result(timeout=10) for request in requests]
+    assert first.status_code == second.status_code == 201, (first.text, second.text)
+    draft = first.json()["data"]
+    assert second.json()["data"] == draft
+    assert client.get("/api/reimbursements/drafts").json()["data"]["total"] == 1
+
+    changed = _input()
+    changed["items"][0]["amount"] = "50.00"
+    updated = client.put(
+        f"/api/reimbursements/drafts/{draft['id']}",
+        json={"expectedRevision": 1, "input": changed},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    resumed = client.post(
+        "/api/reimbursements/drafts",
+        json=blank,
+        headers=headers,
+    )
+    assert resumed.status_code == 201, resumed.text
+    assert resumed.json()["data"] == updated.json()["data"]
+
+
+def test_open_editable_draft_skips_records_outside_current_scope_or_template(
+    client_factory, monkeypatch,
+) -> None:
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    url = "/api/reimbursements/drafts"
+    payload = {"expectedRevision": 0, "input": _input()}
+    excluded_records = [
+        {"corp_id": "different-corp"},
+        {"owner_user_id": "different-employee"},
+        {"department_id": "200"},
+        {"expires_at": utc_now() - timedelta(days=1)},
+        {"template_config_version": 11},
+        {"template_process_code": "OLD-PROCESS"},
+        {"status": ReimbursementDraftStatus.LOCKED.value, "locked_at": utc_now()},
+    ]
+    for overrides in excluded_records:
+        created = client.post(url, json=payload, headers=headers)
+        assert created.status_code == 201, created.text
+        with client.app.state.database_session_factory() as database:
+            record = database.get(ReimbursementDraft, created.json()["data"]["id"])
+            assert record is not None
+            for field, value in overrides.items():
+                setattr(record, field, value)
+            database.commit()
+
+    opened = client.post(url, json={**payload, "reuseExisting": True}, headers=headers)
+    assert opened.status_code == 201, opened.text
+    assert opened.json()["data"]["status"] == "DRAFT"
+    assert opened.json()["data"]["templateConfigVersion"] == 12
+    assert opened.json()["data"]["template"]["processCode"] == "PROC-REIMBURSEMENT"
+    assert client.get(url).json()["data"]["total"] == 5
+
+
+def test_submission_history_only_returns_ten_latest_submissions_in_current_scope(
+    client_factory, monkeypatch,
+) -> None:
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    url = "/api/reimbursements/submission-history"
+    assert client.get(url).status_code == 401
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    assert client.get(url).json()["data"] == []
+    created = client.post(
+        "/api/reimbursements/drafts", json={"expectedRevision": 0, "input": _input()},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+
+    now = utc_now()
+    with client.app.state.database_session_factory() as database:
+        source = database.get(ReimbursementDraft, created.json()["data"]["id"])
+        assert source is not None
+        scope = {
+            "corp_id": source.corp_id,
+            "owner_user_id": source.owner_user_id,
+            "department_id": source.department_id,
+            "department_name": source.department_name,
+            "template_process_code": source.template_process_code,
+            "template_config_version": source.template_config_version,
+            "schema_fingerprint": source.schema_fingerprint,
+            "expires_at": source.expires_at,
+        }
+        for index in range(12):
+            database.add(ReimbursementDraft(
+                **scope, id=f"synthetic-submission-{index:02d}", status="LOCKED",
+                locked_at=now - timedelta(days=20 - index // 2),
+                updated_at=now - timedelta(days=index),
+            ))
+        for index in range(55):
+            database.add(ReimbursementDraft(**scope, id=f"synthetic-draft-{index:02d}"))
+        for field, value in (
+            ("corp_id", "another-corp"), ("owner_user_id", "another-employee"),
+            ("department_id", "200"), ("department_name", "其他测试部门"),
+        ):
+            database.add(ReimbursementDraft(
+                **{**scope, field: value}, status="LOCKED", locked_at=now,
+            ))
+        database.commit()
+
+    response = client.get(url)
+    assert response.status_code == 200, response.text
+    records = response.json()["data"]
+    assert [record["id"] for record in records] == [
+        f"synthetic-submission-{index:02d}" for index in range(11, 1, -1)
+    ]
+    assert all(set(record) == {"id", "lockedAt", "relatedApprovalCount"} for record in records)
+    with client.app.state.database_session_factory() as database:
+        assert database.get(ReimbursementDraft, "synthetic-submission-00") is not None
+
+    for endpoint in (url, "/api/reimbursements/drafts"):
+        for scope in ({"expectedDepartmentId": "200"}, {"expectedDepartmentName": "另一部门"}):
+            stale = client.get(endpoint, params=scope)
+            assert stale.status_code == 409, stale.text
+            assert stale.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_CHANGED"
+    stale_create = client.post(
+        "/api/reimbursements/drafts",
+        json={"expectedRevision": 0, "reuseExisting": True, "expectedDepartmentId": "200",
+              "input": _input()},
+        headers=headers,
+    )
+    assert stale_create.status_code == 409, stale_create.text
+    assert stale_create.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_CHANGED"
 
 
 def test_employee_original_currency_edit_intent_is_persisted(

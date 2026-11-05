@@ -482,6 +482,7 @@ export const useReimbursementSubmissionStore = defineStore(
             '提交进度获取失败，请刷新重试',
           )
           if (submission.value !== null) schedulePoll(submission.value)
+          else requestAction.value = 'discover'
         }
         throw error
       } finally {
@@ -496,7 +497,7 @@ export const useReimbursementSubmissionStore = defineStore(
 
     function pollNow(): Promise<ReimbursementSubmission | null> {
       const current = submission.value
-      if (current === null || isTerminal(current.status)) {
+      if (current === null || (isTerminal(current.status) && current.status !== 'MANUAL_REVIEW')) {
         polling.value = false
         clearPollTimer()
         return Promise.resolve(current)

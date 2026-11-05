@@ -7,6 +7,7 @@ import type {
   OaReimbursementOptions,
   OaTravelApprovalList,
   ReimbursementDraft,
+  ReimbursementDraftDepartment,
   ReimbursementDraftFile,
   ReimbursementDraftDeletion,
   ReimbursementDraftFileDeletion,
@@ -21,6 +22,7 @@ import type {
   ReimbursementExcelPreviewTicket,
   ReimbursementRelatedApprovalSelection,
   ReimbursementSubmission,
+  ReimbursementSubmissionHistoryEntry,
   SubmitReimbursementInput,
 } from '@/types/reimbursements'
 
@@ -36,12 +38,18 @@ export interface ReimbursementRequestOptions {
 export interface ListReimbursementDraftsOptions extends ReimbursementRequestOptions {
   offset?: number
   limit?: number
+  expectedDepartment?: ReimbursementDraftDepartment
+}
+
+function expectedDepartmentParams(department?: ReimbursementDraftDepartment) {
+  return department ? { expectedDepartmentId: department.id, expectedDepartmentName: department.name } : {}
 }
 
 export interface UploadReimbursementDraftFileOptions extends ReimbursementRequestOptions {
   role?: ReimbursementDraftFileRole
   attachmentKind?: ReimbursementDraftFile['attachmentKind']
   autoClassify?: boolean
+  manualItineraryAssociation?: boolean
   onProgress?: (percent: number) => void
 }
 
@@ -115,11 +123,12 @@ async function normalizeBlobApiError(error: unknown): Promise<never> {
 
 export async function createReimbursementDraft(
   input: ReimbursementDraftInput,
-  options: ReimbursementRequestOptions = {},
+  options: ReimbursementRequestOptions & { reuseExisting?: boolean; expectedDepartment?: ReimbursementDraftDepartment } = {},
 ): Promise<ReimbursementDraft> {
   const response = await http.post<ApiEnvelope<ReimbursementDraft>>(
     '/reimbursements/drafts',
-    { expectedRevision: 0, input },
+    { expectedRevision: 0, input, ...(options.reuseExisting ? { reuseExisting: true } : {}),
+      ...expectedDepartmentParams(options.expectedDepartment) },
     { signal: options.signal },
   )
   return response.data.data
@@ -134,9 +143,20 @@ export async function listReimbursementDrafts(
       params: {
         offset: options.offset ?? 0,
         limit: options.limit ?? 50,
+        ...expectedDepartmentParams(options.expectedDepartment),
       },
       signal: options.signal,
     },
+  )
+  return response.data.data
+}
+
+export async function listReimbursementSubmissionHistory(
+  options: ReimbursementRequestOptions & { expectedDepartment?: ReimbursementDraftDepartment } = {},
+): Promise<ReimbursementSubmissionHistoryEntry[]> {
+  const response = await http.get<ApiEnvelope<ReimbursementSubmissionHistoryEntry[]>>(
+    '/reimbursements/submission-history',
+    { signal: options.signal, params: expectedDepartmentParams(options.expectedDepartment) },
   )
   return response.data.data
 }
@@ -236,6 +256,7 @@ export async function uploadReimbursementDraftFile(
         role: options.role ?? 'EXPENSE_SOURCE',
         attachmentKind: options.attachmentKind ?? 'other',
         ...(options.autoClassify ? { autoClassify: true } : {}),
+        ...(options.manualItineraryAssociation ? { manualItineraryAssociation: true } : {}),
       },
       signal: options.signal,
       timeout: 120_000,

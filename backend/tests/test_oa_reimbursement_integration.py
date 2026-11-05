@@ -777,9 +777,20 @@ def test_subsidy_only_submission_manifest_readback_retry_and_cleanup(
     assert restored.json()["data"]["attachmentMode"] == (
         "bundle_and_excel" if with_materials else "excel_only"
     )
+    files_response = client.get(f"/api/reimbursements/drafts/{draft_id}/files")
+    assert files_response.status_code == 200, files_response.text
+    assert [(file["id"], file["status"]) for file in files_response.json()["data"]["items"]] == [
+        (file_id, "PURGED") for file_id in source_ids
+    ]
     with client.app.state.database_session_factory() as database:
         submission = database.get(ReimbursementSubmission, submission_id)
         snapshot = json.loads(submission.form_snapshot_json)
+        assert restored.json()["data"]["submittedDetails"] == {
+            "employeeName": snapshot["identity"]["name"],
+            "companyLabel": snapshot["selections"]["company"]["label"],
+            "budgetLabel": snapshot["selections"]["budgetCode"]["label"],
+            "travelTypeLabel": snapshot["selections"]["travelType"]["label"],
+        }
         assert snapshot["snapshotVersion"] == 11
         assert snapshot["attachmentMode"] == (
             "bundle_and_excel" if with_materials else "excel_only"

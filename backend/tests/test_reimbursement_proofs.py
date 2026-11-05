@@ -295,7 +295,8 @@ def test_upload_persists_explicit_attachment_purpose(client_factory, kind):
     assert listed.json()["data"]["items"][0]["attachmentKind"] == kind
 
 
-def test_itinerary_ocr_is_persisted_without_adding_an_expense(client_factory):
+@pytest.mark.parametrize("manual_association", [False, True])
+def test_itinerary_ocr_is_persisted_without_adding_an_expense(client_factory, manual_association):
     engine = FakeOcrEngine(
         {
             "*": [
@@ -314,7 +315,10 @@ def test_itinerary_ocr_is_persisted_without_adding_an_expense(client_factory):
     before = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]["input"]
     uploaded = client.post(
         f"/api/reimbursements/drafts/{draft_id}/files",
-        params={"expectedRevision": 1, "role": "ATTACHMENT_ONLY", "attachmentKind": "itinerary"},
+        params={
+            "expectedRevision": 1, "role": "ATTACHMENT_ONLY", "attachmentKind": "itinerary",
+            **({"manualItineraryAssociation": True} if manual_association else {}),
+        },
         headers=headers,
         files=[("files[]", ("itinerary.png", _image_bytes(), "image/png"))],
     )
@@ -339,7 +343,28 @@ def test_itinerary_ocr_is_persisted_without_adding_an_expense(client_factory):
     ][0]
     assert restored["attachmentKind"] == "itinerary"
     assert restored["ocrResult"] == file["ocrResult"]
+    classification = restored["materialClassification"] or {}
+    assert bool(classification.get("manualAssociation")) == manual_association
     assert restarted.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]["input"] == before
+
+
+def test_rejects_manual_itinerary_association_for_other_materials(client_factory):
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": str(mock_login(client)["csrfToken"])}
+    draft_id = _insert_draft(client)
+    uploaded = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/files",
+        params={
+            "expectedRevision": 1, "role": "ATTACHMENT_ONLY", "attachmentKind": "payment_proof",
+            "manualItineraryAssociation": True,
+        },
+        headers=headers,
+        files=[("files[]", ("proof.png", _image_bytes(), "image/png"))],
+    )
+    assert uploaded.status_code == 422, uploaded.text
+    listed = client.get(f"/api/reimbursements/drafts/{draft_id}/files").json()["data"]
+    assert listed["revision"] == 1
+    assert listed["items"] == []
 
 
 @pytest.mark.parametrize("kind", ["payment_proof", "other"])
