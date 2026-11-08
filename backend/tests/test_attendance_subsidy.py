@@ -240,11 +240,11 @@ def attendance_source():
 def test_attendance_snapshot_freezes_dates_explanation_and_rejects_tampering():
     snapshot = build_snapshot(attendance_source())
     assert snapshot.snapshot_version == 11
-    assert snapshot.attendance_description_format == "monthly_ranges_hyphen"
+    assert snapshot.subsidy_description_format == "compact_effective_periods"
     assert snapshot.input.trip.attendance_dates == (date(2026, 9, 1), date(2026, 9, 3))
     raw = serialize_snapshot(snapshot)
     assert parse_snapshot(raw) == snapshot
-    assert "出勤2天" in raw and "出勤日期" in raw
+    assert "2026/9/1—2026/9/3，计补2天" in raw
     tampered = json.loads(raw)
     tampered["input"]["trip"]["attendanceDates"] = ["2026-09-01", "2026-09-02"]
     with pytest.raises(ApiError):
@@ -283,12 +283,13 @@ def test_attendance_excel_uses_frozen_dates_and_amount():
         subsidies=value.subsidies,
         totals=value.totals,
         detailed_subsidies=value.detailed_subsidies,
+        compact_subsidies=value.compact_subsidies,
         attendance_description_format=value.attendance_description_format,
     )
     workbook = load_workbook(BytesIO(result.content))
     texts = [str(cell.value) for row in workbook.active for cell in row if cell.value is not None]
-    assert any("出勤2天" in text and "100.00元" in text for text in texts)
-    assert any("出勤日期（2026年9月）：1日、3日" in text for text in texts)
+    assert any("2天 × 50元/天 = 100元" in text for text in texts)
+    assert any("2026年9月：1日、3日" in text for text in texts)
     workbook.close()
 
 
@@ -313,6 +314,13 @@ def test_legacy_city_snapshot_keeps_original_half_day_result_and_json(monkeypatc
     original_model = payloads.ReimbursementSnapshot
 
     def legacy_model(**values):
+        values["subsidy_description_format"] = None
+        values["form_values"] = tuple(
+            value.model_copy(update={"value": payloads._description_v1(
+                values["input"].items, values["subsidy"], values["totals"], values["subsidies"],
+            )}) if value.logical_key == "description" else value
+            for value in values["form_values"]
+        )
         return original_model(**{**values, "snapshot_version": 10})
 
     with monkeypatch.context() as patch:

@@ -499,6 +499,23 @@ def test_open_editable_draft_skips_records_outside_current_scope_or_template(
     assert client.get(url).json()["data"]["total"] == 5
 
 
+def _add_history_submission(database, draft, *, status="QUEUED", resume_status=None):
+    database.add(draft)
+    database.flush()
+    database.add(ReimbursementSubmission(
+        draft_id=draft.id, corp_id=draft.corp_id,
+        originator_user_id=draft.owner_user_id, originator_union_id="synthetic-union",
+        originator_name="测试员工", department_id=draft.department_id,
+        department_name=draft.department_name,
+        template_process_code=draft.template_process_code,
+        template_config_version=draft.template_config_version,
+        schema_fingerprint=draft.schema_fingerprint,
+        form_snapshot_json="{}", related_instance_ids_json="[]",
+        snapshot_sha256="a" * 64, idempotency_key_hash="b" * 64,
+        status=status, resume_status=resume_status,
+    ))
+
+
 def test_submission_history_only_returns_ten_latest_submissions_in_current_scope(
     client_factory, monkeypatch,
 ) -> None:
@@ -529,20 +546,28 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
             "expires_at": source.expires_at,
         }
         for index in range(12):
-            database.add(ReimbursementDraft(
+            record = ReimbursementDraft(
                 **scope, id=f"synthetic-submission-{index:02d}", status="LOCKED",
                 locked_at=now - timedelta(days=20 - index // 2),
                 updated_at=now - timedelta(days=index),
-            ))
+            )
+            _add_history_submission(database, record, status="QUEUED")
         for index in range(55):
             database.add(ReimbursementDraft(**scope, id=f"synthetic-draft-{index:02d}"))
+        # A full page of newer definite failures must not crowd out real history.
+        for index in range(12):
+            record = ReimbursementDraft(
+                **scope, id=f"synthetic-failure-{index:02d}", status="LOCKED", locked_at=now,
+            )
+            _add_history_submission(database, record, status="FAILED_FINAL")
         for field, value in (
             ("corp_id", "another-corp"), ("owner_user_id", "another-employee"),
             ("department_id", "200"), ("department_name", "其他测试部门"),
         ):
-            database.add(ReimbursementDraft(
+            record = ReimbursementDraft(
                 **{**scope, field: value}, status="LOCKED", locked_at=now,
-            ))
+            )
+            _add_history_submission(database, record)
         database.commit()
 
     response = client.get(url)
@@ -568,6 +593,41 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
     )
     assert stale_create.status_code == 409, stale_create.text
     assert stale_create.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_CHANGED"
+
+
+def test_submission_history_hides_definite_failures_but_preserves_uncertain_jobs(
+    client_factory, monkeypatch,
+):
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    cases = [
+        ("FAILED_FINAL", None, False),
+        ("MANUAL_REVIEW", None, True),
+        ("FAILED_RETRYABLE", "UPLOADING", True),
+        ("QUEUED", None, True),
+    ]
+    visible_ids = []
+    for status, resume_status, visible in cases:
+        created = client.post(
+            "/api/reimbursements/drafts", json={"expectedRevision": 0, "input": _input()},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        draft_id = created.json()["data"]["id"]
+        with client.app.state.database_session_factory() as database:
+            draft = database.get(ReimbursementDraft, draft_id)
+            draft.status = "LOCKED"
+            draft.locked_at = utc_now()
+            _add_history_submission(database, draft, status=status, resume_status=resume_status)
+            database.commit()
+        if visible:
+            visible_ids.insert(0, draft_id)
+    response = client.get("/api/reimbursements/submission-history")
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()["data"]] == visible_ids
+    with client.app.state.database_session_factory() as database:
+        assert database.query(ReimbursementSubmission).count() == len(cases)
 
 
 def test_employee_original_currency_edit_intent_is_persisted(

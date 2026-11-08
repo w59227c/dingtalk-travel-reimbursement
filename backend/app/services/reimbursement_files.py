@@ -1127,6 +1127,7 @@ async def generate_draft_excel_preview(
         trips=snapshot.excel.trips,
         subsidies=snapshot.excel.subsidies,
         detailed_subsidies=snapshot.excel.detailed_subsidies,
+        compact_subsidies=snapshot.excel.compact_subsidies,
         attendance_description_format=snapshot.excel.attendance_description_format,
     )
 

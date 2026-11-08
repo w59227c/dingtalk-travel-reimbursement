@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import Select, delete, func, select, update
+from sqlalchemy import Select, delete, exists, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -24,6 +24,7 @@ from app.models.reimbursement import (
     ReimbursementDraftStatus,
     ReimbursementOcrStatus,
     ReimbursementSubmission,
+    ReimbursementSubmissionStatus,
     utc_now,
 )
 from app.schemas.excel import ExcelExpenseItemInput
@@ -319,6 +320,12 @@ def list_reimbursement_submission_history(
         .where(
             ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
             ReimbursementDraft.locked_at.is_not(None),
+            exists().where(
+                ReimbursementSubmission.draft_id == ReimbursementDraft.id,
+                ReimbursementSubmission.corp_id == actor.corp_id,
+                ReimbursementSubmission.originator_user_id == actor.user_id,
+                ReimbursementSubmission.status != ReimbursementSubmissionStatus.FAILED_FINAL.value,
+            ),
         )
         .order_by(ReimbursementDraft.locked_at.desc(), ReimbursementDraft.id.desc())
         .limit(10)

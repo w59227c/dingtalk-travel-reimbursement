@@ -177,6 +177,35 @@ def excluded_effective_days(
     return Decimal(half_days) * HALF_DAY
 
 
+def effective_subsidy_periods(
+    period: TripPeriod,
+    excluded_periods: list[TripPeriod | SubsidyAdjustment],
+) -> tuple[TripPeriod, ...]:
+    """Project the calculation's paid half-days into chronological, disjoint periods."""
+    automatic_effective_days(period)
+    cursor = _half_day(period.start_date, period.start_time)
+    upper = _half_day(period.end_date, period.end_time) + 1
+    intervals = []
+    for start, end, _, _ in sorted(_adjustment_intervals(period, excluded_periods)):
+        start, end = max(start, cursor), min(end, upper)
+        if start >= end:
+            continue
+        if cursor < start:
+            intervals.append((cursor, start))
+        cursor = end
+    if cursor < upper:
+        intervals.append((cursor, upper))
+    return tuple(
+        TripPeriod(
+            start_date=date.fromordinal(start // 2),
+            start_time=time(18) if start % 2 else time(9),
+            end_date=date.fromordinal((end - 1) // 2),
+            end_time=time(18) if (end - 1) % 2 else time(9),
+        )
+        for start, end in intervals
+    )
+
+
 def automatic_effective_days(period: TripPeriod) -> Decimal:
     if period.end_date < period.start_date or (
         period.end_date == period.start_date and period.end_time < period.start_time

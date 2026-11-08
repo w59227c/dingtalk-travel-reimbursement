@@ -147,6 +147,16 @@ def test_locked_manual_receipt_metadata_survives_file_body_cleanup(client_factor
 
 
 def test_manual_receipt_is_frozen_in_v8_and_legacy_snapshots_still_roundtrip():
+    from app.services.oa_reimbursement_payload import _description_v1
+
+    def legacy_format(value):
+        return value.model_copy(update={
+            "subsidy_description_format": None,
+            "form_values": tuple(field.model_copy(update={"value": _description_v1(
+                value.input.items, value.subsidy, value.totals,
+            )}) if field.logical_key == "description" else field for field in value.form_values),
+        })
+
     source = _source()
     original = replace(
         source.original_files[0], processing_role="ATTACHMENT_ONLY", ocr_status="NOT_REQUESTED"
@@ -170,10 +180,10 @@ def test_manual_receipt_is_frozen_in_v8_and_legacy_snapshots_still_roundtrip():
     assert parse_snapshot(encoded) == snapshot
     assert snapshot.input.items[0].receipt_count == 12
     with pytest.raises(ValidationError, match="receipt attachments"):
-        serialize_snapshot(snapshot.model_copy(update={
+        serialize_snapshot(legacy_format(snapshot).model_copy(update={
             "snapshot_version": 7, "attachment_mode": None,
         }))
-    legacy = build_snapshot(source).model_copy(update={
+    legacy = legacy_format(build_snapshot(source)).model_copy(update={
         "snapshot_version": 7, "attachment_mode": None,
     })
     assert parse_snapshot(serialize_snapshot(legacy)) == legacy

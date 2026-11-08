@@ -37,6 +37,7 @@ from app.services.subsidy_description import (
     CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
     AttendanceDescriptionFormat,
     subsidy_explanation,
+    summarize_subsidies,
 )
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,7 @@ def _ordered_lines(
     subsidies: list[SubsidyCalculation] | tuple[SubsidyCalculation, ...] = (),
     detailed_subsidies: bool = True,
     attendance_format: AttendanceDescriptionFormat = CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
+    compact_subsidies: bool = True,
 ) -> list[OutputLine]:
     indexed_lines = [
         (
@@ -189,6 +191,24 @@ def _ordered_lines(
         # An overseas approval is a valid reimbursement relation but creates
         # no subsidy line.
         subsidy_pairs = []
+    if compact_subsidies and detailed_subsidies:
+        summary = summarize_subsidies(
+            [pair[0] for pair in subsidy_pairs], [pair[1] for pair in subsidy_pairs]
+        )
+        if summary is not None:
+            indexed_lines.append((
+                summary.last_date, len(items), OutputLine(
+                    category=ExpenseCategory.SUBSIDY,
+                    sort_date=summary.last_date,
+                    display_date=f"{summary.last_date.year}/{summary.last_date.month}/{summary.last_date.day}",
+                    description=summary.excel_lines[0],
+                    detail_lines=summary.excel_lines[1:],
+                    amount=summary.total,
+                    receipt_count=0,
+                    subsidy=True,
+                ),
+            ))
+        return [line for _, _, line in sorted(indexed_lines, key=lambda item: (item[0], item[1]))]
     for index, (subsidy_trip, subsidy_item) in enumerate(subsidy_pairs):
         explanation = (
             subsidy_explanation(subsidy_trip, subsidy_item, attendance_format=attendance_format)
@@ -349,6 +369,7 @@ def generate_expense_workbook(
     attendance_description_format: AttendanceDescriptionFormat = (
         CURRENT_ATTENDANCE_DESCRIPTION_FORMAT
     ),
+    compact_subsidies: bool = True,
 ) -> WorkbookResult:
     workbook, worksheet = load_validated_template(template_path)
     try:
@@ -387,6 +408,7 @@ def generate_expense_workbook(
             _ordered_lines(
                 items, trip, subsidy, trips, subsidies, detailed_subsidies,
                 attendance_description_format,
+                compact_subsidies,
             ),
             description_width,
         )

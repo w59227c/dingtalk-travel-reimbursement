@@ -302,8 +302,14 @@ def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(
     # union rule and the original concise OA description. New v9 rejects them.
     base = build_snapshot(source)
     historical = json.loads(serialize_snapshot(base))
+    from app.services.oa_reimbursement_payload import _description_v1
+
+    next(item for item in historical["formValues"] if item["logicalKey"] == "description")[
+        "value"
+    ] = _description_v1(base.input.items, base.subsidy, base.totals, base.subsidies)
     historical["snapshotVersion"] = version
     historical.pop("attachmentMode", None)
+    historical.pop("subsidyDescriptionFormat", None)
     historical["input"]["trip"]["excludedPeriods"] = (
         [period, period] if historical_overlap else [period]
     )
@@ -355,8 +361,12 @@ def test_snapshot_freezes_exclusions_rejects_tampering_and_keeps_v6_readable(
             json.dumps(tampered, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
     legacy = json.loads(serialize_snapshot(build_snapshot(source)))
+    next(item for item in legacy["formValues"] if item["logicalKey"] == "description")[
+        "value"
+    ] = _description_v1(base.input.items, base.subsidy, base.totals, base.subsidies)
     legacy["snapshotVersion"] = 6
     legacy.pop("attachmentMode", None)
+    legacy.pop("subsidyDescriptionFormat", None)
     legacy["input"]["trip"]["tripType"] = "project"
     raw_legacy = json.dumps(legacy, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     old_snapshot = parse_snapshot(raw_legacy)

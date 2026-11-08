@@ -96,9 +96,12 @@ from app.services.subsidy_calculation import (
 )
 from app.services.subsidy_description import (
     CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
+    CURRENT_SUBSIDY_DESCRIPTION_FORMAT,
     AttendanceDescriptionFormat,
     MonthlyAttendanceDescriptionFormat,
+    SubsidyDescriptionFormat,
     subsidy_explanation,
+    summarize_subsidies,
 )
 
 SNAPSHOT_VERSION = 11
@@ -413,6 +416,10 @@ class ReimbursementSnapshot(_SnapshotModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    subsidy_description_format: SubsidyDescriptionFormat | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     excel: SnapshotExcel
     form_values: tuple[SnapshotFormValue, ...]
 
@@ -483,6 +490,7 @@ class ExcelGenerationInput:
     subsidies: tuple[SubsidyCalculation, ...]
     totals: ExpenseTotals
     detailed_subsidies: bool = True
+    compact_subsidies: bool = True
     attendance_description_format: AttendanceDescriptionFormat = (
         CURRENT_ATTENDANCE_DESCRIPTION_FORMAT
     )
@@ -696,6 +704,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
         subsidies = tuple(
             _snapshot_subsidy(item) for item in source.totals_data.get("subsidies", [])
         )
+        subsidy_format = CURRENT_SUBSIDY_DESCRIPTION_FORMAT if subsidy or subsidies else None
         totals = _snapshot_totals(source.totals_data)
         related = tuple(_snapshot_related(item) for item in source.related_approvals)
         originals = tuple(_snapshot_original(item) for item in source.original_files)
@@ -722,6 +731,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
                 request_trips(trip=source.draft_input.trip, trips=source.draft_input.trips)
             )),
             detailed_subsidies=True,
+            subsidy_format=subsidy_format,
         )
         return ReimbursementSnapshot(
             draft_id=source.draft_id,
@@ -754,14 +764,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
             related_approvals=related,
             original_files=originals,
             attachment_mode="bundle_and_excel" if originals else "excel_only",
-            attendance_description_format=(
-                CURRENT_ATTENDANCE_DESCRIPTION_FORMAT
-                if any(
-                    item.attendance_dates is not None
-                    for item in (trips or ((trip,) if trip else ()))
-                )
-                else None
-            ),
+            subsidy_description_format=subsidy_format,
             excel=excel,
             form_values=form_values,
         )
@@ -851,6 +854,9 @@ def snapshot_excel_input(snapshot: ReimbursementSnapshot) -> ExcelGenerationInpu
         subsidies=tuple(item for item in subsidies if item is not None),
         totals=totals,
         detailed_subsidies=snapshot.snapshot_version >= 9,
+        compact_subsidies=(
+            snapshot.subsidy_description_format == CURRENT_SUBSIDY_DESCRIPTION_FORMAT
+        ),
         attendance_description_format=snapshot.attendance_description_format or "individual_dates",
     )
 
@@ -1374,6 +1380,7 @@ def _snapshot_form_values(
     subsidy_trips: tuple[TripInput, ...] = (),
     detailed_subsidies: bool = False,
     attendance_format: AttendanceDescriptionFormat = CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
+    subsidy_format: SubsidyDescriptionFormat | None = None,
 ) -> tuple[SnapshotFormValue, ...]:
     related_value = _canonical_json([item.process_instance_id for item in related])
     values = (
@@ -1383,8 +1390,12 @@ def _snapshot_form_values(
         start_date.isoformat(),
         end_date.isoformat(),
         str(duration_days),
-        _description_v2(items, subsidy, totals, subsidies, subsidy_trips, attendance_format)
-        if detailed_subsidies else _description_v1(items, subsidy, totals, subsidies),
+        (
+            _description_v3(items, subsidy, totals, subsidies, subsidy_trips)
+            if subsidy_format == CURRENT_SUBSIDY_DESCRIPTION_FORMAT else
+            _description_v2(items, subsidy, totals, subsidies, subsidy_trips, attendance_format)
+            if detailed_subsidies else _description_v1(items, subsidy, totals, subsidies)
+        ),
         money_string(totals.total_amount),
         related_value,
     )
@@ -1440,6 +1451,19 @@ def _description_v2(
     return "\n".join(lines)
 
 
+def _description_v3(items, subsidy, totals, subsidies, trips) -> str:
+    calculated = subsidies or ((subsidy,) if subsidy is not None else ())
+    summary = summarize_subsidies(trips, [_subsidy_from_snapshot(item) for item in calculated])
+    lines = _description_v1(items, None, totals).splitlines()[:-1]
+    if summary is not None:
+        lines.append(
+            f"{summary.last_date.isoformat()} 出差补助 "
+            f"{summary.oa_description}：{money_string(summary.total)}"
+        )
+    lines.append(f"合计：{money_string(totals.total_amount)}")
+    return "\n".join(lines)
+
+
 def generated_upload_manifest(
     snapshot: ReimbursementSnapshot,
 ) -> tuple[tuple[ReimbursementUploadRole, int], ...]:
@@ -1454,6 +1478,10 @@ def generated_upload_manifest(
 
 def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     trips = snapshot.input.trips or ((snapshot.input.trip,) if snapshot.input.trip else ())
+    if snapshot.subsidy_description_format is not None and (
+        snapshot.snapshot_version < 11 or not (snapshot.subsidy or snapshot.subsidies)
+    ):
+        raise ValueError("compact subsidy format requires v11 subsidy calculations")
     if snapshot.attendance_description_format is not None and (
         snapshot.snapshot_version < 11
         or not any(item.attendance_dates is not None for item in trips)
@@ -1817,6 +1845,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         subsidy_trips=tuple(output_trips),
         detailed_subsidies=snapshot.snapshot_version >= 9,
         attendance_format=snapshot.attendance_description_format or "individual_dates",
+        subsidy_format=snapshot.subsidy_description_format,
     )
     if snapshot.form_values != expected_values:
         raise ValueError("stored form values mismatch")

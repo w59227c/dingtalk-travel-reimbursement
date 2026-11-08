@@ -99,8 +99,9 @@ def test_overlapping_approvals_preview_and_submission_use_one_exact_date_union(c
     workbook = load_workbook(BytesIO(preview.content))
     try:
         text = "\n".join(str(cell.value) for row in workbook.active for cell in row if cell.value)
-        assert text.count("出勤日期（2026年9月）：1-3日") == 1
-        assert "出勤3天 × 50.00元/天 = 150.00元" in text
+        assert text.count("2026年9月：1-3日") == 1
+        assert "3天 × 50元/天 = 150元" in text
+        assert workbook.active["C4"].value == "2026/9/3"
     finally:
         workbook.close()
     response = client.post(
@@ -117,7 +118,7 @@ def test_overlapping_approvals_preview_and_submission_use_one_exact_date_union(c
         description = next(
             field["value"] for field in value["formValues"] if field["logicalKey"] == "description"
         )
-        assert description.count("出勤日期（2026年9月）：1-3日") == 1
+        assert description.count("2026-09-03 出差补助 2026/9/1—2026/9/3，计补3天：150.00") == 1
     worker = integration._worker(client, workflow, integration.LocalStorageBoundary())
     assert asyncio.run(worker.run_once())
     assert client.get(
@@ -158,7 +159,9 @@ def test_missing_calendar_blocks_excel_review_and_submit_without_locking_or_losi
     assert response.status_code == 200, response.text
 
 
-@pytest.mark.parametrize("frozen_format", [None, "monthly_ranges", "monthly_ranges_hyphen"])
+@pytest.mark.parametrize(
+    "frozen_format", [None, "monthly_ranges", "monthly_ranges_hyphen", "compact_effective_periods"]
+)
 @pytest.mark.parametrize("city_flow", ["consecutive"], indirect=True)
 def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calendar_removal(
     city_flow, monkeypatch, frozen_format,
@@ -169,10 +172,12 @@ def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calend
         None: "出勤日期：2026-09-01、2026-09-02、2026-09-03",
         "monthly_ranges": "出勤日期（2026年9月）：1—3日",
         "monthly_ranges_hyphen": "出勤日期（2026年9月）：1-3日",
+        "compact_effective_periods": "2026/9/1—2026/9/3，计补3天",
     }[frozen_format]
     # Model an old app's completed lock, then resume with all new code restored.
     def legacy_build(source):
         value = build_snapshot(source).model_dump(mode="json", by_alias=True)
+        value.pop("subsidyDescriptionFormat", None)
         value.pop("attendanceDescriptionFormat", None)
         if frozen_format is not None:
             value["attendanceDescriptionFormat"] = frozen_format
@@ -184,7 +189,7 @@ def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calend
         return ReimbursementSnapshot.model_validate(value)
 
     with monkeypatch.context() as patch:
-        if frozen_format != "monthly_ranges_hyphen":
+        if frozen_format != "compact_effective_periods":
             patch.setattr("app.api.reimbursement_submissions.build_snapshot", legacy_build)
         submitted = client.post(path, json={"expectedRevision": 4}, headers=headers)
     assert submitted.status_code == 202, submitted.text
@@ -210,7 +215,11 @@ def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calend
         workbook = load_workbook(BytesIO(content))
         try:
             texts = [str(cell.value) for row in workbook.active for cell in row if cell.value]
-            assert any(expected in text for text in texts)
+            excel_expected = (
+                "2026年9月：1-3日\n3天 × 50元/天 = 150元"
+                if frozen_format == "compact_effective_periods" else expected
+            )
+            assert any(excel_expected in text for text in texts)
             if frozen_format is None:
                 assert not any("出勤日期（" in text for text in texts)
         finally:

@@ -163,7 +163,7 @@ def _adjusted_snapshot():
     )
 
 
-def test_v9_freezes_typed_adjustments_and_oa_explanation_rejecting_tampering():
+def test_snapshot_freezes_typed_adjustments_and_compact_oa_explanation_rejecting_tampering():
     import json
 
     from app.services.oa_reimbursement_payload import parse_snapshot, serialize_snapshot
@@ -175,16 +175,8 @@ def test_v9_freezes_typed_adjustments_and_oa_explanation_rejecting_tampering():
     description = next(
         item.value for item in snapshot.form_values if item.logical_key == "description"
     )
-    for text in [
-        "延后出发：2026/9/2上午",
-        "提前结束：2026/9/3上午",
-        "扣除1天",
-        "扣除0.5天",
-        "原补助3天",
-        "实际补助1.5天",
-        "270.00元",
-    ]:
-        assert text in description
+    assert "2026-09-03 出差补助 2026/9/2—2026/9/3，计补1.5天：270.00" in description
+    assert "延后出发" not in description and "原补助" not in description
     changed = json.loads(encoded)
     changed["input"]["trip"]["excludedPeriods"][0]["endTime"] = "18:00"
     with pytest.raises(ApiError):
@@ -228,12 +220,11 @@ def test_excel_keeps_adjustments_in_one_cell_without_duplicate_amounts_or_receip
     rows = [
         row
         for row in range(4, sheet.max_row + 1)
-        if any(label in str(sheet[f"D{row}"].value) for label in ["延后出发", "提前结束"])
+        if sheet[f"B{row}"].value == "出差补助"
     ]
     assert len(rows) == 1
-    assert "2026/9/2上午" in sheet[f"D{rows[0]}"].value
-    assert "2026/9/3上午" in sheet[f"D{rows[0]}"].value
-    assert sheet[f"D{rows[0]}"].value.count("\n") == 2
+    assert sheet[f"C{rows[0]}"].value == "2026/9/3"
+    assert sheet[f"D{rows[0]}"].value == "9/2上午—9/3上午，1.5天\n1.5天 × 180元/天 = 270元"
     assert sheet[f"D{rows[0]}"].alignment.wrap_text
     assert sheet[f"D{rows[0]}"].alignment.horizontal == "left"
     assert sheet[f"D{rows[0]}"].alignment.vertical == "top"
@@ -273,18 +264,14 @@ def test_excel_keeps_all_one_hundred_adjustments_visible_without_truncation(clie
     rows = [row for row in range(4, 55) if sheet[f"D{row}"].value]
     descriptions = [sheet[f"D{row}"].value for row in rows]
     assert 1 < len(rows) < 100
-    assert "原补助300天" in descriptions[0]
-    assert "实际补助200天" in descriptions[0]
-    assert sum(text.count("中途离开") for text in descriptions) == 100
-    assert str(first + timedelta(days=298)).replace("-0", "/").replace("-", "/") in descriptions[-1]
-    for value in values:
-        start = value["startDate"].split("-")
-        end = value["endDate"].split("-")
-        detail = (
-            f"中途离开：{int(start[0])}/{int(start[1])}/{int(start[2])}上午出发，"
-            f"{int(end[0])}/{int(end[1])}/{int(end[2])}下午出发返回（扣除1天）"
-        )
-        assert "\n".join(descriptions).count(detail) == 1
+    text = "\n".join(descriptions)
+    assert "200天 × 150元/天 = 30000元" in text
+    assert text.count("，2天") == 99
+    assert text.count("，0.5天") == 1
+    assert text.count("，1.5天") == 1
+    assert "1/1上午—1/1上午，0.5天" in text
+    last = first + timedelta(days=299)
+    assert f"{last.month}/{last.day}下午，1.5天" in text
     for row in rows:
         assert not sheet.row_dimensions[row].hidden
         assert sheet[f"D{row}"].alignment.wrap_text
@@ -315,9 +302,7 @@ def test_excel_three_adjustments_share_one_cell_and_large_reports_expand(client_
     workbook = open_result(sample)
     sheet = workbook.active
     text = sheet["D4"].value
-    assert text.count("\n") == 3
-    assert all(kind in text for kind in ("延后出发", "提前结束", "中途离开"))
-    assert "原补助10天，扣除5天，实际补助5天" in text
+    assert text == "7/2下午—7/4上午，2天\n7/6下午—7/9上午，3天\n5天 × 150元/天 = 750元"
     assert sheet["G4"].value == sheet["G55"].value == 750
     assert sheet["D5"].value is None
     assert sheet.row_dimensions[5].hidden
@@ -341,11 +326,14 @@ def test_excel_three_adjustments_share_one_cell_and_large_reports_expand(client_
     workbook = open_result(large)
     sheet = workbook.active
     total_row = next(row[0].row for row in sheet.iter_rows() if row[1].value == "总合计")
-    assert total_row > 55
+    assert total_row >= 55
     descriptions = [sheet[f"D{row}"].value or "" for row in range(4, total_row)]
-    assert sum(text.count("中途离开") for text in descriptions) == 500
+    text = "\n".join(descriptions)
+    assert text.count("，2天") == 495
+    assert text.count("，0.5天") == text.count("，1.5天") == 5
+    assert text.count("1000天 × 150元/天 = 150000元") == 1
     money_rows = [row for row in range(4, total_row) if sheet[f"B{row}"].value == "出差补助"]
-    assert len(money_rows) == 5
+    assert len(money_rows) == 1
     assert sum(sheet[f"G{row}"].value for row in money_rows) == sheet[f"G{total_row}"].value
     assert sheet[f"G{total_row}"].value == 150000
     assert sheet[f"I{total_row}"].value == 0

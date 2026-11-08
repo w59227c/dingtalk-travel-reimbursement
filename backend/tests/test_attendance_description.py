@@ -97,6 +97,7 @@ def workbook_text(snapshot):
         subsidies=value.subsidies,
         totals=value.totals,
         detailed_subsidies=value.detailed_subsidies,
+        compact_subsidies=value.compact_subsidies,
         attendance_description_format=value.attendance_description_format,
     )
     workbook = load_workbook(BytesIO(result.content))
@@ -149,12 +150,12 @@ def test_new_oa_and_excel_share_frozen_compact_format_and_same_amount():
     restored = parse_snapshot(
         serialize_snapshot(snapshot), expected_sha256=snapshot_sha256(snapshot)
     )
-    assert restored.attendance_description_format == "monthly_ranges_hyphen"
-    expected = "出勤日期（2026年9月）：1日、3日"
+    assert restored.subsidy_description_format == "compact_effective_periods"
     description = next(
         item.value for item in restored.form_values if item.logical_key == "description"
     )
-    assert expected in description and expected in workbook_text(restored)
+    assert "2026-09-03 出差补助 2026/9/1—2026/9/3，计补2天：100.00" in description
+    assert "2026年9月：1日、3日\n2天 × 50元/天 = 100元" in workbook_text(restored)
     assert restored.subsidy.total == parse_snapshot(
         (FIXTURES / "attendance_v11.json").read_text(encoding="utf-8")
     ).subsidy.total
@@ -171,8 +172,20 @@ def test_description_format_tampering_is_rejected(change):
     else:
         value = json.loads(serialize_snapshot(build_snapshot(attendance_source())))
         if change == "remove":
-            del value["attendanceDescriptionFormat"]
+            del value["subsidyDescriptionFormat"]
         else:
-            value["attendanceDescriptionFormat"] = "unknown"
+            value["subsidyDescriptionFormat"] = "unknown"
     with pytest.raises(ApiError):
         parse_snapshot(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def test_frozen_adjusted_snapshot_keeps_original_oa_and_excel_explanations():
+    raw = (FIXTURES / "adjusted_v11.json").read_text(encoding="utf-8")
+    digest = (FIXTURES / "adjusted_v11.sha256").read_text().strip()
+    restored = parse_snapshot(raw, expected_sha256=digest)
+    assert serialize_snapshot(restored) == raw
+    assert snapshot_sha256(restored) == digest
+    assert restored.subsidy_description_format is None
+    for expected in ("延后出发：2026/9/2上午", "提前结束：2026/9/3上午"):
+        assert any(expected in item.value for item in restored.form_values)
+        assert expected in workbook_text(restored)

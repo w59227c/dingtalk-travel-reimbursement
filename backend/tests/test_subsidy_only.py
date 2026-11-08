@@ -112,9 +112,16 @@ def test_excel_only_snapshot_rejects_manifest_and_content_tampering(change):
 
 
 def test_v9_canonical_snapshot_keeps_two_attachments_and_no_new_fields():
-    raw = json.loads(serialize_snapshot(build_snapshot(_source())))
+    from app.services.oa_reimbursement_payload import _description_v1
+
+    snapshot = build_snapshot(_source())
+    raw = json.loads(serialize_snapshot(snapshot))
     raw["snapshotVersion"] = 9
     raw.pop("attachmentMode")
+    raw.pop("subsidyDescriptionFormat")
+    next(item for item in raw["formValues"] if item["logicalKey"] == "description")[
+        "value"
+    ] = _description_v1(snapshot.input.items, snapshot.subsidy, snapshot.totals)
     encoded = canonical(raw)
     restored = parse_snapshot(encoded)
     assert serialize_snapshot(restored) == encoded

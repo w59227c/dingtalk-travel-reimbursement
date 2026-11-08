@@ -228,7 +228,8 @@ def test_generated_workbook_preserves_cells_order_totals_layout_and_safety(clien
         "火车票",
         "出差补助",
     ]
-    assert worksheet["D7"].value == "6/30—7/7，共8天出差补助"
+    assert worksheet["C7"].value == "2026/7/7"
+    assert worksheet["D7"].value == "6/30上午—7/7下午，8天\n8天 × 100元/天 = 800元"
     assert [str(worksheet[f"G{row}"].value) for row in range(4, 8)] == [
         "454",
         "44.89",
@@ -238,7 +239,10 @@ def test_generated_workbook_preserves_cells_order_totals_layout_and_safety(clien
     assert worksheet["C55"].value == "壹仟柒佰柒拾贰元叁角玖分"
     assert str(worksheet["G55"].value) == "1772.39"
     assert worksheet["I55"].value == 6
-    assert template_layout(worksheet) == expected_layout
+    observed_layout = template_layout(worksheet)
+    assert observed_layout["heights"][7] > expected_layout["heights"][7]
+    expected_layout["heights"][7] = observed_layout["heights"][7]
+    assert observed_layout == expected_layout
     assert not any(cell.data_type == "f" for row in worksheet.iter_rows() for cell in row)
     assert not any(cell.hyperlink or cell.comment for row in worksheet.iter_rows() for cell in row)
     assert not worksheet.tables and not worksheet._charts and not worksheet._images

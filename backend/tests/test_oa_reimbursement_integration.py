@@ -1609,22 +1609,25 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     ]
     if with_exclusions:
         if exclusion_kind == "middle":
-            assert "原补助3天，扣除1天，实际补助2天" in subsidy_rows[0][3].value
             detail_lines = [
-                "中途离开：2026/9/1上午出发，2026/9/2上午出发返回（扣除0.5天）",
-                "中途离开：2026/9/2下午出发，2026/9/3下午出发返回（扣除0.5天）",
+                "9/1上午—9/1上午，0.5天",
+                "9/2上午—9/2下午，1天",
+                "9/3下午—9/3下午，0.5天",
+                "2天 × 100元/天 = 200元",
             ]
         else:
-            assert "原补助3天，扣除1.5天，实际补助1.5天" in subsidy_rows[0][3].value
             detail_lines = [
-                "延后出发：2026/9/2上午，此前不计补助（扣除1天）",
-                "提前结束：2026/9/3上午，不再返回（扣除0.5天）",
+                "9/2上午—9/3上午，1.5天",
+                "1.5天 × 100元/天 = 150元",
             ]
         oa_descriptions = [item.value for item in workflow.created_command.form_values]
-        for detail in detail_lines:
-            assert detail in subsidy_rows[0][3].value
-            assert any(detail in description for description in oa_descriptions)
-        assert subsidy_rows[0][3].value.count("\n") == len(detail_lines)
+        assert subsidy_rows[0][3].value == "\n".join(detail_lines)
+        first_day, days = (1, "2") if exclusion_kind == "middle" else (2, "1.5")
+        assert any(
+            f"2026-09-03 出差补助 2026/9/{first_day}—2026/9/3，计补{days}天" in description
+            for description in oa_descriptions
+        )
+        assert subsidy_rows[0][2].value == "2026/9/3"
 
     with client.app.state.database_session_factory() as database:
         submission = database.get(ReimbursementSubmission, submission_id)
