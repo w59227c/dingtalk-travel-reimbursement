@@ -261,9 +261,21 @@ class CreateReimbursementDraftRequest(BaseModel):
         default=None, alias="expectedDepartmentId", max_length=128,
     )
     expected_department_name: str | None = Field(
-        default=None, alias="expectedDepartmentName", max_length=255,
+        default=None,
+        alias="expectedDepartmentName",
+        max_length=255,
+    )
+    replaces_draft_id: str | None = Field(default=None, alias="replacesDraftId", max_length=36)
+    replaces_draft_revision: int | None = Field(
+        default=None, alias="replacesDraftRevision", ge=1, strict=True
     )
     input: ReimbursementDraftInput
+
+    @model_validator(mode="after")
+    def replacement_pair(self):
+        if (self.replaces_draft_id is None) != (self.replaces_draft_revision is None):
+            raise ValueError("replacement identity and revision must be provided together")
+        return self
 
 
 class UpdateReimbursementDraftRequest(BaseModel):

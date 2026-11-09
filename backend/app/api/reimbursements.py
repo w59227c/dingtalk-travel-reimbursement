@@ -26,7 +26,13 @@ from app.services.reimbursement_drafts import (
     replace_related_approvals,
     update_reimbursement_draft,
 )
-from app.services.reimbursement_quota import ReimbursementQuotaCoordinator
+from app.services.reimbursement_files import map_reimbursement_storage_error
+from app.services.reimbursement_quota import ReimbursementQuotaCoordinator, ReimbursementQuotaError
+from app.services.reimbursement_recovery import (
+    recover_failed_reimbursement,
+    workspace_reimbursements,
+)
+from app.services.reimbursement_staging import ReimbursementStagingError
 from app.services.sessions import CurrentSession, get_current_session, require_csrf
 
 router = APIRouter(tags=["reimbursement-drafts"])
@@ -36,9 +42,8 @@ def _checked_actor(
     current: CurrentSession, expected_id: str | None, expected_name: str | None,
 ) -> DraftActor:
     actor = draft_actor(current)
-    if (
-        (expected_id is not None and actor.department_id != expected_id)
-        or (expected_name is not None and actor.department_name != expected_name)
+    if (expected_id is not None and actor.department_id != expected_id) or (
+        expected_name is not None and actor.department_name != expected_name
     ):
         raise ApiError(
             "REIMBURSEMENT_DEPARTMENT_CHANGED", "当前报销部门已变化，请刷新页面后重试", 409,
@@ -62,6 +67,8 @@ def create_draft(
             ttl_days=request.app.state.settings.reimbursement_draft_ttl_days,
             max_items=request.app.state.settings.expense_max_items,
             reuse_existing=body.reuse_existing,
+            replaces_draft_id=body.replaces_draft_id,
+            replaces_draft_revision=body.replaces_draft_revision,
         )
     )
 
@@ -102,6 +109,45 @@ def list_submission_history(
             actor=_checked_actor(current, expected_id, expected_name),
         )
     )
+
+
+@router.get("/reimbursements/workspace")
+def get_workspace(
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(get_current_session)],
+    expected_id: Annotated[str | None, Query(alias="expectedDepartmentId", max_length=128)] = None,
+    expected_name: Annotated[
+        str | None, Query(alias="expectedDepartmentName", max_length=255)
+    ] = None,
+) -> dict[str, object]:
+    return success(
+        workspace_reimbursements(
+            database,
+            actor=_checked_actor(current, expected_id, expected_name),
+        )
+    )
+
+
+@router.post("/reimbursements/drafts/{draft_id}/recover")
+def recover_draft(
+    draft_id: str,
+    body: DraftRevisionRequest,
+    request: Request,
+    current: Annotated[CurrentSession, Depends(require_csrf)],
+) -> dict[str, object]:
+    try:
+        result = recover_failed_reimbursement(
+            actor=draft_actor(current),
+            source_id=draft_id,
+            expected_revision=body.expected_revision,
+            settings=request.app.state.settings,
+            session_factory=request.app.state.database_session_factory,
+            staging=request.app.state.reimbursement_staging,
+            quota=request.app.state.reimbursement_quota,
+        )
+        return success(result)
+    except (ReimbursementQuotaError, ReimbursementStagingError) as error:
+        raise map_reimbursement_storage_error(error) from None
 
 
 @router.get("/reimbursements/drafts/{draft_id}")

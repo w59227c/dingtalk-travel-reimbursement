@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import {
   getMe,
@@ -33,6 +33,11 @@ export const useAuthStore = defineStore('auth', () => {
   const errorMessage = ref('')
   const appTitle = ref('智能差旅费报销申请')
   let bootstrapPromise: Promise<void> | null = null
+  let scopeGeneration = 0
+  let identityReadVersion = 0
+  let departmentRequestVersion = 0
+  watch(() => [status.value, session.value?.user.userId, session.value?.selectedDepartment?.id,
+    session.value?.selectedDepartment?.name, session.value?.csrfToken], () => { scopeGeneration++ }, { flush: 'sync' })
 
   const initialized = computed(() => status.value !== 'idle' && status.value !== 'loading')
   const isAdmin = computed(() => session.value?.isAdmin === true)
@@ -68,7 +73,10 @@ export const useAuthStore = defineStore('auth', () => {
   setUnauthorizedHandler(clearAsUnauthorized)
 
   async function refreshMe(): Promise<void> {
-    applySession(await getMe())
+    const generation = scopeGeneration, version = ++identityReadVersion
+    const value = await getMe()
+    if (generation !== scopeGeneration || version !== identityReadVersion) return
+    applySession(value)
   }
 
   async function refreshPublicConfig() {
@@ -132,24 +140,45 @@ export const useAuthStore = defineStore('auth', () => {
   async function selectDepartmentFromTravelApproval(
     selection: ReimbursementRelatedApprovalSelection,
     selectedDepartmentId?: string,
-  ): Promise<ReimbursementDepartmentResolution> {
+  ): Promise<ReimbursementDepartmentResolution & { isCurrent: () => boolean }> {
     if (!session.value) throw new Error('登录状态已失效，请重新进入')
-    const resolution = await selectDepartmentFromTravelApprovalRequest(
-      selection,
-      selectedDepartmentId,
-    )
-    session.value.departments = resolution.departments
-    if (!resolution.selectedDepartment) return resolution
-    const scopeChanged = session.value.selectedDepartment?.id
-      !== resolution.selectedDepartment.id
-    if (scopeChanged) {
-      useExpenseStore().reset()
-      useReimbursementDraftStore().reset()
-      useReimbursementSubmissionStore().reset()
+    const origin = session.value
+    const generation = scopeGeneration, version = ++departmentRequestVersion
+    const acceptsRequest = () => generation === scopeGeneration
+      && version === departmentRequestVersion && session.value === origin
+    let resolution: ReimbursementDepartmentResolution
+    try {
+      resolution = await selectDepartmentFromTravelApprovalRequest(selection, selectedDepartmentId)
+    } catch (error) {
+      if (!acceptsRequest()) throw new Error('登录或部门状态已变化，请在当前页面重新选择审批', { cause: error })
+      // The server may already have changed the department before the response
+      // was lost. Read its session; never repeat the department mutation blindly.
+      try { await refreshMe() }
+      catch {
+        if (acceptsRequest()) {
+          errorMessage.value = '暂时无法确认报销部门，请重新登录后继续，已保存内容会保留'
+          status.value = 'error'
+        }
+      }
+      throw error
     }
-    session.value.selectedDepartment = resolution.selectedDepartment
-    status.value = 'authenticated'
-    return resolution
+    if (!acceptsRequest()) {
+      throw new Error('登录或部门状态已变化，请在当前页面重新选择审批')
+    }
+    session.value.departments = resolution.departments
+    if (resolution.selectedDepartment) {
+      const scopeChanged = session.value.selectedDepartment?.id !== resolution.selectedDepartment.id
+      if (scopeChanged) {
+        useExpenseStore().reset()
+        useReimbursementDraftStore().reset()
+        useReimbursementSubmissionStore().reset()
+      }
+      session.value.selectedDepartment = resolution.selectedDepartment
+      status.value = 'authenticated'
+    }
+    const acceptedGeneration = scopeGeneration
+    return { ...resolution, isCurrent: () => acceptedGeneration === scopeGeneration
+      && version === departmentRequestVersion && session.value === origin }
   }
 
   async function logout(): Promise<void> {

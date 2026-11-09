@@ -39,6 +39,7 @@ from app.services.process_jobs import (
 from app.services.reimbursement_drafts import (
     draft_actor,
     require_owned_draft,
+    require_previewable_draft,
 )
 from app.services.reimbursement_files import (
     begin_draft_file_delete,
@@ -521,7 +522,7 @@ def create_excel_preview_ticket(
     current: Annotated[CurrentSession, Depends(require_csrf)],
 ) -> dict[str, object]:
     actor = draft_actor(current)
-    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    draft = require_previewable_draft(database, draft_id=draft_id, actor=actor)
     if draft.revision != body.expected_revision:
         raise ApiError(
             "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",

@@ -71,6 +71,7 @@ from app.services.reimbursement_drafts import (
     detach_draft_files_from_input,
     require_complete_draft_input,
     require_owned_draft,
+    require_previewable_draft,
     validate_and_calculate_input,
     validate_draft_file_references,
 )
@@ -1134,7 +1135,7 @@ async def generate_draft_excel_preview(
     # Do not serve a workbook calculated from a draft that changed during the
     # CPU-bound generation step.
     with session_factory() as database:
-        current = require_owned_draft(database, draft_id=draft_id, actor=actor)
+        current = require_previewable_draft(database, draft_id=draft_id, actor=actor)
         _require_revision(current, expected_revision)
         if current.input_json != snapshot.canonical_input_json:
             raise _revision_conflict_error()
@@ -1150,7 +1151,7 @@ def _workbook_preview_snapshot(
     expected_revision: int,
     settings: Settings,
 ) -> WorkbookPreviewSnapshot:
-    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    draft = require_previewable_draft(database, draft_id=draft_id, actor=actor)
     _require_revision(draft, expected_revision)
     recover_stale_running_ocr(
         database,

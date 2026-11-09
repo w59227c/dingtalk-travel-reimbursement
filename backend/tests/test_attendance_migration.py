@@ -38,7 +38,7 @@ def test_attendance_upgrade_preserves_history_and_blocks_lossy_downgrade(
             current = seed_verifying(database, version=11)
             mark_submitted(database, current)
             identifier, frozen = current.id, current.form_snapshot_json
-        for target in ("20261028_0023", "-1", "20261020_0020"):
+        for target in ("20261028_0023", "-2", "20261020_0020"):
             with pytest.raises(RuntimeError, match="version 11"):
                 command.downgrade(config, target)
             assert _database_ready(engine)

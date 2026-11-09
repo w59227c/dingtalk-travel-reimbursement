@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import hashlib
 import io
 import os
@@ -49,6 +50,10 @@ class StagingObjectNotFound(ReimbursementStagingError):
 
 
 class StagingObjectExists(ReimbursementStagingError):
+    pass
+
+
+class StagingRecoveryBusy(ReimbursementStagingError):
     pass
 
 
@@ -205,6 +210,30 @@ class ReimbursementStaging:
                 os.close(area_fd)
         finally:
             os.close(root_fd)
+
+    @contextmanager
+    def recovery_guard(self, draft_id: str, *, exclusive: bool = False) -> Iterator[None]:
+        """Fence recovery writers against deletion without holding a database lock.
+
+        The private owner directory is stable and contains no extra lock file.
+        Independent writers may share it; deletion must acquire it exclusively.
+        Closing the descriptor (including process death) releases the kernel lock.
+        """
+        owner_fd = self._open_owner_directory_by_id(
+            StagingArea.DRAFTS, _canonical_uuid(draft_id), create=True
+        )
+        try:
+            try:
+                fcntl.flock(
+                    owner_fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+                )
+            except BlockingIOError:
+                raise StagingRecoveryBusy("recovery writer or cleanup is active") from None
+            except OSError as exc:
+                raise StagingLayoutError("recovery directory could not be locked safely") from exc
+            yield
+        finally:
+            os.close(owner_fd)
 
     def new_storage_key(
         self,
@@ -699,11 +728,14 @@ class ReimbursementStaging:
             raise StagingLayoutError("staging directory is not safely accessible") from exc
 
     def _open_owner_directory(self, parsed: _ParsedStorageKey, *, create: bool) -> int:
+        return self._open_owner_directory_by_id(parsed.area, parsed.owner_id, create=create)
+
+    def _open_owner_directory_by_id(self, area: StagingArea, owner_id: str, *, create: bool) -> int:
         root_fd = self._open_root(create=create)
         try:
-            area_fd = self._open_child_directory(root_fd, parsed.area.value, create=create)
+            area_fd = self._open_child_directory(root_fd, area.value, create=create)
             try:
-                return self._open_child_directory(area_fd, parsed.owner_id, create=create)
+                return self._open_child_directory(area_fd, owner_id, create=create)
             finally:
                 os.close(area_fd)
         finally:

@@ -130,6 +130,99 @@ function responseError(code: string, message: string, status = 422): Error {
 }
 
 describe('persistent reimbursement draft store', () => {
+  it.each(['save', 'file', 'preview', 'native', 'pipeline'].flatMap((operation) => [
+    ['REIMBURSEMENT_DRAFT_REPLACED', { workspaceRetired: true }],
+    ['REIMBURSEMENT_RECOVERY_PENDING', { recoveryPending: true }],
+    ['REIMBURSEMENT_DRAFT_EXPIRED', { status: 'EXPIRED' }],
+    ['REIMBURSEMENT_DRAFT_LOCKED', { status: 'LOCKED' }],
+  ].map(([code, state]) => ({ operation, code: code as string, state }))))(
+    'freezes $operation after authoritative $code without depending on readback', async ({ operation, code, state }) => {
+      const store = useReimbursementDraftStore()
+      const original = structuredClone(draft())
+      store.currentDraft = original
+      store.files = [serverFile()]
+      const failure = responseError(code, '报销当前状态不再允许本次操作', 409)
+      vi.mocked(getReimbursementDraft).mockRejectedValue(new Error('回读断线'))
+      let request: Promise<unknown>
+      if (operation === 'save') {
+        vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(failure)
+        request = store.saveDraft({ ...input, items: [{ ...input.items[0]!, description: '未保存的输入' }] })
+      } else if (operation === 'file') {
+        vi.mocked(updateReimbursementDraftFile).mockRejectedValueOnce(failure)
+        request = store.updateFile('file-1', { attachmentKind: 'payment_proof' })
+      } else if (operation === 'preview') {
+        vi.mocked(getReimbursementDraftExcelPreview).mockRejectedValueOnce(failure)
+        request = store.downloadExcelPreview()
+      } else if (operation === 'native') {
+        vi.mocked(requestReimbursementDraftExcelPreviewTicket).mockRejectedValueOnce(failure)
+        request = store.openExcelPreviewInDingTalk()
+      } else {
+        const pipeline = store.beginFilePipeline()
+        vi.mocked(uploadReimbursementDraftFile).mockRejectedValueOnce(failure)
+        request = store.uploadFile(new File(['x'], 'ticket.jpg'), 'EXPENSE_SOURCE', 'other', true, pipeline)
+      }
+      await expect(request).rejects.toBe(failure)
+      expect(store.currentDraft).toMatchObject(state as object)
+      expect(store.currentDraft?.input).toEqual(original.input)
+      expect(store.files).toEqual([serverFile()])
+      expect(store.mutationError).toBe('报销当前状态不再允许本次操作')
+      expect(store.busy).toBe(false)
+      expect(getReimbursementDraft).not.toHaveBeenCalled()
+      expect(() => store.beginFilePipeline()).toThrow()
+    },
+  )
+
+  it.each(['workspaceRetired', 'recoveryPending'] as const)('stops a pipeline when readback discovers %s', async (field) => {
+    const store = useReimbursementDraftStore()
+    store.currentDraft = draft()
+    const pipeline = store.beginFilePipeline()
+    vi.mocked(uploadReimbursementDraftFile).mockRejectedValueOnce(new Error('上传连接中断'))
+    vi.mocked(getReimbursementDraft).mockResolvedValueOnce({ ...draft(), [field]: true })
+    await expect(store.uploadFile(new File(['x'], 'ticket.jpg'), 'EXPENSE_SOURCE', 'other', true, pipeline)).rejects.toThrow('上传连接中断')
+    expect(store.currentDraft?.[field]).toBe(true)
+    expect(store.busy).toBe(false)
+    expect(await store.finishFilePipeline(pipeline)).toBe(false)
+  })
+
+  it('ignores a late replaced rejection after the session has changed', async () => {
+    const store = useReimbursementDraftStore()
+    store.currentDraft = draft()
+    const request = deferred<ReimbursementDraft>()
+    vi.mocked(updateReimbursementDraft).mockReturnValueOnce(request.promise)
+    const save = store.saveDraft(input)
+    await Promise.resolve()
+    store.reset()
+    store.currentDraft = draft('new-session')
+    request.reject(responseError('REIMBURSEMENT_DRAFT_REPLACED', '旧会话已被替换', 409))
+    await expect(save).rejects.toThrow()
+    expect(store.currentDraft.id).toBe('new-session')
+    expect(store.currentDraft.workspaceRetired).not.toBe(true)
+    expect(store.mutationError).toBe('')
+  })
+
+  it('honors irreversible retirement from an older overlapping OCR even when readback is offline', async () => {
+    const store = useReimbursementDraftStore()
+    store.currentDraft = draft()
+    const pipeline = store.beginFilePipeline()
+    const uploadB = deferred<Awaited<ReturnType<typeof uploadReimbursementDraftFile>>>()
+    const ocrA = deferred<Awaited<ReturnType<typeof recognizeReimbursementDraftFile>>>()
+    vi.mocked(uploadReimbursementDraftFile).mockResolvedValueOnce({ draftId: 'draft-1', revision: 2, file: serverFile('a') })
+      .mockReturnValueOnce(uploadB.promise)
+    vi.mocked(recognizeReimbursementDraftFile).mockReturnValueOnce(ocrA.promise)
+    vi.mocked(getReimbursementDraft).mockRejectedValue(new Error('回读断线'))
+    await store.uploadFile(new File(['a'], 'a.jpg'), 'ATTACHMENT_ONLY', 'other', true, pipeline)
+    const recognizing = store.recognizeFile('a', 2026, pipeline).catch((error: unknown) => error)
+    const uploading = store.uploadFile(new File(['b'], 'b.jpg'), 'ATTACHMENT_ONLY', 'other', true, pipeline)
+    uploadB.resolve({ draftId: 'draft-1', revision: 3, file: serverFile('b') })
+    await uploading
+    ocrA.reject(responseError('REIMBURSEMENT_DRAFT_REPLACED', '已新开另一笔报销', 409))
+    await recognizing
+    expect(await store.finishFilePipeline(pipeline)).toBe(false)
+    expect(store.currentDraft?.workspaceRetired).toBe(true)
+    expect(store.files.map((file) => file.id)).toEqual(['a', 'b'])
+    expect(store.busy).toBe(false)
+  })
+
   it('preserves a query-date error code and clears it on a successful retry or session reset', async () => {
     const store = useReimbursementDraftStore()
     vi.mocked(listOaTravelApprovals).mockRejectedValueOnce({ isAxiosError: true, response: { data: { error: { code: 'DINGTALK_QUERY_TIME_INVALID', message: '请调整查询日期' } } } })
@@ -143,6 +236,25 @@ describe('persistent reimbursement draft store', () => {
     store.travelApprovalsErrorCode = 'DINGTALK_QUERY_TIME_INVALID'; store.reset()
     expect(store.travelApprovalsErrorCode).toBe('')
   })
+
+  it('retains the current draft and files when a complete read is rejected before adoption', async () => {
+    const store = useReimbursementDraftStore()
+    store.currentDraft = draft('draft-1', 1)
+    store.files = [serverFile('old-file')]
+    const latest = { ...draft('draft-1', 5), status: 'LOCKED' as const }
+    vi.mocked(getReimbursementDraft).mockResolvedValue(latest)
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({ draftId: 'draft-1', revision: 5, items: [serverFile('new-file')] })
+    const shouldAdopt = vi.fn(() => false)
+    expect(await store.loadDraft('draft-1', true, shouldAdopt)).toBe(false)
+    expect(shouldAdopt).toHaveBeenCalledWith(latest)
+    expect(store.currentDraft.revision).toBe(1)
+    expect(store.files.map((f) => f.id)).toEqual(['old-file'])
+    expect(store.loadError).toBe('')
+    expect(await store.loadDraft('draft-1', true)).toBe(true)
+    expect(store.currentDraft.revision).toBe(5)
+    expect(store.files.map((f) => f.id)).toEqual(['new-file'])
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
@@ -241,6 +353,24 @@ describe('persistent reimbursement draft store', () => {
       .toEqual(['new-instance'])
     expect(store.travelApprovalTemplateConfigVersion).toBe(2)
     expect(store.loadingTravelApprovals).toBe(false)
+  })
+
+  it('keeps the current detail if a prepared workspace is retired before its readback', async () => {
+    const store = useReimbursementDraftStore()
+    const original = draft('historical-success')
+    store.currentDraft = original
+    store.files = [serverFile('historical-file')]
+    const prepared = draft('prepared-b')
+    vi.mocked(createReimbursementDraft).mockResolvedValue(prepared)
+    vi.mocked(getReimbursementDraft).mockResolvedValue({ ...prepared, workspaceRetired: true })
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({ draftId: prepared.id, revision: prepared.revision, items: [] })
+
+    await expect(store.createDraft(input, true)).rejects.toThrow('当前报销已变化')
+
+    expect(store.currentDraft?.id).toBe(original.id)
+    expect(store.files[0]?.id).toBe('historical-file')
+    expect(store.mutationError).toContain('当前报销已变化')
+    expect(createReimbursementDraft).toHaveBeenCalledOnce()
   })
 
   it('keeps only the authoritative server file record after upload', async () => {

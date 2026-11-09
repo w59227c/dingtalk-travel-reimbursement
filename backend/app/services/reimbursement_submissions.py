@@ -155,10 +155,14 @@ def admin_resume_manual_review_with_instance(
     )
     if current is None:
         raise ApiError("REIMBURSEMENT_SUBMISSION_NOT_FOUND", "提交记录不存在", 404)
-    if current.status in {
-        ReimbursementSubmissionStatus.VERIFYING.value,
-        ReimbursementSubmissionStatus.SUBMITTED.value,
-    } and current.process_instance_id == normalized_instance:
+    if (
+        current.status
+        in {
+            ReimbursementSubmissionStatus.VERIFYING.value,
+            ReimbursementSubmissionStatus.SUBMITTED.value,
+        }
+        and current.process_instance_id == normalized_instance
+    ):
         return current
     if (
         current.status != ReimbursementSubmissionStatus.MANUAL_REVIEW.value
@@ -574,6 +578,8 @@ def create_submission(
                 ReimbursementDraft.revision == expected_revision,
                 ReimbursementDraft.status == ReimbursementDraftStatus.REVIEW_READY.value,
                 ReimbursementDraft.locked_at.is_(None),
+                ReimbursementDraft.workspace_retired.is_(False),
+                ReimbursementDraft.recovery_pending.is_(False),
                 ReimbursementDraft.expires_at > created_at,
                 ~exists(
                     select(ReimbursementSubmission.id).where(
@@ -2671,7 +2677,12 @@ def _require_review_ready_draft(
             "报销内容版本已更新，请刷新后重试",
             409,
         )
-    if draft.status != ReimbursementDraftStatus.REVIEW_READY.value or draft.locked_at is not None:
+    if (
+        draft.workspace_retired
+        or draft.recovery_pending
+        or draft.status != ReimbursementDraftStatus.REVIEW_READY.value
+        or draft.locked_at is not None
+    ):
         raise ApiError(
             "REIMBURSEMENT_DRAFT_NOT_READY",
             "请先完成检查并确认报销内容",

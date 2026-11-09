@@ -67,6 +67,9 @@ export interface ReimbursementDraftSummary {
   createdAt: string
   updatedAt: string
   lockedAt: string | null
+  recoverySourceDraftId?: string
+  workspaceRetired?: boolean
+  recoveryPending?: boolean
 }
 
 export interface ReimbursementRelatedApprovalQueryWindow {

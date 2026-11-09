@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { adjustmentPayload } from '@/utils/subsidyAdjustments'
-import { ArrowLeft, WarningFilled } from '@element-plus/icons-vue'
+import { ArrowLeft, CircleCloseFilled, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
 import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vue'
+import ReimbursementAttentionNotice from '@/components/reimbursement/ReimbursementAttentionNotice.vue'
 import TravelApprovalSelector from '@/components/reimbursement/TravelApprovalSelector.vue'
 import TripSubsidyCard from '@/components/reimbursement/TripSubsidyCard.vue'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
-import { listReimbursementSubmissionHistory } from '@/api/reimbursements'
+import { getReimbursementDraft, listReimbursementSubmissionHistory, listWorkspaceReimbursements } from '@/api/reimbursements'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useHealthStore } from '@/stores/health'
@@ -73,15 +74,79 @@ const saveError = ref('')
 const saveRequiresReload = ref(false)
 const editableInputBaseline = ref('')
 const expiredDraftId = ref('')
-const workspaceActionError = ref('')
+const unavailableDraftId = ref('')
+const sessionGeneration = ref(0)
+let departmentBindingGeneration = 0
+const workspaceErrorMessage = ref('')
+const recoveryErrorOwner = ref<{ sourceId: string; scope: string; generation: number } | null>(null)
+const workspaceActionError = computed({
+  get: () => workspaceErrorMessage.value,
+  set: (message: string) => {
+    recoveryErrorOwner.value = null
+    workspaceErrorMessage.value = message
+  },
+})
+const workspaceConfirmationRequired = ref(false)
+let workspaceReadGeneration = 0
+interface WorkspaceReadContext { scope: string; generation: number }
+type ReplacementReadResult = { kind: 'unchanged' } | { kind: 'conflict' } | { kind: 'stale' } | { kind: 'empty' }
+  | { kind: 'loaded'; draft: ReimbursementDraft }
+function beginWorkspaceRead(): WorkspaceReadContext {
+  return { scope: sessionScope(), generation: ++workspaceReadGeneration }
+}
+function acceptsWorkspaceRead(context: WorkspaceReadContext): boolean {
+  return !disposed && context.scope === sessionScope() && context.generation === workspaceReadGeneration
+}
 const confirmingDraftReload = ref(false)
 const pendingNewApproval = ref<ReimbursementRelatedApprovalSelection | null>(null)
 const historyVisible = ref(false)
+const recoveringReimbursement = ref(false)
+let recoveryGeneration = 0
 const historyRecords = ref<ReimbursementSubmissionHistoryEntry[]>([])
 const historyError = ref('')
 const historyLoading = ref(false)
 const hydratedLockedDraftId = ref('')
 const receiptLoadError = ref('')
+type AttentionKind = 'save' | 'workspace' | 'options' | 'submission'
+const attentionSuspended = computed(() => Boolean(historyVisible.value || pendingDepartmentApproval.value
+  || confirmingDraftReload.value || recoveringReimbursement.value || submitFlowPending.value || expenseItemsCard.value?.hasOpenMaterialEditor))
+const pageAttention = computed(() => {
+  const draft = drafts.currentDraft
+  if (auth.status !== 'authenticated' || !draft || initializingWorkspace.value) return null
+  const notice = (kind: AttentionKind, title: string, tone: 'error' | 'warning' = 'error') => ({
+    key: JSON.stringify([sessionScope(), draft.id, kind, title]), title, tone,
+    target: `[data-attention-target="${kind}"]`,
+  })
+  if (draft.workspaceRetired && !historyOrigin.value) return notice('workspace', '已新开另一笔报销，请打开当前报销', 'warning')
+  if (saveRequiresReload.value || saveError.value) return notice('save', saveRequiresReload.value
+    ? '报销内容已更新，请核对后继续' : '保存失败，内容仍保留在本页')
+  if (draftUnavailable.value) return notice('workspace', '当前报销记录已不可用，请新开一笔')
+  if (workspaceActionError.value) return notice('workspace', workspaceActionError.value)
+  if (draft.status !== 'LOCKED' && reimbursementOptionsUnavailable.value) return notice('options', templateNeedsAdmin.value
+    ? 'OA 表单需要确认，请查看处理方式' : '暂时无法读取报销表单', 'warning')
+  if (submission.activeDraftId !== draft.id) return null
+  if (submission.requestError) return notice('submission', submission.requestError)
+  if (submission.status === 'FAILED_FINAL') return notice('submission', '审批未发起，请查看原因')
+  if (submission.status === 'MANUAL_REVIEW') return notice('submission', '提交结果待人工核对', 'warning')
+  if (submission.status === 'FAILED_RETRYABLE') return notice('submission', '提交遇到临时问题，等待自动重试', 'warning')
+  return null
+})
+let attentionRevealGeneration = 0
+async function revealAttention(kind?: AttentionKind, explicit = false): Promise<void> {
+  const generation = ++attentionRevealGeneration
+  const scope = sessionScope()
+  const draftId = drafts.currentDraft?.id
+  const selector = kind ? `[data-attention-target="${kind}"]` : pageAttention.value?.target
+  if (!scope || !draftId || !selector) return
+  await nextTick()
+  if (disposed || generation !== attentionRevealGeneration || scope !== sessionScope()
+    || draftId !== drafts.currentDraft?.id || attentionSuspended.value) return
+  const active = document.activeElement
+  if (!explicit && active?.matches('input, textarea, select, [contenteditable="true"]')) return
+  const target = document.querySelector<HTMLElement>(`.reimbursement-page ${selector}`)
+  target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+  if (target) { target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }) }
+}
 let historyRequest: AbortController | undefined
 const historyOrigin = ref<{
   draftId: string
@@ -197,16 +262,30 @@ const templateNeedsAdmin = computed(() => [
 ].includes(drafts.reimbursementOptionsErrorCode))
 const draftExpired = computed(() => Boolean(drafts.currentDraft
   && (drafts.currentDraft.status === 'EXPIRED' || drafts.currentDraft.id === expiredDraftId.value)))
+const draftUnavailable = computed(() => Boolean(drafts.currentDraft && drafts.currentDraft.id === unavailableDraftId.value))
+const activeMaterialRecovery = computed(() => Boolean(drafts.currentDraft?.recoveryPending
+  && !drafts.currentDraft.workspaceRetired && !draftExpired.value && !draftUnavailable.value))
 const canReplaceOutdatedForm = computed(() => templateMismatch.value && Boolean(drafts.currentDraft
   && ['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status))
-  && !trackedSubmission.value && !submitFlowPending.value && !initializingWorkspace.value)
+  && !trackedSubmission.value && !submitFlowPending.value && !initializingWorkspace.value && !workspaceConfirmationRequired.value)
 const formReadOnly = computed(() => !drafts.currentDraft || submitFlowPending.value
+  || Boolean(initializationError.value)
+  || bindingApprovalDepartment.value
+  || workspaceConfirmationRequired.value
+  || draftUnavailable.value
+  || drafts.currentDraft.workspaceRetired || drafts.currentDraft.recoveryPending || recoveringReimbursement.value
   || drafts.currentDraft.status === 'LOCKED' || draftExpired.value || trackedSubmission.value
   || templateMismatch.value || reimbursementOptionsUnavailable.value || saveRequiresReload.value)
 const formReadOnlyReason = computed(() => {
   if (!drafts.currentDraft) return '正在准备报销表单'
-  if (submitFlowPending.value) return '正在提交，请稍候'
+  if (initializationError.value) return '请先重新加载当前报销'
+  if (bindingApprovalDepartment.value) return '正在确认报销部门，请稍候'
+  if (workspaceConfirmationRequired.value) return '请先核对当前报销，确认新开结果后继续'
+  if (drafts.currentDraft.workspaceRetired) return '已新开另一笔报销，请重新进入当前报销'
+  if (draftUnavailable.value) return '当前报销记录已不可用，请新开一笔重新填写'
   if (draftExpired.value) return '本次填写内容已过期，请重新填写'
+  if (drafts.currentDraft.recoveryPending || recoveringReimbursement.value) return '材料尚在恢复，请等待恢复完成'
+  if (submitFlowPending.value) return '正在提交，请稍候'
   if (drafts.currentDraft.status === 'LOCKED' || trackedSubmission.value) return '本次报销内容已锁定，请查看提交进度'
   if (saveRequiresReload.value) return '报销内容已更新，请核对最新报销内容'
   if (reimbursementOptionsUnavailable.value) {
@@ -250,6 +329,10 @@ const currentFormInput = computed<ReimbursementDraftInput>(() => {
 const inputDirty = computed(() => inputSignature(currentFormInput.value) !== savedInputSignature.value)
 const relatedDirty = computed(() => relatedSignature(selectedRelatedApprovals.value) !== savedRelatedSignature.value)
 const formDirty = computed(() => inputDirty.value || relatedDirty.value)
+// Saved legacy input may gain defaults or half-day time encoding on hydration.
+// It still needs canonical saving when editable, but is not an employee edit.
+const hasUnsavedUserChanges = computed(() => relatedDirty.value || (inputDirty.value
+  && inputSignature(currentFormInput.value) !== editableInputBaseline.value))
 const pendingApprovalAccounting = computed(() => {
   if (!relatedDirty.value || !selectedRelatedApprovals.value.length) return null
   const candidates = selectedRelatedApprovals.value.map((selection) => drafts.travelApprovals.find(
@@ -337,7 +420,15 @@ const mobileNextLabel = computed(() => mobileStep.value === mobileSteps.length -
   : `下一步：${mobileSteps[mobileStep.value + 1]}`)
 const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({ item, missing: missingExpenseMaterials(item, drafts.files) }))
   .filter((entry) => entry.missing.length))
-const previewDisabledReason = computed(() => expense.itemReadinessError
+const previewDisabledReason = computed(() => (initializationError.value ? '请先重新加载当前报销' : '')
+  || (draftUnavailable.value ? '当前报销记录已不可用，请新开一笔重新填写' : '')
+  || (drafts.currentDraft?.recoveryPending && draftExpired.value
+  ? '保留的材料已过期，请新开报销并重新上传材料' : '')
+  || (drafts.currentDraft?.recoveryPending || recoveringReimbursement.value
+  ? '请等待材料恢复完成后再预览 Excel' : '')
+  || (workspaceConfirmationRequired.value ? '请先核对当前报销，确认新开结果后再预览 Excel' : '')
+  || (drafts.currentDraft?.workspaceRetired && drafts.currentDraft.status !== 'LOCKED' ? '请先打开当前报销' : '')
+  || expense.itemReadinessError
   || (saveRequiresReload.value ? '请先核对最新报销内容' : '')
   || (accountingOptionsChanged.value ? '请重新关联出差审批' : '')
   || subsidyInputError.value
@@ -359,19 +450,140 @@ const submissionProgressPercentage = computed(() => {
 })
 const submissionAlertType = computed(() => submission.status === 'FAILED_FINAL' ? 'error'
     : submission.status === 'FAILED_RETRYABLE' ? 'warning' : 'info')
-const canStartNewReimbursement = computed(() => Boolean(drafts.currentDraft
-  && !historyOrigin.value
-  && (draftExpired.value && !trackedSubmission.value
-    || (submission.activeDraftId === drafts.currentDraft.id
-      && (submission.status === 'SUBMITTED' || submission.status === 'FAILED_FINAL')))))
+const hasRestartableReimbursement = computed(() => Boolean(drafts.currentDraft
+  && (trackedSubmission.value || drafts.currentDraft.status === 'LOCKED' || draftExpired.value
+    || draftUnavailable.value || drafts.currentDraft.recoveryPending || expense.items.length
+    || selectedRelatedApprovals.value.length || drafts.files.length || drafts.pendingUploads.length
+    || expense.includeSubsidy)))
+const canStartNewReimbursement = computed(() => Boolean(drafts.currentDraft && !historyOrigin.value
+  && hasRestartableReimbursement.value && !initializingWorkspace.value && !drafts.currentDraft.workspaceRetired
+  && !bindingApprovalDepartment.value && !verifyingRelatedApprovals.value && !pendingDepartmentApproval.value
+  && !workspaceConfirmationRequired.value && !recoveringReimbursement.value && !submitFlowPending.value && !submission.submitting))
 const submittedResult = computed(() => trackedSubmission.value && submission.succeeded
   ? submission.submission : null)
 const submittedReimbursement = computed(() => drafts.currentDraft?.status === 'LOCKED'
   && hydratedLockedDraftId.value === drafts.currentDraft.id ? submittedResult.value : null)
 const receiptDetails = computed(() => drafts.currentDraft?.submittedDetails)
 const canOpenHistory = computed(() => Boolean(drafts.currentDraft && !historyOrigin.value
-  && (canStartNewReimbursement.value
-    || (!trackedSubmission.value && drafts.currentDraft.status !== 'LOCKED' && !submitFlowPending.value))))
+  && !bindingApprovalDepartment.value && !verifyingRelatedApprovals.value && !pendingDepartmentApproval.value
+  && !workspaceConfirmationRequired.value && !submitFlowPending.value && !submission.submitting && !recoveringReimbursement.value))
+const showHeaderNewReimbursement = computed(() => auth.status === 'authenticated' && drafts.currentDraft
+  && !historyOrigin.value)
+async function showWorkspaceReimbursement(restored: ReimbursementDraft): Promise<void> {
+  submission.abort()
+  hydrate(restored)
+  if (restored.status === 'LOCKED') {
+    try { await submission.restore(restored.id, { discoverByDraft: true, expectedRevision: restored.revision }) }
+    catch { /* Keep the persisted submission and its existing refresh action. */ }
+  }
+}
+async function recoverFailedReimbursement(): Promise<void> {
+  const current = drafts.currentDraft
+  const scope = sessionScope()
+  if (!current || current.workspaceRetired || draftExpired.value || draftUnavailable.value || workspaceConfirmationRequired.value || recoveringReimbursement.value || drafts.busy) return
+  const resumeSourceId = current.recoveryPending ? current.recoverySourceDraftId : undefined
+  if (!resumeSourceId && (submission.activeDraftId !== current.id || submission.status !== 'FAILED_FINAL')) return
+  const sourceId = resumeSourceId ?? current.id
+  const generation = ++recoveryGeneration
+  const acceptsRecovery = () => !disposed && sessionScope() === scope && generation === recoveryGeneration
+  recoveringReimbursement.value = true
+  workspaceActionError.value = ''
+  try {
+    if (hasUnsavedUserChanges.value) {
+      await ElMessageBox.confirm(
+        '将恢复服务器已保存的报销内容和材料。本页未保存的修改不会带入，继续将舍弃这些修改。',
+        '按已保存内容恢复',
+        { confirmButtonText: '按已保存内容恢复', cancelButtonText: '保留本页', type: 'warning' },
+      )
+      if (!acceptsRecovery() || drafts.currentDraft?.id !== current.id || drafts.currentDraft.workspaceRetired) return
+    }
+    const source = resumeSourceId ? await getReimbursementDraft(resumeSourceId) : current
+    if (!acceptsRecovery() || drafts.currentDraft?.id !== current.id || drafts.currentDraft.workspaceRetired || draftExpired.value || draftUnavailable.value) return
+    const restored = await drafts.recoverDraft(source.id, source.revision)
+    if (!acceptsRecovery()) return
+    await showWorkspaceReimbursement(restored)
+    if (!acceptsRecovery()) return
+    await returnToApprovalStep()
+    if (!acceptsRecovery()) return
+    ElMessage.success(restored.status === 'LOCKED' ? '已打开这笔报销的最新提交状态'
+      : restored.recoveryPending ? '材料正在恢复，请稍后继续恢复' : '已保留报销内容，请核对关联审批和材料后再提交')
+  } catch (error) {
+    if (!acceptsRecovery()) return
+    if (error === 'cancel' || error === 'close') return
+    if (apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_NOT_FOUND'
+      && resumeSourceId && drafts.currentDraft?.id === current.id) {
+      unavailableDraftId.value = current.id
+      void revealAttention('workspace')
+      return
+    }
+    if (apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_EXPIRED'
+      && resumeSourceId && drafts.currentDraft?.id === current.id) {
+      expiredDraftId.value = current.id
+      return
+    }
+    workspaceActionError.value = apiErrorMessage(error, '恢复失败，原报销和材料仍保留，请重试')
+    recoveryErrorOwner.value = { sourceId, scope, generation }
+    // The server may have durably begun a copy before a response was lost.
+    try {
+      const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined })
+      const latest = workspace.items[0]
+      if (acceptsRecovery() && drafts.currentDraft?.id === current.id
+        && latest?.recoverySourceDraftId === sourceId) {
+        await drafts.loadDraft(latest.id, true)
+        if (acceptsRecovery() && drafts.currentDraft?.id === latest.id) {
+          await showWorkspaceReimbursement(drafts.currentDraft)
+        }
+      }
+    } catch { /* Preserve the original error and original form; a reload resumes the durable copy. */ }
+  }
+  finally { if (acceptsRecovery()) { recoveringReimbursement.value = false; scheduleAutosave() } }
+}
+let recoveryRefreshTimer: ReturnType<typeof setTimeout> | undefined
+let recoveryRefreshGeneration = 0
+watch([() => sessionScope(), () => drafts.currentDraft?.id], () => {
+  recoveryRefreshGeneration++
+}, { flush: 'sync' })
+watch(() => [sessionScope(), drafts.currentDraft?.id, activeMaterialRecovery.value] as const,
+  ([scope, draftId, pending]) => {
+    if (recoveryRefreshTimer) clearTimeout(recoveryRefreshTimer)
+    if (!scope || !draftId || !pending) return
+    const generation = ++recoveryRefreshGeneration
+    const acceptsRefresh = () => !disposed && generation === recoveryRefreshGeneration
+      && scope === sessionScope() && drafts.currentDraft?.id === draftId && activeMaterialRecovery.value
+    const refresh = async (): Promise<void> => {
+      try {
+        if (!acceptsRefresh()) return
+        if (!recoveringReimbursement.value && !drafts.busy) {
+          const latest = await getReimbursementDraft(draftId)
+          if (!acceptsRefresh() || recoveringReimbursement.value) return
+          if (latest.workspaceRetired) {
+            drafts.currentDraft = { ...drafts.currentDraft!, workspaceRetired: true }
+            return
+          }
+          if (latest.status === 'EXPIRED') {
+            expiredDraftId.value = draftId
+            return
+          }
+          if (!latest.recoveryPending) {
+            await drafts.loadDraft(draftId, true)
+            if (generation === recoveryRefreshGeneration && !disposed && scope === sessionScope()
+              && drafts.currentDraft?.id === draftId) await showWorkspaceReimbursement(drafts.currentDraft)
+          }
+        }
+      } catch (error) {
+        if (acceptsRefresh() && apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_NOT_FOUND') {
+          unavailableDraftId.value = draftId
+        }
+        // Transient failures retain the pending state and its explicit retry action.
+      }
+      finally {
+        if (acceptsRefresh()) {
+          recoveryRefreshTimer = setTimeout(() => void refresh(), 3000)
+        }
+      }
+    }
+    recoveryRefreshTimer = setTimeout(() => void refresh(), 3000)
+  })
 const reimbursementTime = new Intl.DateTimeFormat('zh-CN', {
   timeZone: 'Asia/Shanghai', dateStyle: 'medium', timeStyle: 'short',
 })
@@ -381,11 +593,15 @@ function formatRecordTime(value: string): string {
   return Number.isNaN(date.getTime()) ? '—' : reimbursementTime.format(date)
 }
 
-function sessionScope(): string {
+function sessionIdentity(): string {
   const user = auth.session?.user.userId
   const department = auth.session?.selectedDepartment
   return auth.status === 'authenticated' && user && department
     ? JSON.stringify([user, department.id, department.name]) : ''
+}
+function sessionScope(): string {
+  const identity = sessionIdentity()
+  return identity ? `${sessionGeneration.value}:${identity}` : ''
 }
 function tripSignature(trip: TripInput | null | undefined): object | null {
   if (!trip) return null
@@ -518,10 +734,16 @@ function reconcileRelatedApprovalsFromServer(
     ? 'accepted'
     : 'restored'
 }
-async function runSerializedSave<T>(operation: () => Promise<T>): Promise<T> {
+async function runSerializedSave<T>(
+  operation: () => Promise<T>,
+  target = { scope: sessionScope(), draftId: drafts.currentDraft?.id },
+): Promise<T> {
+  if (disposed || target.scope !== sessionScope() || target.draftId !== drafts.currentDraft?.id) {
+    throw new Error('当前报销已变化，原保存操作已取消')
+  }
   if (savePromise) {
     await savePromise
-    return runSerializedSave(operation)
+    return runSerializedSave(operation, target)
   }
   const running = operation()
   const lock = running.then(() => undefined, () => undefined)
@@ -572,8 +794,11 @@ async function verifyRelatedApprovals(
     if (reconciliation === 'restored') void refreshOptionsAfterError(error)
     return reconciliation
   } finally {
-    verifyingRelatedApprovals.value = false
-    scheduleAutosave()
+    if (scope === sessionScope()) {
+      verifyingRelatedApprovals.value = false
+      scheduleAutosave()
+      if (drafts.currentDraft?.id === draftId && relatedApprovalVerificationError.value) void revealAttention('save')
+    }
   }
 }
 async function reconfirmRelatedApprovals(): Promise<void> {
@@ -584,7 +809,26 @@ async function retrySave(): Promise<void> {
   if (relatedApprovalRetry.value) await verifyRelatedApprovals(relatedApprovalRetry.value)
   else await flushAutosave().catch(() => undefined)
 }
+async function prepareExcelPreview(): Promise<void> {
+  const scope = sessionScope(), draftId = drafts.currentDraft?.id
+  try {
+    await flushAutosave()
+    if (disposed || scope !== sessionScope() || draftId !== drafts.currentDraft?.id) {
+      throw new DOMException('当前报销已变化，已取消原预览', 'AbortError')
+    }
+  }
+  catch (error) {
+    if (scope === sessionScope() && draftId === drafts.currentDraft?.id) await revealAttention('save')
+    throw error
+  }
+}
 function hydrate(draft: ReimbursementDraft): void {
+  initializationError.value = ''
+  const recoveryError = recoveryErrorOwner.value
+  if (recoveryError && !draft.recoveryPending && draft.recoverySourceDraftId === recoveryError.sourceId
+    && recoveryError.scope === sessionScope() && recoveryError.generation === recoveryGeneration) {
+    workspaceActionError.value = ''
+  }
   deferredMaterialRevision.value = null
   hydratedLockedDraftId.value = draft.status === 'LOCKED' ? draft.id : ''
   companyValue.value = draft.input.companyValue
@@ -597,6 +841,7 @@ function hydrate(draft: ReimbursementDraft): void {
   saveRequiresReload.value = false
   drafts.revisionConflict = false
   expiredDraftId.value = ''
+  unavailableDraftId.value = ''
   relatedApprovalVerificationError.value = ''
   relatedApprovalRetry.value = null
   const scope = sessionScope()
@@ -610,6 +855,13 @@ async function loadSubmittedReceipt(): Promise<void> {
   const result = submittedResult.value
   const scope = sessionScope()
   if (!result || !scope || drafts.loadingCurrentDraft || submittedReimbursement.value) return
+  if (hasUnsavedUserChanges.value) {
+    // A different tab may have submitted while this page still held real edits.
+    // Status discovery is a read, not consent to discard those edits.
+    saveRequiresReload.value = true
+    saveError.value = '这笔报销已提交，本页未保存的修改仍保留，请核对最新报销内容'
+    return
+  }
   receiptLoadError.value = ''
   await drafts.loadDraft(result.draftId, true)
   if (disposed || sessionScope() !== scope || submittedResult.value?.draftId !== result.draftId) return
@@ -620,53 +872,142 @@ async function loadSubmittedReceipt(): Promise<void> {
   }
   hydrate(locked)
 }
-async function openEditableReimbursement(): Promise<void> {
-  const scope = sessionScope()
-  const created = await drafts.createDraft({
-    ocrDispositionVersion: 1,
-    companyValue: '',
-    budgetCodeValue: '',
-    trip: null,
-    trips: [],
-    editingState: {
-      includeSubsidy: false,
-      trip: {
-        tripType: 'business', startDate: '', startTime: '09:00', endDate: '', endTime: '18:00',
-        policyConfirmed: false, confirmedEffectiveDays: '', noSubsidyException: false,
-      },
-      trips: [],
-    },
-    items: [],
-    dismissedOcrFileIds: [],
-  }, true, auth.session?.selectedDepartment ?? undefined)
-  if (disposed || sessionScope() !== scope || drafts.currentDraft?.id !== created.id) return
-  expense.reset()
-  submission.abort()
-  hydrate(created)
-  if (created.status === 'LOCKED') {
-    try {
-      await submission.restore(created.id, { discoverByDraft: true, expectedRevision: created.revision })
-    } catch { /* The submission panel shows the recovery action. */ }
+async function readReplacementResult(previousId: string, context: WorkspaceReadContext): Promise<ReplacementReadResult> {
+  const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined })
+  if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== previousId) return { kind: 'stale' }
+  const latest = workspace.items[0], previous = drafts.currentDraft
+  if (!latest) return { kind: 'empty' }
+  if (latest.id === previousId && latest.revision === previous.revision && latest.status === previous.status
+    && Boolean(latest.recoveryPending) === Boolean(previous.recoveryPending)
+    && Boolean(latest.workspaceRetired) === Boolean(previous.workspaceRetired)) {
+    workspaceConfirmationRequired.value = false
+    return { kind: 'unchanged' }
   }
+  let conflict = false, preserveEdits = false, retired = false
+  const adopted = await drafts.loadDraft(latest.id, true, (incoming) => {
+    if (!acceptsWorkspaceRead(context)) return false
+    if (incoming.workspaceRetired) { retired = true; return false }
+    if (incoming.id !== previousId || !formDirty.value) return true
+    const editable = ['DRAFT', 'REVIEW_READY'].includes(incoming.status) && !incoming.recoveryPending
+    if (!editable || inputSignature(incoming.input) !== savedInputSignature.value
+      || relatedSignature(incoming.relatedApprovals.map(approvalSelection)) !== savedRelatedSignature.value) {
+      conflict = true
+      return false
+    }
+    preserveEdits = true
+    return true
+  })
+  if (!acceptsWorkspaceRead(context)) return { kind: 'stale' }
+  if (conflict) {
+    workspaceConfirmationRequired.value = false
+    saveRequiresReload.value = true
+    saveError.value = '服务器中的报销状态或内容已变化，本页修改已保留，请核对最新报销内容'
+    return { kind: 'conflict' }
+  }
+  if (retired || drafts.loadError || !adopted || drafts.currentDraft?.id !== latest.id) {
+    throw new Error(drafts.loadError || '当前报销读取期间已变化，请重新核对')
+  }
+  workspaceConfirmationRequired.value = false
+  drafts.mutationError = ''
+  return preserveEdits ? { kind: 'unchanged' } : { kind: 'loaded', draft: drafts.currentDraft }
+}
+async function confirmCurrentWorkspace(): Promise<void> {
+  const previousId = drafts.currentDraft?.id
+  if (!previousId || !sessionScope() || !workspaceConfirmationRequired.value || initializingWorkspace.value) return
+  const context = beginWorkspaceRead()
+  initializingWorkspace.value = true
+  try {
+    const result = await readReplacementResult(previousId, context)
+    if (!acceptsWorkspaceRead(context) || result.kind === 'stale') return
+    if (result.kind === 'empty') {
+      if (!await openEditableReimbursement(false, context)) return
+      if (!acceptsWorkspaceRead(context)) return
+      pendingNewApproval.value = null
+      await returnToApprovalStep()
+      if (!acceptsWorkspaceRead(context)) return
+    } else if (result.kind === 'loaded') {
+      await showWorkspaceReimbursement(result.draft)
+      if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== result.draft.id) return
+      pendingNewApproval.value = null
+      await returnToApprovalStep()
+      if (!acceptsWorkspaceRead(context)) return
+    }
+    workspaceActionError.value = ''
+    drafts.mutationError = ''
+  } catch {
+    if (acceptsWorkspaceRead(context)) workspaceActionError.value = '暂时无法核对当前报销，请稍后重试'
+  } finally {
+    if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
+  }
+}
+async function openEditableReimbursement(
+  replaceCurrent = false,
+  context = beginWorkspaceRead(),
+): Promise<boolean> {
+  const previous = replaceCurrent && drafts.currentDraft
+    ? { id: drafts.currentDraft.id, revision: drafts.currentDraft.revision } : undefined
+  let created: ReimbursementDraft
+  try {
+    created = await drafts.createDraft({
+      ocrDispositionVersion: 1,
+      companyValue: '',
+      budgetCodeValue: '',
+      trip: null,
+      trips: [],
+      editingState: {
+        includeSubsidy: false,
+        trip: {
+          tripType: 'business', startDate: '', startTime: '09:00', endDate: '', endTime: '18:00',
+          policyConfirmed: false, confirmedEffectiveDays: '', noSubsidyException: false,
+        },
+        trips: [],
+      },
+      items: [],
+      dismissedOcrFileIds: [],
+    }, true, auth.session?.selectedDepartment ?? undefined, previous)
+  } catch (error) {
+    if (!acceptsWorkspaceRead(context)) return false
+    if (!previous || drafts.currentDraft?.id !== previous.id) throw error
+    workspaceConfirmationRequired.value = true
+    let result: ReplacementReadResult
+    try { result = await readReplacementResult(previous.id, context) }
+    catch { throw new Error('无法确认新开结果，请先核对当前报销') }
+    if (!acceptsWorkspaceRead(context) || result.kind === 'stale') return false
+    if (result.kind === 'empty') return openEditableReimbursement(false, context)
+    if (result.kind === 'conflict') throw new Error(saveError.value, { cause: error })
+    if (result.kind === 'unchanged') throw error
+    created = result.draft
+  }
+  if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== created.id) return false
+  workspaceConfirmationRequired.value = false
+  expense.reset()
+  await showWorkspaceReimbursement(created)
+  if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== created.id) return false
   if (templateMismatch.value) await drafts.loadReimbursementOptions()
+  return acceptsWorkspaceRead(context) && drafts.currentDraft?.id === created.id
 }
 async function runWorkspaceInitialization(scope: string): Promise<void> {
+  const context = beginWorkspaceRead()
+  if (context.scope !== scope) return
   initializingWorkspace.value = true
   initializationError.value = ''
   try {
-    await Promise.all([
+    const [, , , workspace] = await Promise.all([
       expense.loadCategories(), drafts.loadReimbursementOptions(),
       drafts.loadDrafts(0, 50, auth.session?.selectedDepartment ?? undefined),
+      listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined }),
     ])
-    if (disposed || sessionScope() !== scope) return
+    if (!acceptsWorkspaceRead(context)) return
     if (drafts.listError) throw new Error(drafts.listError)
-    // Restore a submission first: reloading must not create a duplicate approval.
-    const recent = drafts.drafts.find((draft) => draft.status !== 'EXPIRED')
+    // Only the current reimbursement is restored; replaced work is never
+    // rediscovered merely because a background submission changed status.
+    const recent = workspace.items[0]
     if (recent) {
-      await drafts.loadDraft(recent.id)
+      const adopted = await drafts.loadDraft(recent.id, true, (incoming) => acceptsWorkspaceRead(context) && !incoming.workspaceRetired)
+      if (!acceptsWorkspaceRead(context)) return
       const opened = drafts.currentDraft
-      if (!opened || opened.id !== recent.id) throw new Error(drafts.loadError || '报销内容加载失败')
-      if (sessionScope() !== scope || disposed) return
+      if (!adopted || !opened || opened.id !== recent.id) throw new Error(drafts.loadError || '报销内容加载失败')
+      workspaceConfirmationRequired.value = false
       hydrate(opened)
       try {
         await submission.restore(opened.id, opened.status === 'LOCKED'
@@ -674,13 +1015,13 @@ async function runWorkspaceInitialization(scope: string): Promise<void> {
       } catch { /* The submission card renders the recoverable error. */ }
     } else {
       if (drafts.reimbursementOptionsError) throw new Error(drafts.reimbursementOptionsError)
-      await openEditableReimbursement()
+      if (!await openEditableReimbursement(false, context)) return
     }
-    if (sessionScope() === scope) initializedScope = scope
+    if (acceptsWorkspaceRead(context)) initializedScope = scope
   } catch (error) {
-    if (sessionScope() === scope) initializationError.value = error instanceof Error ? error.message : '报销表单加载失败，请重试'
+    if (acceptsWorkspaceRead(context)) initializationError.value = error instanceof Error ? error.message : '报销表单加载失败，请重试'
   } finally {
-    if (sessionScope() === scope) { initializingWorkspace.value = false; scheduleAutosave() }
+    if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
 function initializeWorkspace(force = false): Promise<void> {
@@ -693,6 +1034,25 @@ function initializeWorkspace(force = false): Promise<void> {
   })
   initializationPromise = running
   return running
+}
+async function openCurrentWorkspace(): Promise<void> {
+  const scope = sessionScope(), draftId = drafts.currentDraft?.id
+  const generation = workspaceReadGeneration
+  if (initializingWorkspace.value || drafts.busy || saving.value || confirmingDraftReload.value) return
+  if (hasUnsavedUserChanges.value) {
+    confirmingDraftReload.value = true
+    try {
+      await ElMessageBox.confirm(
+        '这笔报销已被新开内容替换，本页尚未保存的修改无法再保存。打开当前报销将舍弃这些修改，服务器已保存的内容和材料会保留。',
+        '打开当前报销',
+        { confirmButtonText: '舍弃本页修改并打开', cancelButtonText: '保留本页', type: 'warning' },
+      )
+    } catch { return }
+    finally { if (scope === sessionScope() && generation === workspaceReadGeneration) confirmingDraftReload.value = false }
+  }
+  if (disposed || scope !== sessionScope() || generation !== workspaceReadGeneration
+    || draftId !== drafts.currentDraft?.id || drafts.busy || saving.value) return
+  await initializeWorkspace(true)
 }
 function scheduleAutosave(): void {
   if (autosaveTimer) clearTimeout(autosaveTimer)
@@ -746,17 +1106,16 @@ async function flushAutosave(options: { includeRelated?: boolean } = {}): Promis
         void refreshOptionsAfterError(error)
       }
       throw error
-    } finally { saving.value = false }
+    } finally { if (scope === sessionScope() && drafts.currentDraft?.id === draftId) saving.value = false }
   })
 }
 onBeforeRouteLeave(async (to) => {
-  if (submitFlowPending.value || bindingApprovalDepartment.value || replacingTemplate.value
+  if (recoveringReimbursement.value || submitFlowPending.value || bindingApprovalDepartment.value || replacingTemplate.value
     || initializingWorkspace.value || verifyingRelatedApprovals.value || pendingDepartmentApproval.value) {
     ElMessage.warning('请等待当前操作完成，或先完成部门选择')
     return false
   }
-  if (!sessionScope() || drafts.currentDraft?.status === 'LOCKED' || trackedSubmission.value
-    || (!formDirty.value && !savePromise)) return true
+  if (!sessionScope() || ((!formDirty.value || (formReadOnly.value && !hasUnsavedUserChanges.value)) && !savePromise)) return true
   if (auth.isAdmin && templateNeedsAdmin.value
     && to.path === (props.mobile ? '/m/settings' : '/admin/settings')) {
     if (drafts.busy || saving.value) {
@@ -764,7 +1123,7 @@ onBeforeRouteLeave(async (to) => {
       return false
     }
     // Hydrating older saved input can normalize defaults without an employee edit.
-    if (!relatedDirty.value && inputSignature(currentFormInput.value) === editableInputBaseline.value) return true
+    if (!hasUnsavedUserChanges.value) return true
     const scope = sessionScope()
     const draftId = drafts.currentDraft?.id
     try {
@@ -795,41 +1154,56 @@ onBeforeRouteLeave(async (to) => {
     return false
   }
 })
-function validateSubmission(): string {
-  if (!companyOptions.value.some((option) => option.value === companyValue.value)) return '请选择所属公司'
-  if (!budgetOptions.value.some((option) => option.value === budgetCodeValue.value)) return '请选择预算代码'
+interface SubmissionValidationIssue { message: string; step: number; itemId?: string; fileId?: string }
+function validateSubmission(): SubmissionValidationIssue | null {
+  const issue = (message: string, step: number, itemId?: string, fileId?: string) => ({ message, step, itemId, fileId })
+  if (!companyOptions.value.some((option) => option.value === companyValue.value)) return issue('请选择所属公司', 0)
+  if (!budgetOptions.value.some((option) => option.value === budgetCodeValue.value)) return issue('请选择预算代码', 0)
   if (expense.includeSubsidy && expense.tripPayloads().length !== selectedRelatedApprovals.value.length) {
-    return expense.policyInputError || '请完整确认每个补助项的出发和返回时段'
+    return issue(expense.policyInputError || '请完整确认每个补助项的出发和返回时段', 1)
   }
-  if (expense.items.length && (expense.categoryLoadError || !expense.categories.length)) return '请先加载费用类别'
-  if (!expense.items.length && !hasValidSubsidy.value) return '请添加费用明细或申请有效的出差补助'
-  if (expense.itemReadinessError) return expense.itemReadinessError
+  if (expense.items.length && (expense.categoryLoadError || !expense.categories.length)) return issue('请先加载费用类别', 2)
+  if (!expense.items.length && !hasValidSubsidy.value) return issue('请添加费用明细或申请有效的出差补助', 2)
+  if (expense.itemReadinessError) return issue(expense.itemReadinessError, 2)
   if (materialSubmissionIssues.value.length) {
-    const issue = materialSubmissionIssues.value[0]!
-    return `请先处理“${issue.file.name}”：${issue.reason}`
+    const material = materialSubmissionIssues.value[0]!
+    return issue(`请先处理“${material.file.name}”：${material.reason}`, 2, material.itemId, material.itemId ? undefined : material.file.id)
   }
-  if (!selectedRelatedApprovals.value.length) return '请至少关联一张已通过的出差审批'
-  if (!hasActiveMaterials.value && !excelOnlySubmission.value) return '请上传报销材料'
+  if (!selectedRelatedApprovals.value.length) return issue('请至少关联一张已通过的出差审批', 0)
+  if (!hasActiveMaterials.value && !excelOnlySubmission.value) return issue('请上传报销材料', 2)
   for (const item of expense.items) {
     if (item.category === 'lodging' && !item.hotelBillFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'hotel_bill')),
-    )) return `“${item.description || '住宿费用'}”缺少住宿明细，请补充后提交`
+    )) return issue(`“${item.description || '住宿费用'}”缺少住宿明细，请补充后提交`, 2, item.id)
     if (item.transportType !== 'taxi' && (item.requiresItinerary || item.transportType === 'ride_hailing') && !item.itineraryFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'itinerary')),
-    )) return `“${item.description || '网约车费用'}”缺少对应行程单，请点击编辑补齐`
+    )) return issue(`“${item.description || '网约车费用'}”缺少对应行程单，请点击编辑补齐`, 2, item.id)
     if (isForeignExpense(item) && !item.cnyAmountConfirmed) {
-      return `请确认“${item.description || '国外票据'}”的人民币报销金额`
+      return issue(`请确认“${item.description || '国外票据'}”的人民币报销金额`, 2, item.id)
     }
     if (requiresPaymentProof(item) && !item.paymentProofFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'payment_proof')),
-    )) return `“${item.description || '本行费用'}”超过 500 元，请补充付款凭证`
+    )) return issue(`“${item.description || '本行费用'}”超过 500 元，请补充付款凭证`, 2, item.id)
   }
-  return ''
+  return null
+}
+async function revealValidationIssue(issue: SubmissionValidationIssue): Promise<void> {
+  const scope = sessionScope(), draftId = drafts.currentDraft?.id
+  if (props.mobile) selectMobileStep(issue.step)
+  await nextTick()
+  if (disposed || scope !== sessionScope() || draftId !== drafts.currentDraft?.id) return
+  const panel = document.getElementById(`reimbursement-step-${issue.step}`)
+  const target = panel?.querySelector<HTMLElement>('.mobile-step-heading') ?? panel
+  target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+  if (issue.itemId || issue.fileId) expenseItemsCard.value?.focusMaterial?.(issue.itemId, issue.fileId)
 }
 async function confirmAndSubmit(): Promise<void> {
   if (submissionButtonReason.value) return
   const error = validateSubmission()
-  if (error) { ElMessage.warning(error); return }
+  if (error) { ElMessage.warning(error.message); await revealValidationIssue(error); return }
+  const scope = sessionScope(), draftId = drafts.currentDraft?.id
+  const acceptsSubmit = () => !disposed && scope === sessionScope() && draftId === drafts.currentDraft?.id
+  let failureTarget: AttentionKind | undefined
   submitFlowPending.value = true
   try {
     await ElMessageBox.confirm(
@@ -838,46 +1212,68 @@ async function confirmAndSubmit(): Promise<void> {
         : '核对无误后将生成票据汇总 PDF 和报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。',
       '提交报销申请', { confirmButtonText: '确认提交', cancelButtonText: '返回检查', type: 'warning' },
     )
+    if (!acceptsSubmit()) return
+    workspaceActionError.value = ''
     await flushAutosave()
+    if (!acceptsSubmit()) return
     const ready = await drafts.markReviewReady()
+    if (!acceptsSubmit() || ready.id !== draftId) return
     await submission.submit(ready.id, ready.revision)
-    ElMessage.success('正在生成材料并提交 OA')
+    if (acceptsSubmit()) ElMessage.success('正在生成材料并提交 OA')
   } catch (error) {
+    if (disposed || scope !== sessionScope() || draftId !== drafts.currentDraft?.id) return
     if (apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_EXPIRED' && drafts.currentDraft) {
       expiredDraftId.value = drafts.currentDraft.id
     }
     void refreshOptionsAfterError(error)
-    if (error !== 'cancel' && error !== 'close') ElMessage.error(submission.errorMessage || saveError.value
-      || drafts.mutationError || (error instanceof Error ? error.message : '提交失败，请重试'))
-  } finally { submitFlowPending.value = false; scheduleAutosave() }
+    if (error !== 'cancel' && error !== 'close') {
+      const message = submission.errorMessage || saveError.value || drafts.mutationError
+        || (error instanceof Error ? error.message : '提交失败，请重试')
+      ElMessage.error(message)
+      if (saveError.value || saveRequiresReload.value) failureTarget = 'save'
+      else if (submission.activeDraftId === draftId && submission.errorMessage) failureTarget = 'submission'
+      else { workspaceActionError.value = message; failureTarget = 'workspace' }
+    }
+  } finally {
+    if (acceptsSubmit()) {
+      submitFlowPending.value = false
+      scheduleAutosave()
+      if (failureTarget) void revealAttention(failureTarget)
+    }
+  }
 }
 async function newReimbursement(): Promise<void> {
-  // Only a definitive outcome permits a new record; uncertain OA creation must
-  // retain its existing submission identity until reconciliation completes.
   if (!canStartNewReimbursement.value || initializingWorkspace.value || drafts.busy
     || reimbursementOptionsUnavailable.value || confirmingDraftReload.value) return
   const scope = sessionScope()
+  const generation = workspaceReadGeneration
   const draftId = drafts.currentDraft?.id
-  if (draftExpired.value && formDirty.value) {
+  if (!submission.succeeded || hasUnsavedUserChanges.value) {
     confirmingDraftReload.value = true
     try {
       await ElMessageBox.confirm(
-        '这笔报销已过期。继续填写新的报销前，请先留存本页修改。确认后，本页尚未保存的内容会被舍弃。',
-        '确认重新填写',
-        { confirmButtonText: '舍弃并重新填写', cancelButtonText: '保留本页', type: 'warning' },
+        submission.succeeded
+          ? '新开后将舍弃本页未保存的修改，已提交的报销记录会保留。确定新开一笔吗？'
+          : trackedSubmission.value && submission.status !== 'FAILED_FINAL'
+          ? '新开后，本页将填写另一笔报销。上一笔仍会继续提交或核对结果，请勿重复报销同一笔费用。'
+          : '新开后将放弃当前填写内容和材料，不能返回继续填写。确定新开一笔吗？',
+        '新开一笔报销',
+        { confirmButtonText: '确认新开', cancelButtonText: '继续当前报销', type: 'warning' },
       )
     } catch { return }
-    finally { confirmingDraftReload.value = false }
-    if (disposed || scope !== sessionScope() || draftId !== drafts.currentDraft?.id
+    finally { if (scope === sessionScope() && generation === workspaceReadGeneration) confirmingDraftReload.value = false }
+    if (disposed || scope !== sessionScope() || generation !== workspaceReadGeneration || draftId !== drafts.currentDraft?.id
       || !canStartNewReimbursement.value || drafts.busy || reimbursementOptionsUnavailable.value) return
   }
   const selection = pendingNewApproval.value
+  const context = beginWorkspaceRead()
   workspaceActionError.value = ''
   initializingWorkspace.value = true
   try {
-    await openEditableReimbursement()
-    if (sessionScope() !== scope || disposed) return
+    if (!await openEditableReimbursement(true, context)) return
+    if (!acceptsWorkspaceRead(context)) return
     await returnToApprovalStep()
+    if (!acceptsWorkspaceRead(context)) return
     const opened = drafts.currentDraft
     if (opened?.status !== 'DRAFT' && opened?.status !== 'REVIEW_READY') return
     pendingNewApproval.value = null
@@ -888,16 +1284,23 @@ async function newReimbursement(): Promise<void> {
     }
   }
   catch (error) {
+    if (!acceptsWorkspaceRead(context)) return
     workspaceActionError.value = error instanceof Error ? error.message : '新报销准备失败'
     ElMessage.error(workspaceActionError.value)
     void refreshOptionsAfterError(error)
   }
-  finally { if (sessionScope() === scope) initializingWorkspace.value = false }
+  finally {
+    if (acceptsWorkspaceRead(context)) {
+      initializingWorkspace.value = false
+      if (!saveError.value) scheduleAutosave()
+    }
+  }
 }
 async function returnToApprovalStep(): Promise<void> {
+  const scope = sessionScope(), generation = workspaceReadGeneration
   mobileStep.value = 0
   await nextTick()
-  scrollToWorkspaceStart()
+  if (!disposed && scope === sessionScope() && generation === workspaceReadGeneration) scrollToWorkspaceStart()
 }
 function scrollToWorkspaceStart(): void {
   document.querySelector<HTMLElement>('[data-testid="reimbursement-workspace-start"]')
@@ -936,26 +1339,27 @@ async function refreshOptionsAfterError(error: unknown): Promise<void> {
   ].includes(apiErrorCode(error) ?? '')) await refreshFormOptions()
 }
 
-async function openSavedReimbursement(draftId: string, action?: 'history' | 'return'): Promise<void> {
+async function openSavedReimbursement(draftId: string, action?: 'history'): Promise<void> {
   const scope = sessionScope()
   const previousId = drafts.currentDraft?.id
   if (!scope || initializingWorkspace.value || drafts.busy || saving.value
     || submitFlowPending.value || confirmingDraftReload.value || submission.submitting) return
-  const origin = historyOrigin.value
   if (action === 'history' && (!previousId || !canOpenHistory.value || bindingApprovalDepartment.value
     || verifyingRelatedApprovals.value || pendingDepartmentApproval.value)) return
-  if (action === 'return' && origin?.draftId !== draftId) return
   if (!action && draftId !== previousId) return
-  if (action === 'history' && !trackedSubmission.value && formDirty.value) {
+  if (action && !trackedSubmission.value && formDirty.value && !formReadOnly.value) {
     try {
       await flushAutosave()
       if (formDirty.value) throw new Error('报销内容尚未保存，请核对后再查看记录')
     } catch (error) {
-      workspaceActionError.value = error instanceof Error ? error.message : '保存失败，请重试'
+      if (scope === sessionScope() && previousId === drafts.currentDraft?.id) {
+        workspaceActionError.value = error instanceof Error ? error.message : '保存失败，请重试'
+      }
       return
     }
   }
-  if (previousId && formDirty.value && !trackedSubmission.value) {
+  if (disposed || scope !== sessionScope() || previousId !== drafts.currentDraft?.id) return
+  if (previousId && hasUnsavedUserChanges.value) {
     confirmingDraftReload.value = true
     if (autosaveTimer) clearTimeout(autosaveTimer)
     try {
@@ -965,7 +1369,7 @@ async function openSavedReimbursement(draftId: string, action?: 'history' | 'ret
         { confirmButtonText: '读取已保存内容', cancelButtonText: '保留本页', type: 'warning' },
       )
     } catch { return }
-    finally { confirmingDraftReload.value = false; scheduleAutosave() }
+    finally { if (scope === sessionScope()) { confirmingDraftReload.value = false; scheduleAutosave() } }
   }
   if (disposed || scope !== sessionScope() || previousId !== drafts.currentDraft?.id
     || drafts.busy || saving.value || (action === 'history' && !canOpenHistory.value)) return
@@ -977,18 +1381,11 @@ async function openSavedReimbursement(draftId: string, action?: 'history' | 'ret
     if (disposed || scope !== sessionScope()) return
     const opened = drafts.currentDraft
     if (!opened || opened.id !== draftId || drafts.loadError) {
-      if (action === 'return' && !drafts.loadError && !drafts.drafts.some((draft) => draft.id === draftId)) {
-        historyOrigin.value = null
-        await runWorkspaceInitialization(scope)
-        return
-      }
       workspaceActionError.value = drafts.loadError || '这笔报销已不可用，请重新加载报销列表'
       return
     }
     if (action === 'history' && previousId) {
       historyOrigin.value = { draftId: previousId, mobileStep: mobileStep.value, pendingApproval: pendingNewApproval.value }
-    } else if (action === 'return') {
-      historyOrigin.value = null
     }
     if (action) pendingNewApproval.value = null
     drafts.mutationError = ''
@@ -997,12 +1394,8 @@ async function openSavedReimbursement(draftId: string, action?: 'history' | 'ret
       await submission.restore(opened.id, opened.status === 'LOCKED'
         ? { discoverByDraft: true, expectedRevision: opened.revision } : undefined)
     } catch { /* The submission panel shows the recovery action. */ }
-    if (action === 'return' && origin) {
-      pendingNewApproval.value = origin.pendingApproval
-      mobileStep.value = origin.mobileStep
-      await nextTick()
-      scrollToWorkspaceStart()
-    } else if (previousId !== draftId) {
+    if (disposed || scope !== sessionScope() || drafts.currentDraft?.id !== draftId) return
+    if (previousId !== draftId) {
       await returnToApprovalStep()
     }
   } finally {
@@ -1037,7 +1430,7 @@ async function refreshMaterialStatus(): Promise<void> {
       ElMessage.error(apiErrorMessage(error, '材料状态刷新失败，请重试'))
     }
   } finally {
-    refreshingMaterialStatus.value = false
+    if (scope === sessionScope()) refreshingMaterialStatus.value = false
   }
 }
 function openHistory(): void {
@@ -1073,8 +1466,42 @@ function chooseHistoryRecord(draftId: string): void {
   historyVisible.value = false
   void openSavedReimbursement(draftId, 'history')
 }
-function returnFromHistory(): void {
-  if (historyOrigin.value) void openSavedReimbursement(historyOrigin.value.draftId, 'return')
+async function returnFromHistory(): Promise<void> {
+  const origin = historyOrigin.value
+  const historicalId = drafts.currentDraft?.id
+  if (!origin || !historicalId || initializingWorkspace.value || drafts.busy || saving.value
+    || submitFlowPending.value || submission.submitting || confirmingDraftReload.value) return
+  const context = beginWorkspaceRead()
+  initializingWorkspace.value = true
+  workspaceActionError.value = ''
+  try {
+    const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined })
+    if (!acceptsWorkspaceRead(context) || historyOrigin.value !== origin || drafts.currentDraft?.id !== historicalId) return
+    const latest = workspace.items[0]
+    if (!latest) {
+      if (!await openEditableReimbursement(false, context) || !acceptsWorkspaceRead(context)) return
+      historyOrigin.value = null
+      pendingNewApproval.value = null
+      await returnToApprovalStep()
+      return
+    }
+    const adopted = await drafts.loadDraft(latest.id, true, (incoming) => acceptsWorkspaceRead(context) && !incoming.workspaceRetired)
+    if (!acceptsWorkspaceRead(context)) return
+    if (!adopted || drafts.currentDraft?.id !== latest.id || drafts.loadError) {
+      throw new Error(drafts.loadError || '当前报销已变化，请重新返回')
+    }
+    historyOrigin.value = null
+    await showWorkspaceReimbursement(drafts.currentDraft)
+    if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== latest.id) return
+    pendingNewApproval.value = latest.id === origin.draftId ? origin.pendingApproval : null
+    mobileStep.value = latest.id === origin.draftId ? origin.mobileStep : 0
+    await nextTick()
+    if (acceptsWorkspaceRead(context)) scrollToWorkspaceStart()
+  } catch (error) {
+    if (acceptsWorkspaceRead(context)) workspaceActionError.value = error instanceof Error ? error.message : '当前报销读取失败，请重试返回'
+  } finally {
+    if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
+  }
 }
 
 async function replaceOutdatedForm(): Promise<void> {
@@ -1082,6 +1509,10 @@ async function replaceOutdatedForm(): Promise<void> {
   const draftId = drafts.currentDraft?.id
   if (!draftId) return
   const scope = sessionScope()
+  const generation = workspaceReadGeneration
+  let context: WorkspaceReadContext | undefined
+  const acceptsReplacement = () => context ? acceptsWorkspaceRead(context)
+    : !disposed && scope === sessionScope() && generation === workspaceReadGeneration
   replacingTemplate.value = true
   try {
     await ElMessageBox.confirm(
@@ -1089,10 +1520,10 @@ async function replaceOutdatedForm(): Promise<void> {
       '按新表单重新填写',
       { confirmButtonText: '重新填写', cancelButtonText: '返回查看', type: 'warning' },
     )
-    if (disposed || sessionScope() !== scope || drafts.currentDraft?.id !== draftId
+    if (!acceptsReplacement() || drafts.currentDraft?.id !== draftId
       || !canReplaceOutdatedForm.value || drafts.busy) return
     await drafts.loadDraft(draftId)
-    if (disposed || sessionScope() !== scope) return
+    if (!acceptsReplacement()) return
     const latest = drafts.currentDraft
     if (!latest || latest.id !== draftId || drafts.loadError) {
       throw new Error(drafts.loadError || '无法核对原报销状态，请重试')
@@ -1105,16 +1536,18 @@ async function replaceOutdatedForm(): Promise<void> {
       return
     }
     if (!canReplaceOutdatedForm.value || drafts.busy) return
+    context = beginWorkspaceRead()
     initializingWorkspace.value = true
-    await openEditableReimbursement()
-    if (!disposed && sessionScope() === scope) await returnToApprovalStep()
+    if (!await openEditableReimbursement(true, context)) return
+    if (acceptsReplacement()) await returnToApprovalStep()
   } catch (error) {
+    if (!acceptsReplacement()) return
     if (error !== 'cancel' && error !== 'close') {
+      if (workspaceConfirmationRequired.value) workspaceActionError.value = error instanceof Error ? error.message : '请核对当前报销'
       ElMessage.error(error instanceof Error ? error.message : '新报销准备失败')
     }
   } finally {
-    replacingTemplate.value = false
-    if (sessionScope() === scope) initializingWorkspace.value = false
+    if (acceptsReplacement()) { replacingTemplate.value = false; initializingWorkspace.value = false }
   }
 }
 async function chooseTravelApprovalForDepartment(
@@ -1142,6 +1575,9 @@ async function resolveDepartmentForApproval(
   selectedDepartmentId?: string,
 ): Promise<void> {
   if (bindingApprovalDepartment.value) return
+  const generation = ++departmentBindingGeneration
+  let scope = sessionScope()
+  const acceptsBinding = () => !disposed && generation === departmentBindingGeneration && scope === sessionScope()
   const requestedSelections = [selection]
   if (autosaveTimer) clearTimeout(autosaveTimer)
   relatedApprovalVerificationError.value = ''
@@ -1154,12 +1590,19 @@ async function resolveDepartmentForApproval(
       // Preserve edits in the previous department, but never attach the newly
       // selected approval to that department while its destination is unresolved.
       await flushAutosave({ includeRelated: false })
+      if (!acceptsBinding()) return
     }
     const previousScope = sessionScope()
     const resolution = await auth.selectDepartmentFromTravelApproval(
       selection,
       selectedDepartmentId,
     )
+    if (disposed || generation !== departmentBindingGeneration || !resolution.isCurrent()) return
+    // Selecting the approval can legitimately change the department. Adopt only
+    // the session change performed by this still-current authenticated request.
+    scope = sessionScope()
+    bindingApprovalDepartment.value = true
+    verifyingRelatedApprovals.value = true
     if (resolution.selectionRequired || !resolution.selectedDepartment) {
       pendingDepartmentApproval.value = selection
       selectedDepartmentChoiceId.value = ''
@@ -1170,6 +1613,7 @@ async function resolveDepartmentForApproval(
     if (!drafts.currentDraft || sessionScope() !== previousScope) {
       initializedScope = ''
       await initializeWorkspace(true)
+      if (!acceptsBinding()) return
     }
     const opened = drafts.currentDraft
     if (!opened) throw new Error(initializationError.value || '报销表单加载失败，请重试')
@@ -1182,8 +1626,9 @@ async function resolveDepartmentForApproval(
       saveError.value = ''
       return
     }
-    if (!['DRAFT', 'REVIEW_READY'].includes(opened.status)) {
-      if (canStartNewReimbursement.value) pendingNewApproval.value = selection
+    if (!['DRAFT', 'REVIEW_READY'].includes(opened.status) || opened.recoveryPending
+      || opened.workspaceRetired || draftExpired.value) {
+      pendingNewApproval.value = selection
       return
     }
     if (opened.relatedApprovals.length) {
@@ -1193,6 +1638,7 @@ async function resolveDepartmentForApproval(
     }
     await verifyRelatedApprovals(requestedSelections)
   } catch (error) {
+    if (!acceptsBinding()) return
     acceptAuthoritativeRelatedApprovals()
     verifyingRelatedApprovals.value = false
     const message = error instanceof Error
@@ -1201,9 +1647,11 @@ async function resolveDepartmentForApproval(
     if (auth.status === 'authenticated' && !drafts.currentDraft) initializationError.value = message
     else if (!saveError.value && !saveRequiresReload.value) departmentBindingError.value = message
   } finally {
-    bindingApprovalDepartment.value = false
-    if (!pendingDepartmentApproval.value) verifyingRelatedApprovals.value = false
-    scheduleAutosave()
+    if (acceptsBinding()) {
+      bindingApprovalDepartment.value = false
+      if (!pendingDepartmentApproval.value) verifyingRelatedApprovals.value = false
+      scheduleAutosave()
+    }
   }
 }
 function updateRelatedApprovals(
@@ -1239,13 +1687,9 @@ function cancelDepartmentChoice(): void {
   relatedApprovalVerificationError.value = ''
   scheduleAutosave()
 }
-async function selectMobileStep(step: number): Promise<void> {
+function selectMobileStep(step: number): void {
   if (!props.mobile || step < 0 || step >= mobileSteps.length) return
   mobileStep.value = step
-  await nextTick()
-  if (mobileStep.value !== step) return
-  document.querySelector<HTMLElement>(`#reimbursement-step-${step} .mobile-step-heading`)
-    ?.scrollIntoView?.({ block: 'start' })
 }
 async function advanceMobileStep(): Promise<void> {
   if (mobileStep.value === 0 && !selectedRelatedApprovals.value.length) {
@@ -1253,7 +1697,7 @@ async function advanceMobileStep(): Promise<void> {
     return
   }
   if (mobileStep.value < mobileSteps.length - 1) {
-    await selectMobileStep(mobileStep.value + 1)
+    selectMobileStep(mobileStep.value + 1)
     return
   }
   await confirmAndSubmit()
@@ -1293,6 +1737,7 @@ async function retrySubmissionRecovery(): Promise<void> {
 }
 async function refreshSubmissionService(refreshProgress = false): Promise<void> {
   if (refreshingServiceStatus.value) return
+  const scope = sessionScope()
   refreshingServiceStatus.value = true
   try {
     const results = await Promise.allSettled([
@@ -1302,12 +1747,31 @@ async function refreshSubmissionService(refreshProgress = false): Promise<void> 
     const failed = results.find((result) => result.status === 'rejected')
     if (failed?.status === 'rejected') throw failed.reason
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '服务状态刷新失败，请重试')
-  } finally { refreshingServiceStatus.value = false }
+    if (scope === sessionScope()) ElMessage.error(error instanceof Error ? error.message : '服务状态刷新失败，请重试')
+  } finally { if (scope === sessionScope()) refreshingServiceStatus.value = false }
 }
 onMounted(async () => { void health.check(); await auth.bootstrap(); await initializeWorkspace() })
+// Increment synchronously even for A -> B -> A within one tick. The asynchronous
+// view callbacks use this opaque scope, independently of store request guards.
+watch(sessionIdentity, () => { sessionGeneration.value++ }, { flush: 'sync' })
 watch(() => sessionScope(), () => {
   if (autosaveTimer) clearTimeout(autosaveTimer)
+  saving.value = false
+  savePromise = null
+  verifyingRelatedApprovals.value = false
+  bindingApprovalDepartment.value = false
+  pendingDepartmentApproval.value = null
+  selectedDepartmentChoiceId.value = ''
+  departmentBindingError.value = ''
+  submitFlowPending.value = false
+  refreshingMaterialStatus.value = false
+  refreshingServiceStatus.value = false
+  recoveryGeneration++
+  workspaceReadGeneration++
+  confirmingDraftReload.value = false
+  replacingTemplate.value = false
+  recoveringReimbursement.value = false
+  workspaceConfirmationRequired.value = false
   pendingNewApproval.value = null
   historyVisible.value = false
   historyOrigin.value = null
@@ -1322,6 +1786,7 @@ watch(() => expenseItemsCard.value?.hasOpenMaterialEditor, (open) => {
   }
 })
 watch([currentFormInput, selectedRelatedApprovals], scheduleAutosave, { deep: true })
+watch(workspaceActionError, (message) => { if (message) void revealAttention('workspace') }, { flush: 'post' })
 watch(() => submittedResult.value?.draftId, (draftId) => {
   if (draftId) void loadSubmittedReceipt()
 })
@@ -1379,7 +1844,7 @@ watch(() => [
   }, 250)
 }, { deep: true })
 function warnBeforeUnload(event: BeforeUnloadEvent): void {
-  if (drafts.currentDraft && drafts.currentDraft.status !== 'LOCKED' && !trackedSubmission.value && formDirty.value) {
+  if (drafts.currentDraft && hasUnsavedUserChanges.value) {
     event.preventDefault()
     event.returnValue = ''
   }
@@ -1400,6 +1865,7 @@ watch(mobileFooterDock, (footer) => {
 }, { flush: 'post' })
 onMounted(() => window.addEventListener('beforeunload', warnBeforeUnload))
 onBeforeUnmount(() => {
+  if (recoveryRefreshTimer) clearTimeout(recoveryRefreshTimer)
   disposed = true
   historyRequest?.abort()
   if (calculationTimer) clearTimeout(calculationTimer)
@@ -1418,7 +1884,7 @@ onBeforeUnmount(() => {
   >
     <section
       class="hero"
-      :class="{ 'hero--mobile': props.mobile }"
+      :class="{ 'hero--mobile': props.mobile, 'hero--history': historyOrigin }"
       aria-labelledby="page-title"
       data-testid="reimbursement-workspace-start"
     >
@@ -1435,24 +1901,6 @@ onBeforeUnmount(() => {
             </span>
           </p>
           <div class="hero-links">
-            <el-button
-              v-if="auth.status === 'authenticated' && historyOrigin"
-              :icon="ArrowLeft"
-              :loading="initializingWorkspace"
-              :disabled="submission.submitting || refreshingServiceStatus"
-              @click="returnFromHistory"
-            >
-              返回报销
-            </el-button>
-            <button
-              v-else-if="auth.status === 'authenticated' && !initializingWorkspace && canOpenHistory"
-              type="button"
-              class="hero-link"
-              aria-haspopup="dialog"
-              @click="openHistory"
-            >
-              报销记录
-            </button>
             <RouterLink
               v-if="auth.isAdmin"
               :to="props.mobile ? '/m/settings' : '/admin/settings'"
@@ -1460,6 +1908,38 @@ onBeforeUnmount(() => {
             >
               系统设置
             </RouterLink>
+            <el-button
+              v-if="auth.status === 'authenticated' && historyOrigin"
+              link
+              type="primary"
+              class="hero-link hero-return-link"
+              :icon="ArrowLeft"
+              :loading="initializingWorkspace"
+              :disabled="submission.submitting || refreshingServiceStatus"
+              @click="returnFromHistory"
+            >
+              返回当前报销
+            </el-button>
+            <button
+              v-else-if="auth.status === 'authenticated' && drafts.currentDraft"
+              type="button"
+              class="hero-link"
+              aria-haspopup="dialog"
+              :disabled="initializingWorkspace || !canOpenHistory || drafts.busy || saving || confirmingDraftReload"
+              @click="openHistory"
+            >
+              报销记录
+            </button>
+            <button
+              v-if="showHeaderNewReimbursement"
+              type="button"
+              class="hero-link"
+              :disabled="!canStartNewReimbursement || drafts.busy || saving || reimbursementOptionsUnavailable"
+              :title="hasRestartableReimbursement ? undefined : '当前已是空白报销，可直接填写'"
+              @click="newReimbursement"
+            >
+              新开一笔
+            </button>
           </div>
         </div>
         <div class="hero-title">
@@ -1588,7 +2068,7 @@ onBeforeUnmount(() => {
               v-if="initializationError"
               link
               type="primary"
-              @click="drafts.currentDraft ? openSavedReimbursement(drafts.currentDraft.id) : initializeWorkspace(true)"
+              @click="initializeWorkspace(true)"
             >
               重新加载
             </el-button>
@@ -1596,11 +2076,20 @@ onBeforeUnmount(() => {
         </el-alert>
         <el-alert
           v-if="workspaceActionError"
+          data-attention-target="workspace"
           :title="workspaceActionError"
           type="error"
           :closable="false"
           class="workspace-alert"
-        />
+        >
+          <el-button
+            v-if="workspaceConfirmationRequired"
+            type="primary"
+            @click="confirmCurrentWorkspace"
+          >
+            核对当前报销
+          </el-button>
+        </el-alert>
         <el-alert
           v-if="!drafts.currentDraft && !initializationError"
           title="当前报销记录已不可用"
@@ -1617,6 +2106,7 @@ onBeforeUnmount(() => {
         </el-alert>
         <el-alert
           v-if="drafts.currentDraft && reimbursementOptionsUnavailable"
+          data-attention-target="options"
           :title="templateNeedsAdmin ? (auth.isAdmin ? '请前往系统设置确认 OA 表单' : '请联系管理员确认 OA 表单') : '暂时无法读取报销表单'"
           :description="drafts.reimbursementOptionsError"
           type="warning"
@@ -1664,6 +2154,49 @@ onBeforeUnmount(() => {
         </section>
         <template v-if="drafts.currentDraft">
           <el-alert
+            v-if="draftUnavailable"
+            title="当前报销记录已不可用"
+            description="本页内容仅供核对，请从右上角新开一笔，重新填写并上传材料。"
+            type="warning"
+            :closable="false"
+            class="workspace-alert"
+            data-attention-target="workspace"
+          />
+          <el-alert
+            v-if="drafts.currentDraft.workspaceRetired && !historyOrigin"
+            title="已新开另一笔报销"
+            type="info"
+            :closable="false"
+            class="workspace-alert"
+            data-attention-target="workspace"
+          >
+            <el-button
+              :disabled="drafts.busy || saving || confirmingDraftReload"
+              @click="openCurrentWorkspace"
+            >
+              打开当前报销
+            </el-button>
+          </el-alert>
+          <el-alert
+            v-if="activeMaterialRecovery"
+            title="报销内容已保留，材料尚在恢复"
+            type="info"
+            :closable="false"
+            class="workspace-alert"
+          >
+            <p>请等待原材料恢复完成后再编辑；中断后可以继续恢复。</p>
+            <div class="submission-feedback-actions">
+              <el-button
+                type="primary"
+                :loading="recoveringReimbursement"
+                :disabled="workspaceConfirmationRequired || drafts.busy"
+                @click="recoverFailedReimbursement"
+              >
+                继续恢复材料
+              </el-button>
+            </div>
+          </el-alert>
+          <el-alert
             v-if="draftExpired && !trackedSubmission"
             title="本次填写内容已过期"
             description="可以开始新的报销，请重新填写并上传材料。"
@@ -1673,7 +2206,7 @@ onBeforeUnmount(() => {
           >
             <el-button
               type="primary"
-              :disabled="drafts.busy || reimbursementOptionsUnavailable"
+              :disabled="!canStartNewReimbursement || drafts.busy || reimbursementOptionsUnavailable"
               @click="newReimbursement"
             >
               重新填写
@@ -1716,13 +2249,14 @@ onBeforeUnmount(() => {
             </el-button>
           </el-alert>
           <el-alert
-            v-if="saveError || saveRequiresReload"
+            v-if="(saveError || saveRequiresReload) && !drafts.currentDraft.workspaceRetired"
             :title="saveRequiresReload ? '报销内容已更新，请核对最新报销内容' : '保存失败，内容仍保留在本页'"
             type="error"
             :closable="false"
             show-icon
             class="workspace-alert"
             data-testid="autosave-error"
+            data-attention-target="save"
           >
             <div
               v-if="saveError"
@@ -1754,6 +2288,7 @@ onBeforeUnmount(() => {
             class="submitted-receipt"
             aria-labelledby="submitted-receipt-title"
             data-testid="submission-status"
+            data-attention-target="submission"
           >
             <header class="receipt-heading">
               <div class="receipt-heading-copy">
@@ -1797,14 +2332,6 @@ onBeforeUnmount(() => {
               </p>
               <div class="submitted-receipt-actions">
                 <el-button
-                  v-if="props.mobile && !historyOrigin"
-                  type="primary"
-                  :disabled="drafts.busy || reimbursementOptionsUnavailable"
-                  @click="newReimbursement"
-                >
-                  返回报销
-                </el-button>
-                <el-button
                   v-if="!props.mobile && submittedReimbursement.approvalUrl?.trim()"
                   tag="a"
                   :href="submittedReimbursement.approvalUrl"
@@ -1820,14 +2347,6 @@ onBeforeUnmount(() => {
                   readonly
                   preview-only
                 />
-                <el-button
-                  v-if="!props.mobile && !historyOrigin"
-                  type="primary"
-                  :disabled="drafts.busy || reimbursementOptionsUnavailable"
-                  @click="newReimbursement"
-                >
-                  返回报销
-                </el-button>
               </div>
             </div>
             <p
@@ -1897,13 +2416,6 @@ onBeforeUnmount(() => {
               >
                 重新读取回执
               </el-button>
-              <el-button
-                v-if="!historyOrigin"
-                :disabled="drafts.busy || reimbursementOptionsUnavailable"
-                @click="newReimbursement"
-              >
-                返回报销
-              </el-button>
             </template>
           </el-alert>
           <section
@@ -1912,6 +2424,7 @@ onBeforeUnmount(() => {
             aria-labelledby="manual-review-title"
             aria-live="polite"
             data-testid="submission-status"
+            data-attention-target="submission"
           >
             <header class="manual-review-heading">
               <el-icon
@@ -1939,9 +2452,10 @@ onBeforeUnmount(() => {
             >
               {{ submission.requestError }}
             </p>
-            <div class="manual-review-actions">
+            <div class="manual-review-actions submission-feedback-actions">
               <el-button
                 v-if="submission.submission.processInstanceId"
+                class="submission-recheck-action"
                 :loading="submission.submitting"
                 :disabled="refreshingServiceStatus"
                 @click="submission.recheck()"
@@ -1960,17 +2474,31 @@ onBeforeUnmount(() => {
           </section>
           <section
             v-else-if="submission.activeDraftId === drafts.currentDraft.id && (submission.progressLabel || submission.errorMessage)"
-            class="submission-status"
+            class="submission-status submission-feedback-panel"
+            :class="`submission-feedback-panel--${submissionAlertType}`"
+            aria-labelledby="submission-feedback-title"
             aria-live="polite"
             data-testid="submission-status"
+            data-attention-target="submission"
           >
-            <el-alert
-              :title="submission.progressLabel || '提交需要处理'"
-              :description="submission.errorMessage || undefined"
-              :type="submissionAlertType"
-              :closable="false"
-              show-icon
-            />
+            <header class="submission-feedback-heading">
+              <el-icon
+                class="submission-feedback-icon"
+                aria-hidden="true"
+              >
+                <CircleCloseFilled v-if="submissionAlertType === 'error'" />
+                <WarningFilled v-else-if="submissionAlertType === 'warning'" />
+                <InfoFilled v-else />
+              </el-icon>
+              <div>
+                <h2 id="submission-feedback-title">
+                  {{ submission.progressLabel || '提交需要处理' }}
+                </h2>
+                <p v-if="submission.errorMessage">
+                  {{ submission.errorMessage }}
+                </p>
+              </div>
+            </header>
             <el-progress
               v-if="submission.status && submissionProgress.includes(submission.status)"
               :percentage="submissionProgressPercentage"
@@ -1981,17 +2509,19 @@ onBeforeUnmount(() => {
             <p v-if="pendingNewApproval">
               已选出差审批。打开报销表单后可继续处理该审批。
             </p>
-            <div class="submission-status-actions">
+            <div class="submission-status-actions submission-feedback-actions">
               <el-button
-                v-if="canStartNewReimbursement"
+                v-if="submission.status === 'FAILED_FINAL' && !drafts.currentDraft.workspaceRetired"
                 type="primary"
-                :disabled="drafts.busy || reimbursementOptionsUnavailable"
-                @click="newReimbursement"
+                :disabled="workspaceConfirmationRequired || drafts.busy || reimbursementOptionsUnavailable"
+                :loading="recoveringReimbursement"
+                @click="recoverFailedReimbursement"
               >
-                重新填写
+                保留内容重新处理
               </el-button>
               <el-button
                 v-if="submission.submission && !submission.terminal"
+                type="primary"
                 :loading="refreshingServiceStatus"
                 :disabled="submission.submitting"
                 @click="refreshSubmissionService(true)"
@@ -2000,6 +2530,7 @@ onBeforeUnmount(() => {
               </el-button>
               <el-button
                 v-if="submission.requestError && !submission.submission && submission.requestAction"
+                type="primary"
                 :loading="submission.submitting || submission.polling"
                 :disabled="submission.requestAction === 'retry' && submission.oaSubmissionEnabled !== true"
                 @click="submission.requestAction === 'retry' ? retrySameSubmission() : retrySubmissionRecovery()"
@@ -2015,12 +2546,15 @@ onBeforeUnmount(() => {
             :closable="false"
             class="workspace-alert"
           >
-            <el-button
-              :loading="submission.polling"
-              @click="retrySubmissionRecovery"
-            >
-              重新查找提交记录
-            </el-button>
+            <div class="submission-feedback-actions">
+              <el-button
+                type="primary"
+                :loading="submission.polling"
+                @click="retrySubmissionRecovery"
+              >
+                重新查找提交记录
+              </el-button>
+            </div>
           </el-alert>
           <template v-if="submittedReimbursement">
             <ExpenseItemsCard
@@ -2304,7 +2838,7 @@ onBeforeUnmount(() => {
               :mobile="props.mobile"
               :readonly="formReadOnly"
               :preview-disabled-reason="previewDisabledReason"
-              :before-preview="props.mobile || formReadOnly ? undefined : flushAutosave"
+              :before-preview="props.mobile || formReadOnly ? undefined : prepareExcelPreview"
             >
               <template #submission>
                 <div
@@ -2451,6 +2985,13 @@ onBeforeUnmount(() => {
         </template>
       </el-result>
     </el-card>
+    <ReimbursementAttentionNotice
+      :notice="pageAttention"
+      :mobile="props.mobile"
+      :footer-height="props.mobile && !submittedResult ? mobileFooterHeight || 116 : 0"
+      :suspended="attentionSuspended"
+      @reveal="revealAttention(undefined, true)"
+    />
     <el-dialog
       v-model="historyVisible"
       title="报销记录"
@@ -2458,7 +2999,7 @@ onBeforeUnmount(() => {
       destroy-on-close
     >
       <p class="history-caption">
-        {{ auth.session?.selectedDepartment?.name }} · 最近 10 笔
+        {{ auth.session?.selectedDepartment?.name }} · 最近 10 笔成功提交
       </p>
       <el-skeleton
         v-if="historyLoading"
@@ -2480,7 +3021,7 @@ onBeforeUnmount(() => {
         v-else-if="!historyRecords.length"
         class="history-state"
       >
-        当前部门还没有报销提交记录。
+        当前部门还没有成功提交 OA 的报销记录。
       </p>
       <ul
         v-else
@@ -2578,7 +3119,8 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   cursor: pointer;
 }
-.hero-link:hover { color: var(--el-color-primary-dark-2); text-decoration: underline; text-underline-offset: 3px; }
+.hero-link:disabled { color: var(--el-text-color-placeholder); cursor: not-allowed; text-decoration: none; }
+.hero-link:not(:disabled):hover { color: var(--el-color-primary-dark-2); text-decoration: underline; text-underline-offset: 3px; }
 .hero-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin: 4px 0 12px; }
 .hero-title h1 { margin: 0; }
 .save-indicator {
@@ -2765,7 +3307,7 @@ onBeforeUnmount(() => {
   white-space: normal;
 }
 .travel-periods--mobile .travel-periods__item time { white-space: nowrap; }
-.submission-actions, .submission-status-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.submission-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .submission-actions { align-items: flex-end; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--el-border-color-lighter); }
 .submission-attachments { color: var(--el-text-color-regular); font-size: 13px; line-height: 1.6; }
 .submission-attachments strong { color: var(--el-text-color-primary); }
@@ -2784,13 +3326,32 @@ onBeforeUnmount(() => {
 .template-recovery-panel strong { color: var(--el-text-color-primary); }
 .template-recovery-panel p { margin: 6px 0 0; color: var(--el-text-color-regular); font-size: 13px; line-height: 1.6; }
 .template-recovery-panel .el-button { flex: none; }
-.manual-review-panel {
+.manual-review-panel, .submission-feedback-panel {
   padding: clamp(16px, 3vw, 24px);
-  border: 1px solid var(--el-color-warning-light-7);
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 12px;
   background: var(--el-bg-color);
 }
-.manual-review-heading { display: flex; align-items: flex-start; gap: 12px; }
+.manual-review-panel { border-color: var(--el-color-warning-light-7); }
+.manual-review-heading, .submission-feedback-heading { display: flex; align-items: flex-start; gap: 12px; }
+.submission-feedback-heading > div { min-width: 0; }
+.submission-feedback-icon {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  font-size: 20px;
+}
+.submission-feedback-panel--error .submission-feedback-icon {
+  color: var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+}
+.submission-feedback-panel--warning .submission-feedback-icon {
+  color: var(--el-color-warning-dark-2);
+  background: var(--el-color-warning-light-9);
+}
 .manual-review-icon {
   flex: none;
   width: 36px;
@@ -2800,7 +3361,8 @@ onBeforeUnmount(() => {
   color: var(--el-color-warning-dark-2);
   font-size: 19px;
 }
-.manual-review-heading h2 { margin: 0; font-size: 18px; line-height: 1.4; }
+.manual-review-heading h2, .submission-feedback-heading h2 { margin: 0; font-size: 18px; line-height: 1.4; }
+.submission-feedback-heading p { margin: 6px 0 0; color: var(--el-text-color-regular); font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; text-wrap: pretty; }
 .manual-review-heading p { margin: 6px 0 0; color: var(--el-text-color-secondary); font-size: 13px; line-height: 1.6; }
 .manual-review-details {
   display: grid;
@@ -2816,8 +3378,17 @@ onBeforeUnmount(() => {
 .manual-review-details dt { color: var(--el-text-color-secondary); }
 .manual-review-details dd { margin: 0; overflow-wrap: anywhere; }
 .manual-review-error { margin: 0 0 12px; color: var(--el-color-danger-dark-2); font-size: 13px; }
-.manual-review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.manual-review-actions .el-button { margin: 0; }
+.submission-feedback-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+.submission-feedback-actions .el-button { min-height: 36px; margin: 0; }
 .submission-status .el-progress { margin: 16px 0; }
 .material-checklist { margin-top: 16px; padding: 14px 16px; border-radius: 10px; background: #fff8ed; color: #8b5a16; font-size: 13px; }
 .material-checklist > strong { display: block; }
@@ -2837,7 +3408,17 @@ onBeforeUnmount(() => {
 .hero--mobile {
   align-items: stretch;
 }
-.page-shell--mobile :is(.submitted-receipt, .manual-review-panel, .template-recovery-panel) { padding: var(--workspace-card-padding); }
+.page-shell--mobile :is(.submitted-receipt, .manual-review-panel, .submission-feedback-panel, .template-recovery-panel) { padding: var(--workspace-card-padding); }
+.page-shell--mobile .hero-meta { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.page-shell--mobile .hero-links { justify-self: end; flex-wrap: nowrap; gap: 16px; }
+.page-shell--mobile .hero-link { min-height: 40px; padding-block: 8px; }
+.page-shell--mobile .hero--history .hero-meta { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.page-shell--mobile .hero--history .hero-links { gap: 10px; }
+.page-shell--mobile .submission-feedback-heading h2 { font-size: 17px; }
+.page-shell--mobile .submission-feedback-actions { gap: 8px; margin-top: 16px; padding-top: 14px; }
+.page-shell--mobile .submission-feedback-actions .el-button { flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px; white-space: normal; height: auto; }
+.page-shell--mobile .submission-feedback-actions .el-button--primary { flex: 1.9; }
+.page-shell--mobile .submission-feedback-actions .submission-recheck-action { flex: 1 0 100%; }
 .page-shell--mobile.page-shell--submitted { padding-bottom: 24px; }
 .page-shell--mobile .receipt-heading { align-items: flex-start; flex-direction: column; gap: 12px; }
 .page-shell--mobile .receipt-heading h2 { font-size: 19px; }

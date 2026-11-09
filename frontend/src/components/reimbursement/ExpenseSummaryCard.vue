@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 
@@ -20,6 +21,14 @@ const props = withDefaults(defineProps<{
 
 const expense = useExpenseStore()
 const drafts = useReimbursementDraftStore()
+const auth = useAuthStore()
+const preparingPreview = ref(false)
+let previewGeneration = 0
+let disposed = false
+watch([() => drafts.currentDraft?.id, () => auth.status, () => auth.session?.user.userId,
+  () => auth.session?.selectedDepartment?.id, () => auth.session?.selectedDepartment?.name,
+  () => auth.session?.csrfToken], () => { previewGeneration++; preparingPreview.value = false }, { flush: 'sync' })
+onBeforeUnmount(() => { disposed = true; previewGeneration++ })
 const summaryCalculationError = computed(() => {
   if (!expense.calculationError) return ''
   if (expense.includeSubsidy && !expense.itemReadinessError) return ''
@@ -33,25 +42,31 @@ const disabledReason = computed(() => {
   return ''
 })
 async function downloadExcel(): Promise<void> {
+  if (preparingPreview.value) return
   if (disabledReason.value) {
     ElMessage.warning(disabledReason.value)
     return
   }
+  const generation = previewGeneration
+  const acceptsPreview = () => !disposed && generation === previewGeneration
+  preparingPreview.value = true
   try {
     await props.beforePreview?.()
+    if (!acceptsPreview()) return
     if (props.mobile) {
       await drafts.openExcelPreviewInDingTalk()
-      ElMessage.success('已在钉钉中打开 Excel 预览')
+      if (acceptsPreview()) ElMessage.success('已在钉钉中打开 Excel 预览')
     } else {
       await drafts.downloadExcelPreview()
-      ElMessage.success('已生成报销单 Excel 预览')
+      if (acceptsPreview()) ElMessage.success('已生成报销单 Excel 预览')
     }
   } catch (error) {
+    if (!acceptsPreview() || (error instanceof DOMException && error.name === 'AbortError')) return
     ElMessage.error(
       drafts.mutationError
       || (error instanceof Error && error.message ? error.message : 'Excel 预览生成失败，请重试'),
     )
-  }
+  } finally { if (acceptsPreview()) preparingPreview.value = false }
 }
 </script>
 
@@ -89,7 +104,7 @@ async function downloadExcel(): Promise<void> {
     </el-alert>
     <div class="excel-download-action">
       <el-button
-        :loading="drafts.downloadingPreview"
+        :loading="preparingPreview || drafts.downloadingPreview"
         :disabled="Boolean(disabledReason)"
         :data-testid="props.mobile ? 'mobile-excel-preview-button' : undefined"
         @click="downloadExcel"

@@ -23,6 +23,7 @@ import type {
   ReimbursementRelatedApprovalSelection,
   ReimbursementSubmission,
   ReimbursementSubmissionHistoryEntry,
+  ReimbursementDraftSummary,
   SubmitReimbursementInput,
 } from '@/types/reimbursements'
 
@@ -123,11 +124,12 @@ async function normalizeBlobApiError(error: unknown): Promise<never> {
 
 export async function createReimbursementDraft(
   input: ReimbursementDraftInput,
-  options: ReimbursementRequestOptions & { reuseExisting?: boolean; expectedDepartment?: ReimbursementDraftDepartment } = {},
+  options: ReimbursementRequestOptions & { replaceCurrent?: { id: string; revision: number }; reuseExisting?: boolean; expectedDepartment?: ReimbursementDraftDepartment } = {},
 ): Promise<ReimbursementDraft> {
   const response = await http.post<ApiEnvelope<ReimbursementDraft>>(
     '/reimbursements/drafts',
     { expectedRevision: 0, input, ...(options.reuseExisting ? { reuseExisting: true } : {}),
+      ...(options.replaceCurrent ? { replacesDraftId: options.replaceCurrent.id, replacesDraftRevision: options.replaceCurrent.revision } : {}),
       ...expectedDepartmentParams(options.expectedDepartment) },
     { signal: options.signal },
   )
@@ -157,6 +159,25 @@ export async function listReimbursementSubmissionHistory(
   const response = await http.get<ApiEnvelope<ReimbursementSubmissionHistoryEntry[]>>(
     '/reimbursements/submission-history',
     { signal: options.signal, params: expectedDepartmentParams(options.expectedDepartment) },
+  )
+  return response.data.data
+}
+
+export async function listWorkspaceReimbursements(
+  options: ReimbursementRequestOptions & { expectedDepartment?: ReimbursementDraftDepartment; offset?: number } = {},
+): Promise<{ items: ReimbursementDraftSummary[]; total: number }> {
+  const response = await http.get<ApiEnvelope<{ items: ReimbursementDraftSummary[]; total: number }>>(
+    '/reimbursements/workspace',
+    { signal: options.signal, params: { ...expectedDepartmentParams(options.expectedDepartment), offset: options.offset ?? 0 } },
+  )
+  return response.data.data
+}
+
+export async function recoverReimbursementDraft(
+  sourceId: string, expectedRevision: number, options: ReimbursementRequestOptions = {},
+): Promise<ReimbursementDraft> {
+  const response = await http.post<ApiEnvelope<ReimbursementDraft>>(
+    `${draftUrl(sourceId)}/recover`, { expectedRevision }, { signal: options.signal, timeout: OCR_REQUEST_TIMEOUT_MS },
   )
   return response.data.data
 }

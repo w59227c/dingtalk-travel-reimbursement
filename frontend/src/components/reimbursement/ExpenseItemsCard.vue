@@ -616,7 +616,7 @@ function durableStatusLabel(file: ReimbursementDraftFile): string {
   if (file.status === 'WRITING') return '上传中'
   if (file.status === 'FAILED') return '上传失败'
   if (file.status === 'DELETING') return '删除中'
-  if (file.status === 'PURGED') return props.submitted ? '原件已清理' : '已删除'
+  if (file.status === 'PURGED') return props.submitted ? '' : '已删除'
   if (file.ocrStale) return '识别已中断'
   if (needsMaterialConfirmation(file)) return file.materialClassification?.status === 'pending' ? '等待分类识别' : '待确认用途'
   if (file.ocrStatus === 'RUNNING') return '识别中'
@@ -2047,11 +2047,15 @@ async function retryItemRecognition(id: string): Promise<void> {
         :data-material-file-id="file.id"
         :data-material-confirmation="needsMaterialConfirmation(file) ? file.id : undefined"
         tabindex="-1"
-        :aria-label="`${file.name}：${durableStatusLabel(file)}`"
+        :aria-label="durableStatusLabel(file) ? `${file.name}：${durableStatusLabel(file)}` : file.name"
       >
         <div class="receipt-main">
           <div class="receipt-name-line">
+            <strong v-if="isPurgedFile(file)">
+              {{ file.name }}
+            </strong>
             <button
+              v-else
               type="button"
               class="receipt-file-preview-link"
               :disabled="file.status !== 'ACTIVE' || previewLoading"
@@ -2069,6 +2073,7 @@ async function retryItemRecognition(id: string): Promise<void> {
                 {{ file.role === 'ATTACHMENT_ONLY' ? attachmentKindLabels[file.attachmentKind ?? 'other'] : durableRoleLabels[file.role] }}
               </el-tag>
               <el-tag
+                v-if="durableStatusLabel(file)"
                 size="small"
                 :type="durableStatusType(file)"
               >

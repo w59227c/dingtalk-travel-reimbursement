@@ -5,6 +5,7 @@ import { computed, ref } from 'vue'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import {
   createReimbursementDraft,
+  recoverReimbursementDraft,
   deleteReimbursementDraft,
   deleteReimbursementDraftFile,
   clearReimbursementDraftFiles,
@@ -117,6 +118,13 @@ interface FilePipeline {
 }
 
 const CONSISTENT_READ_ATTEMPTS = 2
+type DraftAccessState = Partial<Pick<ReimbursementDraft, 'status' | 'workspaceRetired' | 'recoveryPending'>>
+const READ_ONLY_FAILURES: Record<string, DraftAccessState> = {
+  REIMBURSEMENT_DRAFT_REPLACED: { workspaceRetired: true },
+  REIMBURSEMENT_RECOVERY_PENDING: { recoveryPending: true },
+  REIMBURSEMENT_DRAFT_EXPIRED: { status: 'EXPIRED' },
+  REIMBURSEMENT_DRAFT_LOCKED: { status: 'LOCKED' },
+}
 
 export const useReimbursementDraftStore = defineStore('reimbursementDraft', () => {
   const drafts = ref<ReimbursementDraftSummary[]>([])
@@ -187,13 +195,14 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       && filePipeline.intentVersion === currentIntentVersion
       && currentDraft.value?.id === filePipeline.draftId
       && currentDraft.value.department.id === filePipeline.departmentId
+      && !currentDraft.value.workspaceRetired && !currentDraft.value.recoveryPending
       && ['DRAFT', 'REVIEW_READY'].includes(currentDraft.value.status)
   }
 
   function beginFilePipeline(): number {
     const target = requireCurrentDraft()
     if (filePipeline || mutationQueue || pendingMutations.value || loadingCurrentDraft.value
-      || !['DRAFT', 'REVIEW_READY'].includes(target.status)) {
+      || target.workspaceRetired || target.recoveryPending || !['DRAFT', 'REVIEW_READY'].includes(target.status)) {
       throw new Error('请等待当前文件操作完成后再上传')
     }
     filePipeline = {
@@ -235,12 +244,14 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
 
   async function refreshPipelineRevision(pipeline: FilePipeline): Promise<void> {
     const context = requestContext()
+    const guard = draftReadGuard(pipeline.draftId, pipeline.intentVersion)
     pipeline.controllers.add(context.controller)
     try {
       // A failed upload may already have reserved a revision. Read only the
       // draft here; an in-flight OCR must not be replaced by a file-list read.
       const result = await getReimbursementDraft(pipeline.draftId, { signal: context.controller.signal })
       if (!isFilePipelineActive(pipeline.id) || !accepts(context)) return
+      if (observeReadOnlyDraft(result, context, guard)) throw new Error(mutationError.value)
       if (result.id !== pipeline.draftId || !['DRAFT', 'REVIEW_READY'].includes(result.status)
         || JSON.stringify(result.input) !== pipeline.inputSignature) {
         throw new Error('报销内容已发生变化，请刷新检查后继续')
@@ -263,11 +274,13 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     const pipeline = filePipeline!
     if (pipeline.uploading || pipeline.recognizing) throw new Error('本批文件尚未处理完成')
     const context = requestContext()
+    const guard = draftReadGuard(pipeline.draftId, pipeline.intentVersion)
     pipeline.controllers.add(context.controller)
     try {
       if (pipeline.needsRefresh) {
         const result = await readConsistentDraft(pipeline.draftId, context.controller.signal)
         if (!isFilePipelineActive(id) || !accepts(context)) return false
+        if (observeReadOnlyDraft(result.draft, context, guard)) return false
         if (result.draft.id !== pipeline.draftId || !['DRAFT', 'REVIEW_READY'].includes(result.draft.status)
           || JSON.stringify(result.draft.input) !== pipeline.inputSignature) {
           throw new Error('报销内容已发生变化，请刷新检查后继续')
@@ -365,6 +378,41 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     return accepts(context)
       && guard.intentVersion === currentIntentVersion
       && guard.stateGeneration === draftStateGeneration(guard.draftId)
+  }
+
+  function markDraftReadOnly(
+    state: DraftAccessState, message: string, context: RequestContext, guard: DraftReadGuard,
+    irreversible = false,
+  ): boolean {
+    if (!accepts(context) || guard.intentVersion !== currentIntentVersion || currentDraft.value?.id !== guard.draftId
+      || (!irreversible && guard.stateGeneration !== draftStateGeneration(guard.draftId))) return false
+    // A server rejection is authoritative even when a follow-up read is offline.
+    // Update access metadata only; keep the employee's unsaved form and file list.
+    const status = currentDraft.value.status === 'EXPIRED' ? 'EXPIRED' : state.status ?? currentDraft.value.status
+    currentDraft.value = { ...currentDraft.value, ...state, status }
+    upsertSummary(summaryFromDraft(currentDraft.value))
+    mutationError.value = message
+    if (filePipeline?.draftId === guard.draftId) cancelFilePipeline(filePipeline.id)
+    return true
+  }
+
+  function observeReadOnlyFailure(error: unknown, context: RequestContext, guard: DraftReadGuard): boolean {
+    const code = apiErrorCode(error) ?? ''
+    const state = READ_ONLY_FAILURES[code]
+    // Retirement, expiry and locking cannot revert to editable. A concurrent
+    // upload/OCR response must not hide these failures by advancing generation.
+    // Pending recovery can complete, so its older responses still need fencing.
+    return Boolean(state && markDraftReadOnly(state, apiErrorMessage(error, '本次报销已不能继续修改，请核对当前状态'), context, guard,
+      code !== 'REIMBURSEMENT_RECOVERY_PENDING'))
+  }
+
+  function observeReadOnlyDraft(draft: ReimbursementDraft, context: RequestContext, guard: DraftReadGuard): boolean {
+    if (draft.id !== guard.draftId) return false
+    const state = draft.workspaceRetired ? { workspaceRetired: true }
+      : draft.recoveryPending ? { recoveryPending: true }
+      : ['LOCKED', 'EXPIRED'].includes(draft.status) ? { status: draft.status } : null
+    return Boolean(state && markDraftReadOnly(state, draft.workspaceRetired
+      ? '已新开另一笔报销，请打开当前报销' : '报销状态已变化，请核对最新报销内容', context, guard))
   }
 
   function isCancellation(error: unknown): boolean {
@@ -596,6 +644,24 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     }
   }
 
+  async function recoverDraft(sourceId: string, revision: number): Promise<ReimbursementDraft> {
+    const context = requestContext()
+    const intentVersion = currentIntentVersion
+    const guard = currentDraft.value ? draftReadGuard(currentDraft.value.id, intentVersion) : null
+    try {
+      const restored = await recoverReimbursementDraft(sourceId, revision, { signal: context.controller.signal })
+      if (!accepts(context) || intentVersion !== currentIntentVersion) throw new Error('当前报销已变化，请重新进入恢复结果')
+      await loadDraft(restored.id, true)
+      if (!currentDraft.value || currentDraft.value.id !== restored.id || loadError.value) {
+        throw new Error(loadError.value || '恢复后的报销读取失败，请重试')
+      }
+      return currentDraft.value
+    } catch (error) {
+      if (guard && apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_REPLACED') observeReadOnlyFailure(error, context, guard)
+      throw error
+    } finally { releaseRequest(context) }
+  }
+
   async function readConsistentDraft(
     draftId: string,
     signal: AbortSignal,
@@ -612,7 +678,11 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     throw new Error('报销内容读取期间持续发生变化，请稍后重试')
   }
 
-  async function loadDraft(draftId: string, keepCurrent = false): Promise<void> {
+  async function loadDraft(
+    draftId: string,
+    keepCurrent = false,
+    shouldAdopt?: (draft: ReimbursementDraft) => boolean,
+  ): Promise<boolean> {
     if (filePipeline) cancelFilePipeline(filePipeline.id)
     const previousDraftId = currentDraft.value?.id
     const intentVersion = previousDraftId === draftId
@@ -637,8 +707,10 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadError.value = ''
     try {
       const result = await readConsistentDraft(draftId, context.controller.signal)
-      if (requestVersion !== detailRequestVersion) return
-      adoptDraftRead(result, context, guard)
+      if (requestVersion !== detailRequestVersion || !acceptsDraftRead(context, guard)
+        || result.draft.id !== draftId) return false
+      if (shouldAdopt && !shouldAdopt(result.draft)) return false
+      return adoptDraftRead(result, context, guard)
     } catch (error) {
       const canHandleFailure = (
         accepts(context)
@@ -661,6 +733,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         if (activeDetailRead?.controller === context.controller) activeDetailRead = null
       }
     }
+    return false
   }
 
   async function refreshCurrentFiles(): Promise<'revision-changed' | undefined> {
@@ -703,6 +776,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     input: ReimbursementDraftInput,
     reuseExisting = false,
     expectedDepartment?: ReimbursementDraftDepartment,
+    replaceCurrent?: { id: string; revision: number },
   ): Promise<ReimbursementDraft> {
     const intentVersion = ++currentIntentVersion
     invalidateDetailRead()
@@ -715,6 +789,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       const created = await createReimbursementDraft(input, {
         signal: context.controller.signal,
         ...(reuseExisting ? { reuseExisting: true } : {}),
+        ...(replaceCurrent ? { replaceCurrent } : {}),
         ...(expectedDepartment ? { expectedDepartment } : {}),
       })
       if (expectedDepartment && (created.department.id !== expectedDepartment.id
@@ -725,6 +800,9 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       if (reuseExisting && accepts(context) && intentVersion === currentIntentVersion) {
         const guard = draftReadGuard(created.id, intentVersion)
         const result = await readConsistentDraft(created.id, context.controller.signal)
+        if (result.draft.workspaceRetired) {
+          throw new Error('当前报销已变化，请重新读取当前报销')
+        }
         adoptDraftRead(result, context, guard)
         return result.draft
       }
@@ -862,6 +940,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
           return result
         } catch (error) {
           const cancelled = isCancellation(error)
+          if (!cancelled && observeReadOnlyFailure(error, context, refreshGuard)) throw error
           const errorCode = apiErrorCode(error)
           const conflict = errorCode === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
           const benign = errorCode !== null && options.benignErrorCodes?.includes(errorCode) === true
@@ -1255,6 +1334,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         downloadBlob(preview.blob, preview.filename)
       }
     } catch (error) {
+      if (observeReadOnlyFailure(error, context, refreshGuard)) throw error
       if (
         accepts(context)
         && apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
@@ -1326,6 +1406,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         fileType: ticket.fileType,
       })
     } catch (error) {
+      if (observeReadOnlyFailure(error, context, refreshGuard)) throw error
       if (
         accepts(context)
         && apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
@@ -1449,6 +1530,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadDraft,
     refreshCurrentFiles,
     createDraft,
+    recoverDraft,
     saveDraft,
     deleteDraft,
     deleteCurrentDraft,

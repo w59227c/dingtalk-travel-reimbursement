@@ -4,7 +4,7 @@ import hashlib
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
@@ -947,3 +947,26 @@ def test_explicit_oa_rejection_can_enter_and_complete_orphan_cleanup(
             expected_status_version=candidate.upload_status_version,
             now=now,
         )
+
+
+@pytest.mark.parametrize("flag", ["workspace_retired", "recovery_pending"])
+def test_submission_final_cas_rejects_state_changed_after_initial_read(database, monkeypatch, flag):
+    draft, _ = _new_ready_draft(database)
+    execute = database.execute
+    intercepted = False
+
+    def retire_before_compare_and_swap(statement, *args, **kwargs):
+        nonlocal intercepted
+        if (getattr(statement, "is_update", False)
+                and statement.table.name == "reimbursement_drafts" and not intercepted):
+            intercepted = True
+            database.connection().execute(update(ReimbursementDraft).where(
+                ReimbursementDraft.id == draft.id,
+            ).values(**{flag: True}))
+        return execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(database, "execute", retire_before_compare_and_swap)
+    with pytest.raises((ApiError, ReimbursementSubmissionConflict)):
+        _create(database, draft)
+    assert intercepted
+    assert database.scalar(select(ReimbursementSubmission.id)) is None

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
+from sqlalchemy import MetaData, Table, select
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
@@ -15,6 +15,7 @@ from app.models.reimbursement import (
     ReimbursementDraft,
     ReimbursementSubmission,
     ReimbursementUpload,
+    new_uuid,
     utc_now,
 )
 from app.services.readiness import _database_ready
@@ -47,8 +48,12 @@ def seed_verifying(
         expires_at=now + timedelta(days=7),
         locked_at=now,
     )
-    database.add(draft)
-    database.flush()
+    # Seed supported historical schemas using their actual columns, independently
+    # of fields introduced by later application models.
+    draft.id = new_uuid()
+    historical = Table("reimbursement_drafts", MetaData(), autoload_with=database.connection())
+    values = {name: value for name, value in draft.__dict__.items() if name in historical.c}
+    database.execute(historical.insert().values(**values, created_at=now, updated_at=now))
     raw = {
         "snapshotVersion": version,
         "originalFiles": list(files),

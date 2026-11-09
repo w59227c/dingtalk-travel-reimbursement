@@ -27,6 +27,7 @@ from app.models.reimbursement import (
     ReimbursementOcrStatus,
     ReimbursementSubmission,
     ReimbursementSubmissionStatus,
+    ReimbursementUpload,
     utc_now,
 )
 from app.schemas.reimbursements import ReimbursementDraftInput, RelatedApprovalSelectionInput
@@ -156,10 +157,23 @@ def _assert_unresolved_provenance(client, draft_id: str) -> None:
             )
 
 
+def _replacement_input(client):
+    current = client.get("/api/reimbursements/workspace").json()["data"]["items"]
+    return (
+        {"replacesDraftId": current[0]["id"], "replacesDraftRevision": current[0]["revision"]}
+        if current
+        else {}
+    )
+
+
 def _create(client, headers: dict[str, str], body: dict[str, object] | None = None):
     return client.post(
         "/api/reimbursements/drafts",
-        json={"expectedRevision": 0, "input": body or _input()},
+        json={
+            "expectedRevision": 0,
+            "input": body or _input(),
+            **_replacement_input(client),
+        },
         headers=headers,
     )
 
@@ -464,8 +478,9 @@ def test_open_editable_draft_is_atomic_and_preserves_saved_content(
     assert resumed.json()["data"] == updated.json()["data"]
 
 
-def test_open_editable_draft_skips_records_outside_current_scope_or_template(
-    client_factory, monkeypatch,
+def test_open_current_draft_skips_records_outside_current_scope(
+    client_factory,
+    monkeypatch,
 ) -> None:
     _install_catalog(monkeypatch)
     client = client_factory(auth_mock_enabled=True)
@@ -476,10 +491,6 @@ def test_open_editable_draft_skips_records_outside_current_scope_or_template(
         {"corp_id": "different-corp"},
         {"owner_user_id": "different-employee"},
         {"department_id": "200"},
-        {"expires_at": utc_now() - timedelta(days=1)},
-        {"template_config_version": 11},
-        {"template_process_code": "OLD-PROCESS"},
-        {"status": ReimbursementDraftStatus.LOCKED.value, "locked_at": utc_now()},
     ]
     for overrides in excluded_records:
         created = client.post(url, json=payload, headers=headers)
@@ -496,24 +507,87 @@ def test_open_editable_draft_skips_records_outside_current_scope_or_template(
     assert opened.json()["data"]["status"] == "DRAFT"
     assert opened.json()["data"]["templateConfigVersion"] == 12
     assert opened.json()["data"]["template"]["processCode"] == "PROC-REIMBURSEMENT"
-    assert client.get(url).json()["data"]["total"] == 5
+    assert client.get(url).json()["data"]["total"] == 1
 
 
 def _add_history_submission(database, draft, *, status="QUEUED", resume_status=None):
     database.add(draft)
     database.flush()
-    database.add(ReimbursementSubmission(
-        draft_id=draft.id, corp_id=draft.corp_id,
-        originator_user_id=draft.owner_user_id, originator_union_id="synthetic-union",
-        originator_name="测试员工", department_id=draft.department_id,
+    completed = status == "SUBMITTED"
+    known_instance = completed or status == "VERIFYING" or resume_status == "VERIFYING"
+    checkpoint = known_instance or status in {"OA_CREATING", "RECONCILING", "MANUAL_REVIEW"}
+    observed_at = draft.locked_at or utc_now()
+    submission = ReimbursementSubmission(
+        draft_id=draft.id,
+        corp_id=draft.corp_id,
+        originator_user_id=draft.owner_user_id,
+        originator_union_id="synthetic-union",
+        originator_name="测试员工",
+        department_id=draft.department_id,
         department_name=draft.department_name,
         template_process_code=draft.template_process_code,
         template_config_version=draft.template_config_version,
         schema_fingerprint=draft.schema_fingerprint,
-        form_snapshot_json="{}", related_instance_ids_json="[]",
-        snapshot_sha256="a" * 64, idempotency_key_hash="b" * 64,
-        status=status, resume_status=resume_status,
-    ))
+        form_snapshot_json=json.dumps(
+            {
+                "snapshotVersion": 11,
+                "attachmentMode": "bundle_and_excel",
+                "originalFiles": [{"draftFileId": "synthetic-original"}],
+            }
+        ),
+        related_instance_ids_json="[]",
+        snapshot_sha256="a" * 64,
+        idempotency_key_hash="b" * 64,
+        status="VERIFYING" if completed else status,
+        resume_status=resume_status,
+        oa_create_started_at=observed_at if checkpoint else None,
+        oa_request_hash="c" * 64 if checkpoint else None,
+        process_instance_id=f"synthetic-instance-{draft.id}" if known_instance else None,
+        reconciliation_deadline_at=(
+            observed_at + timedelta(minutes=5) if status == "RECONCILING" else None
+        ),
+        orphan_confirmed_at=observed_at if status == "ORPHAN_CLEANUP" else None,
+        orphan_confirmation_code="synthetic-not-created" if status == "ORPHAN_CLEANUP" else None,
+    )
+    database.add(submission)
+    database.flush()
+    if completed:
+        # A successful record must satisfy the real linked-attachment DB guards.
+        for index, role, extension, media_type in (
+            (0, "GENERATED_PDF", "pdf", "application/pdf"),
+            (
+                1,
+                "GENERATED_EXCEL",
+                "xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        ):
+            database.add(
+                ReimbursementUpload(
+                    submission_id=submission.id,
+                    draft_id=draft.id,
+                    role=role,
+                    sort_order=index,
+                    local_storage_key=f"generated/{submission.id}/synthetic.{extension}",
+                    local_status="READY",
+                    reserved_bytes=1,
+                    file_name=f"synthetic.{extension}",
+                    file_type=extension,
+                    media_type=media_type,
+                    size_bytes=1,
+                    sha256="d" * 64,
+                    upload_status="LINKED",
+                    space_id="synthetic-space",
+                    file_id=f"synthetic-file-{submission.id}-{index}",
+                    linked_at=observed_at,
+                )
+            )
+        database.flush()
+        submission.status = "SUBMITTED"
+        submission.submitted_at = observed_at
+        submission.business_id = f"synthetic-business-{draft.id}"
+        submission.approval_url = "https://example.invalid/approval"
+        database.flush()
 
 
 def test_submission_history_only_returns_ten_latest_submissions_in_current_scope(
@@ -551,15 +625,19 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
                 locked_at=now - timedelta(days=20 - index // 2),
                 updated_at=now - timedelta(days=index),
             )
-            _add_history_submission(database, record, status="QUEUED")
+            _add_history_submission(database, record, status="SUBMITTED")
         for index in range(55):
             database.add(ReimbursementDraft(**scope, id=f"synthetic-draft-{index:02d}"))
-        # A full page of newer definite failures must not crowd out real history.
+        # Newer unfinished and failed tasks must not crowd out successful records.
         for index in range(12):
             record = ReimbursementDraft(
                 **scope, id=f"synthetic-failure-{index:02d}", status="LOCKED", locked_at=now,
             )
-            _add_history_submission(database, record, status="FAILED_FINAL")
+            _add_history_submission(
+                database,
+                record,
+                status="QUEUED" if index % 2 else "FAILED_FINAL",
+            )
         for field, value in (
             ("corp_id", "another-corp"), ("owner_user_id", "another-employee"),
             ("department_id", "200"), ("department_name", "其他测试部门"),
@@ -567,7 +645,7 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
             record = ReimbursementDraft(
                 **{**scope, field: value}, status="LOCKED", locked_at=now,
             )
-            _add_history_submission(database, record)
+            _add_history_submission(database, record, status="SUBMITTED")
         database.commit()
 
     response = client.get(url)
@@ -587,30 +665,45 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
             assert stale.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_CHANGED"
     stale_create = client.post(
         "/api/reimbursements/drafts",
-        json={"expectedRevision": 0, "reuseExisting": True, "expectedDepartmentId": "200",
-              "input": _input()},
+        json={
+            "expectedRevision": 0,
+            "reuseExisting": True,
+            "expectedDepartmentId": "200",
+            "input": _input(),
+        },
         headers=headers,
     )
     assert stale_create.status_code == 409, stale_create.text
     assert stale_create.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_CHANGED"
 
 
-def test_submission_history_hides_definite_failures_but_preserves_uncertain_jobs(
-    client_factory, monkeypatch,
+def test_submission_history_only_shows_success_and_preserves_other_tasks(
+    client_factory,
+    monkeypatch,
 ):
     _install_catalog(monkeypatch)
     client = client_factory(auth_mock_enabled=True)
     headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
     cases = [
         ("FAILED_FINAL", None, False),
-        ("MANUAL_REVIEW", None, True),
-        ("FAILED_RETRYABLE", "UPLOADING", True),
-        ("QUEUED", None, True),
+        ("MANUAL_REVIEW", None, False),
+        ("FAILED_RETRYABLE", "UPLOADING", False),
+        ("FAILED_RETRYABLE", "VERIFYING", False),
+        ("QUEUED", None, False),
+        ("VALIDATING", None, False),
+        ("GENERATING_EXCEL", None, False),
+        ("UPLOADING", None, False),
+        ("OA_CREATING", None, False),
+        ("RECONCILING", None, False),
+        ("VERIFYING", None, False),
+        ("ORPHAN_CLEANUP", None, False),
+        ("SUBMITTED", None, True),
     ]
     visible_ids = []
     for status, resume_status, visible in cases:
         created = client.post(
-            "/api/reimbursements/drafts", json={"expectedRevision": 0, "input": _input()},
+            "/api/reimbursements/drafts",
+            json={"expectedRevision": 0, "input": _input(), **_replacement_input(client)},
             headers=headers,
         )
         assert created.status_code == 201, created.text
@@ -628,6 +721,58 @@ def test_submission_history_hides_definite_failures_but_preserves_uncertain_jobs
     assert [item["id"] for item in response.json()["data"]] == visible_ids
     with client.app.state.database_session_factory() as database:
         assert database.query(ReimbursementSubmission).count() == len(cases)
+
+
+@pytest.mark.parametrize(
+    "status,resume_status,restore_pending",
+    [
+        ("QUEUED", None, True),
+        ("UPLOADING", None, True),
+        ("FAILED_RETRYABLE", "UPLOADING", True),
+        ("FAILED_RETRYABLE", "VERIFYING", True),
+        ("OA_CREATING", None, True),
+        ("RECONCILING", None, True),
+        ("VERIFYING", None, True),
+        ("MANUAL_REVIEW", None, True),
+        ("ORPHAN_CLEANUP", None, True),
+        ("FAILED_FINAL", None, False),
+        ("SUBMITTED", None, False),
+    ],
+)
+def test_workspace_keeps_editable_draft_and_lists_unfinished_tasks(
+    client_factory,
+    monkeypatch,
+    status,
+    resume_status,
+    restore_pending,
+):
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    draft_ids = []
+    for _ in range(2):
+        created = client.post(
+            "/api/reimbursements/drafts",
+            json={"expectedRevision": 0, "input": _input(), **_replacement_input(client)},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        draft_ids.append(created.json()["data"]["id"])
+    pending_id, editing_id = draft_ids
+    with client.app.state.database_session_factory() as database:
+        pending = database.get(ReimbursementDraft, pending_id)
+        pending.status = "LOCKED"
+        pending.locked_at = utc_now() - timedelta(days=2)
+        pending.updated_at = pending.locked_at
+        _add_history_submission(database, pending, status=status, resume_status=resume_status)
+        database.commit()
+
+    response = client.get("/api/reimbursements/drafts", params={"limit": 1})
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["items"][0]["id"] == editing_id
+    workspace = client.get("/api/reimbursements/workspace")
+    assert workspace.status_code == 200, workspace.text
+    assert [item["id"] for item in workspace.json()["data"]["items"]] == ([editing_id])
 
 
 def test_employee_original_currency_edit_intent_is_persisted(
@@ -1061,7 +1206,7 @@ def test_expired_and_locked_drafts_are_visible_but_cannot_be_changed(
         headers=headers,
     )
     assert expired_update.status_code == 409
-    assert expired_update.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_EXPIRED"
+    assert expired_update.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_REPLACED"
     assert locked_update.status_code == 409
     assert locked_update.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_LOCKED"
     locked_delete = client.delete(
@@ -1894,3 +2039,36 @@ def test_review_rejects_running_file_work_and_catalog_relation_drift_atomically(
     unchanged = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
     assert unchanged["status"] == "DRAFT"
     assert unchanged["revision"] == 2
+
+
+def test_new_current_requires_confirmation_and_revision_and_retires_old(
+    client_factory, monkeypatch,
+):
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    first = _create(client, headers).json()["data"]
+    blank = {"expectedRevision": 0, "input": {**_input(), "items": [], "trip": None}}
+    assert client.post("/api/reimbursements/drafts", json=blank, headers=headers).status_code == 409
+    stale = {
+        **blank, "replacesDraftId": first["id"], "replacesDraftRevision": first["revision"] + 1,
+    }
+    assert client.post("/api/reimbursements/drafts", json=stale, headers=headers).status_code == 409
+    replacement = client.post("/api/reimbursements/drafts", json={
+        **stale, "replacesDraftRevision": first["revision"],
+    }, headers=headers)
+    assert replacement.status_code == 201, replacement.text
+    current = replacement.json()["data"]
+    assert current["id"] != first["id"] and current["input"]["items"] == []
+    workspace = client.get("/api/reimbursements/workspace").json()["data"]
+    assert workspace["items"][0]["id"] == current["id"]
+    rejected = client.put(f"/api/reimbursements/drafts/{first['id']}", json={
+        "expectedRevision": first["revision"], "input": _input(),
+    }, headers=headers)
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "REIMBURSEMENT_DRAFT_REPLACED"
+    repeated = client.post("/api/reimbursements/drafts", json={
+        **stale, "replacesDraftRevision": first["revision"],
+    }, headers=headers)
+    assert repeated.status_code == 409
+    assert client.get("/api/reimbursements/workspace").json()["data"]["total"] == 1

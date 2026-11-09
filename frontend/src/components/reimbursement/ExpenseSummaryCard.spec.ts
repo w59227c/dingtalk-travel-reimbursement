@@ -1,6 +1,6 @@
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessage } from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useExpenseStore } from '@/stores/expense'
@@ -49,6 +49,7 @@ function draft(): ReimbursementDraft {
 
 describe('ExpenseSummaryCard', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     setActivePinia(createPinia())
   })
 
@@ -83,6 +84,54 @@ describe('ExpenseSummaryCard', () => {
 
     expect(preview).toHaveBeenCalledOnce()
     expect(wrapper.text()).not.toContain('生成并下载 Excel')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('coalesces preview clicks while preparing saved content, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    let ready!: () => void
+    const beforePreview = vi.fn(() => new Promise<void>((resolve) => { ready = resolve }))
+    const download = vi.spyOn(drafts, mobile ? 'openExcelPreviewInDingTalk' : 'downloadExcelPreview').mockResolvedValue(undefined)
+    const wrapper = mount(ExpenseSummaryCard, { props: { mobile, beforePreview }, global: { plugins: [ElementPlus] } })
+    await wrapper.get('button').trigger('click')
+    await wrapper.get('button').trigger('click')
+    expect(beforePreview).toHaveBeenCalledOnce()
+    ready()
+    await flushPromises()
+    expect(download).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('drops a prepared preview after changing drafts, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    let ready!: () => void
+    const beforePreview = () => new Promise<void>((resolve) => { ready = resolve })
+    const download = vi.spyOn(drafts, mobile ? 'openExcelPreviewInDingTalk' : 'downloadExcelPreview').mockResolvedValue(undefined)
+    const wrapper = mount(ExpenseSummaryCard, { props: { mobile, beforePreview }, global: { plugins: [ElementPlus] } })
+    await wrapper.get('button').trigger('click')
+    drafts.currentDraft = { ...draft(), id: 'replacement-draft' }
+    ready()
+    await flushPromises()
+    expect(download).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('does not announce an old download after switching drafts, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    let ready!: () => void
+    vi.spyOn(drafts, mobile ? 'openExcelPreviewInDingTalk' : 'downloadExcelPreview')
+      .mockImplementation(() => new Promise<void>((resolve) => { ready = resolve }))
+    const success = vi.spyOn(ElMessage, 'success')
+    const wrapper = mount(ExpenseSummaryCard, { props: { mobile }, global: { plugins: [ElementPlus] } })
+    await wrapper.get('button').trigger('click')
+    drafts.currentDraft = { ...draft(), id: 'replacement-draft' }
+    ready()
+    await flushPromises()
+    expect(success).not.toHaveBeenCalled()
+    success.mockRestore()
     wrapper.unmount()
   })
 

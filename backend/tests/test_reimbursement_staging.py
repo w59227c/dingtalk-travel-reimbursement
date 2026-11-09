@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import selectors
 import stat
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,6 +24,7 @@ from app.services.reimbursement_staging import (
     StagingLimitExceeded,
     StagingObjectExists,
     StagingObjectNotFound,
+    StagingRecoveryBusy,
     StagingReservation,
 )
 
@@ -37,6 +41,57 @@ def object_path(root: Path, storage_key: str) -> Path:
 
 def new_staging(root: Path, *, maximum: int = _MAX_BYTES) -> ReimbursementStaging:
     return ReimbursementStaging(root.resolve(), max_object_bytes=maximum)
+
+
+def test_recovery_directory_guard_shares_writers_but_excludes_cleanup(tmp_path):
+    staging = new_staging(tmp_path / "staging")
+    other = new_staging(staging.root)
+    owner = str(uuid4())
+    with staging.recovery_guard(owner), other.recovery_guard(owner):
+        with pytest.raises(StagingRecoveryBusy):
+            with other.recovery_guard(owner, exclusive=True):
+                pytest.fail("cleanup must not overlap recovery writers")
+    with staging.recovery_guard(owner, exclusive=True):
+        with pytest.raises(StagingRecoveryBusy):
+            with other.recovery_guard(owner):
+                pytest.fail("recovery must not start during cleanup")
+    with other.recovery_guard(owner, exclusive=True):
+        pass
+    assert list((staging.root / "drafts" / owner).iterdir()) == []
+
+
+def test_recovery_directory_guard_is_released_when_writer_process_dies(tmp_path):
+    staging = new_staging(tmp_path / "staging")
+    owner = str(uuid4())
+    program = """
+import sys
+from pathlib import Path
+from app.services.reimbursement_staging import ReimbursementStaging
+staging = ReimbursementStaging(Path(sys.argv[1]), max_object_bytes=1024)
+with staging.recovery_guard(sys.argv[2]):
+    print('ready', flush=True)
+    sys.stdin.read()
+"""
+    with subprocess.Popen(
+        [sys.executable, "-c", program, str(staging.root), owner],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as process:
+        try:
+            with selectors.DefaultSelector() as ready:
+                ready.register(process.stdout, selectors.EVENT_READ)
+                assert ready.select(timeout=5)
+                assert process.stdout.readline().strip() == "ready"
+            with pytest.raises(StagingRecoveryBusy):
+                with staging.recovery_guard(owner, exclusive=True):
+                    pytest.fail("another process still owns the recovery directory")
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+    with staging.recovery_guard(owner, exclusive=True):
+        pass
 
 
 def test_reservation_is_known_before_write_and_round_trips_privately(tmp_path: Path) -> None:

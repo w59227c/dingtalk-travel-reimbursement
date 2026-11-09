@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from uuid import uuid4
 
 from sqlalchemy import (
     DDL,
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -23,6 +24,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
+
+RECOVERY_COPY_LEASE = timedelta(seconds=90)
 
 
 def utc_now() -> datetime:
@@ -151,6 +154,7 @@ class ReimbursementDraft(Base):
             "owner_user_id",
             name="uq_reimbursement_drafts_identity",
         ),
+        Index("uq_reimbursement_drafts_recovery_source", "recovery_source_draft_id", unique=True),
         Index(
             "ix_reimbursement_drafts_owner_updated",
             "corp_id",
@@ -179,6 +183,12 @@ class ReimbursementDraft(Base):
     schema_fingerprint: Mapped[str] = mapped_column(String(64))
     input_json: Mapped[str] = mapped_column(Text, default="{}")
     related_instance_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    recovery_source_draft_id: Mapped[str | None] = mapped_column(
+        ForeignKey("reimbursement_drafts.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    workspace_retired: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    recovery_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     expires_at: Mapped[datetime] = mapped_column(DateTime())
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(), default=utc_now)
@@ -549,8 +559,7 @@ class ReimbursementSubmissionRecoveryAudit(Base):
             name="ck_reimbursement_submission_recovery_audits_action",
         ),
         CheckConstraint(
-            "status_before = 'MANUAL_REVIEW' AND "
-            "status_after IN ('VERIFYING', 'ORPHAN_CLEANUP')",
+            "status_before = 'MANUAL_REVIEW' AND status_after IN ('VERIFYING', 'ORPHAN_CLEANUP')",
             name="ck_reimbursement_submission_recovery_audits_statuses",
         ),
         CheckConstraint(

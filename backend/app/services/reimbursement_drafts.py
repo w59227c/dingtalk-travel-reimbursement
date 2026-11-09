@@ -141,6 +141,20 @@ def require_owned_draft(
     return draft
 
 
+def require_previewable_draft(
+    database: Session,
+    *,
+    draft_id: str,
+    actor: DraftActor,
+) -> ReimbursementDraft:
+    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    # Historical locked snapshots remain previewable after workspace retirement.
+    # Every editable preview must still belong to a live, completed workspace.
+    if draft.status != ReimbursementDraftStatus.LOCKED.value or draft.recovery_pending:
+        _require_mutable(draft, now=utc_now())
+    return draft
+
+
 def bump_owned_draft_revision(
     database: Session,
     *,
@@ -168,6 +182,8 @@ def bump_owned_draft_revision(
             ReimbursementDraft.department_name == actor.department_name,
             ReimbursementDraft.revision == expected_revision,
             ReimbursementDraft.status.in_(_MUTABLE_STATUSES),
+            ReimbursementDraft.recovery_pending.is_(False),
+            ReimbursementDraft.workspace_retired.is_(False),
             ReimbursementDraft.locked_at.is_(None),
             ReimbursementDraft.expires_at > changed_at,
         )
@@ -205,6 +221,8 @@ def create_reimbursement_draft(
     ttl_days: int,
     max_items: int,
     reuse_existing: bool = False,
+    replaces_draft_id: str | None = None,
+    replaces_draft_revision: int | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     if _draft_file_reference_ids(draft_input) or any(
@@ -232,32 +250,56 @@ def create_reimbursement_draft(
         allow_partial=True,
     )
     try:
-        if reuse_existing:
-            # Serialize the lookup and insert across tabs and application workers.
-            database.connection().exec_driver_sql("BEGIN IMMEDIATE")
-            catalog = require_submission_ready_catalog(database)
+        # Serialize current-record selection, retirement and creation across tabs.
+        database.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        catalog = require_submission_ready_catalog(database)
         created_at = now or utc_now()
         binding = CatalogBinding.from_catalog(catalog)
-        if reuse_existing:
+        if replaces_draft_id:
+            previous = require_owned_draft(database, draft_id=replaces_draft_id, actor=actor)
+            latest = database.scalar(
+                _department_drafts(actor)
+                .where(
+                    ReimbursementDraft.workspace_retired.is_(False),
+                )
+                .order_by(ReimbursementDraft.created_at.desc(), ReimbursementDraft.id.desc())
+                .limit(1)
+            )
+            if (
+                previous.workspace_retired
+                or previous.revision != replaces_draft_revision
+                or (latest and latest.id != previous.id)
+            ):
+                raise ApiError(
+                    "REIMBURSEMENT_DRAFT_REVISION_CONFLICT", "当前报销已变化，请刷新后再新开", 409
+                )
+        else:
             existing = database.scalar(
-                select(ReimbursementDraft)
+                _department_drafts(actor)
+                .where(
+                    ReimbursementDraft.workspace_retired.is_(False),
+                )
+                .order_by(ReimbursementDraft.created_at.desc(), ReimbursementDraft.id.desc())
+                .limit(1)
+            )
+            if existing is not None:
+                if not reuse_existing:
+                    raise ApiError(
+                        "REIMBURSEMENT_CURRENT_EXISTS", "已有当前报销，请确认新开后再替换", 409,
+                    )
+                database.commit()
+                return draft_data(database, existing, now=created_at)
+        if replaces_draft_id:
+            database.execute(
+                update(ReimbursementDraft)
                 .where(
                     ReimbursementDraft.corp_id == actor.corp_id,
                     ReimbursementDraft.owner_user_id == actor.user_id,
                     ReimbursementDraft.department_id == actor.department_id,
                     ReimbursementDraft.department_name == actor.department_name,
-                    ReimbursementDraft.status.in_(_MUTABLE_STATUSES),
-                    ReimbursementDraft.locked_at.is_(None),
-                    ReimbursementDraft.expires_at > created_at,
-                    ReimbursementDraft.template_process_code == binding.process_code,
-                    ReimbursementDraft.template_config_version == binding.config_version,
                 )
-                .order_by(ReimbursementDraft.updated_at.desc(), ReimbursementDraft.id.desc())
-                .limit(1)
+                .values(workspace_retired=True, updated_at=ReimbursementDraft.updated_at)
             )
-            if existing is not None:
-                database.commit()
-                return draft_data(database, existing, now=created_at)
         draft = ReimbursementDraft(
             corp_id=actor.corp_id,
             owner_user_id=actor.user_id,
@@ -324,7 +366,7 @@ def list_reimbursement_submission_history(
                 ReimbursementSubmission.draft_id == ReimbursementDraft.id,
                 ReimbursementSubmission.corp_id == actor.corp_id,
                 ReimbursementSubmission.originator_user_id == actor.user_id,
-                ReimbursementSubmission.status != ReimbursementSubmissionStatus.FAILED_FINAL.value,
+                ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
             ),
         )
         .order_by(ReimbursementDraft.locked_at.desc(), ReimbursementDraft.id.desc())
@@ -497,6 +539,8 @@ def mark_reimbursement_draft_review_ready(
                 ReimbursementDraft.revision == expected_revision,
                 ReimbursementDraft.status.in_(_MUTABLE_STATUSES),
                 ReimbursementDraft.locked_at.is_(None),
+                ReimbursementDraft.workspace_retired.is_(False),
+                ReimbursementDraft.recovery_pending.is_(False),
                 ReimbursementDraft.expires_at > changed_at,
             )
             .values(
@@ -774,10 +818,7 @@ def validate_submission_evidence(
             and not item.payment_proof_file_ids
         ):
             raise _not_ready_error("单张票据金额超过500元，请上传并关联付款凭证")
-        requires_itinerary = (
-            item.requires_itinerary
-            or item.transport_type == "ride_hailing"
-        )
+        requires_itinerary = item.requires_itinerary or item.transport_type == "ride_hailing"
         if requires_itinerary and not item.itinerary_file_ids:
             raise _not_ready_error("网约车费用缺少对应行程单，请上传并关联后提交")
         currency = evidence.get("originalCurrency") or item.original_currency
@@ -1419,6 +1460,12 @@ def _require_department(draft: ReimbursementDraft, actor: DraftActor) -> None:
 
 
 def _require_mutable(draft: ReimbursementDraft, *, now: datetime) -> None:
+    if draft.workspace_retired:
+        raise ApiError("REIMBURSEMENT_DRAFT_REPLACED", "已新开另一笔报销，请返回当前报销", 409)
+    if draft.recovery_pending:
+        raise ApiError(
+            "REIMBURSEMENT_RECOVERY_PENDING", "材料尚未恢复完成，请继续恢复后再编辑", 409
+        )
     if draft.status == ReimbursementDraftStatus.LOCKED.value or draft.locked_at is not None:
         raise ApiError("REIMBURSEMENT_DRAFT_LOCKED", "报销已进入提交处理，不能继续修改", 409)
     if draft.expires_at <= now or draft.status == ReimbursementDraftStatus.EXPIRED.value:
@@ -1444,6 +1491,15 @@ def _draft_summary(draft: ReimbursementDraft, *, now: datetime) -> dict[str, obj
         "createdAt": _timestamp(draft.created_at),
         "updatedAt": _timestamp(draft.updated_at),
         "lockedAt": _timestamp(draft.locked_at),
+        **({"workspaceRetired": True} if draft.workspace_retired else {}),
+        **(
+            {
+                "recoverySourceDraftId": draft.recovery_source_draft_id,
+                "recoveryPending": draft.recovery_pending,
+            }
+            if draft.recovery_source_draft_id
+            else {}
+        ),
     }
 
 
