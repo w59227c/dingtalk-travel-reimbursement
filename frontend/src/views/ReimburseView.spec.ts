@@ -2576,6 +2576,16 @@ describe('ReimburseView single-form OA flow', () => {
     for (const value of ['¥144.89', '提交时姓名', '提交时公司', '提交时预算', '提交时出差类别']) {
       expect(receipt.text()).toContain(value)
     }
+    const approvalDetails = receipt.get('.receipt-approvals')
+    for (const value of ['审批编号', linkedApproval.businessId,
+      linkedApproval.startDate, linkedApproval.endDate, '提交时出差类别']) {
+      expect(approvalDetails.text()).toContain(value)
+    }
+    expect(approvalDetails.get('[aria-label="出差日期"]').text()).toContain(linkedApproval.startDate)
+    expect(approvalDetails.get('[aria-label="出差类别"]').text()).toContain('提交时出差类别')
+    expect(approvalDetails.get('.approval-accounting-line').text()).toBe('提交时公司 · 提交时预算')
+    expect(approvalDetails.get('[aria-label="所属公司"]').text()).toBe('提交时公司')
+    expect(approvalDetails.get('[aria-label="预算代码与项目"]').text()).toBe('提交时预算')
     expect(visibleButton(wrapper, mobile ? '打开 Excel' : '预览 Excel').attributes('disabled')).toBeUndefined()
     wrapper.findComponent(ExpenseItemsCardStub).vm.$emit('refresh-draft')
     await flushPromises()

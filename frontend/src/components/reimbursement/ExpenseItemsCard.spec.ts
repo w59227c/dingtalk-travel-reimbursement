@@ -2985,13 +2985,32 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
-  it.each([false, true])('shows submitted expenses and retained file names without edit actions, mobile=%s', async (mobile) => {
+  it.each([false, true].flatMap((mobile) => (['ACTIVE', 'PURGED'] as const).map((status) => ({ mobile, status }))))(
+    'shows submitted source and proof names without original preview actions, mobile=$mobile, files=$status', async ({ mobile, status }) => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = { ...draft(8), status: 'LOCKED' }
     const source = recognizedFile('file-1', '已提交发票.pdf', '10.00')
-    drafts.files = [{ ...source, status: 'PURGED' },
-      serverFile('extra', '已提交的附加材料.pdf', 'ATTACHMENT_ONLY', { status: 'PURGED' })]
-    useExpenseStore().upsertDraftOcrItem(source)
+    const hotelSource = recognizedFile('file-2', '已提交住宿发票.pdf', '600.00')
+    source.ocrResult.categoryId = 'local_transport'
+    hotelSource.ocrResult.categoryId = 'lodging'
+    const proofs = [
+      serverFile('itinerary', '已提交行程单.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'itinerary' }),
+      serverFile('hotel', '已提交住宿明细.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'hotel_bill' }),
+      serverFile('payment', '已提交付款凭证.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' }),
+      serverFile('manual', '已提交手工票据.jpg', 'ATTACHMENT_ONLY'),
+      serverFile('extra', '已提交的附加材料.pdf', 'ATTACHMENT_ONLY'),
+    ]
+    drafts.files = [source, hotelSource, ...proofs].map((file) => ({ ...file, status }))
+    const expense = useExpenseStore()
+    expense.upsertDraftOcrItem(source)
+    expense.upsertDraftOcrItem(hotelSource)
+    expense.items[0]!.transportType = 'ride_hailing'
+    expense.items[0]!.itineraryFileIds = ['itinerary']
+    expense.items[1]!.hotelBillFileIds = ['hotel']
+    expense.items[1]!.paymentProofFileIds = ['payment']
+    expense.items.push({ id: 'manual-expense', source: 'manual', category: 'office', date: '2026-09-01',
+      displayDate: '2026-09-01', amount: '20.00', receiptCount: 1, description: '资料打印',
+      receiptAttachmentFileIds: ['manual'] })
     const wrapper = mount(ExpenseItemsCard, {
       props: { mobile, readonly: true, submitted: true },
       global: { plugins: [pinia, ElementPlus] },
@@ -3003,9 +3022,9 @@ describe('ExpenseItemsCard durable files', () => {
     expect(materials.text()).not.toContain('待处理材料')
     expect(wrapper.text()).toContain('已提交的附加材料.pdf')
     const extra = wrapper.get('[data-material-file-id="extra"]')
-    expect(extra.get('.receipt-tags').text()).toBe('其他材料')
+    expect(extra.get('.receipt-tags').text()).toContain('其他材料')
     expect(extra.get('.receipt-name-line strong').text()).toBe('已提交的附加材料.pdf')
-    expect(extra.attributes('aria-label')).toBe('已提交的附加材料.pdf')
+    expect(extra.attributes('aria-label')).toContain('已提交的附加材料.pdf')
     expect(extra.find('button').exists()).toBe(false)
     expect(wrapper.text()).toContain('10.00')
     expect(wrapper.get(mobile ? '.expense-mobile-card .expense-date' : '.expense-table .expense-date').text())
@@ -3013,10 +3032,40 @@ describe('ExpenseItemsCard durable files', () => {
     expect(wrapper.text()).not.toContain('手动添加')
     expect(wrapper.text()).not.toContain('上传报销材料')
     expect(wrapper.findAll('button').some((button) => ['编辑', '删除'].includes(button.text()))).toBe(false)
-    drafts.files[1]!.status = 'ACTIVE'
+    for (const file of drafts.files) expect(wrapper.text()).toContain(file.name)
+    expect(wrapper.find('.receipt-file-preview-link, .material-preview').exists()).toBe(false)
+    for (const file of drafts.files) file.status = status === 'ACTIVE' ? 'PURGED' : 'ACTIVE'
     await flushPromises()
-    expect(extra.get('[aria-label="预览材料 已提交的附加材料.pdf"]').attributes('disabled')).toBeUndefined()
-    expect(extra.get('.receipt-tags').text()).toContain('已上传')
+    for (const file of drafts.files) expect(wrapper.text()).toContain(file.name)
+    expect(wrapper.find('.receipt-file-preview-link, .material-preview').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('请预览原件核对')
+    expect(getReimbursementFileContent).not.toHaveBeenCalled()
+    expect(getReimbursementPdfPreviewPage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('cancels an in-flight original preview when the receipt becomes submitted, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft(8)
+    drafts.files = [serverFile('file-1', '发票.png', 'ATTACHMENT_ONLY', { mediaType: 'image/png' })]
+    const pending = deferred<Blob>()
+    vi.mocked(getReimbursementFileContent).mockReturnValueOnce(pending.promise)
+    const createUrl = vi.fn().mockReturnValue('blob:late-original')
+    vi.stubGlobal('URL', class extends URL { static createObjectURL = createUrl; static revokeObjectURL = vi.fn() })
+    const submitted = ref(false)
+    const wrapper = mount({ render: () => h(ExpenseItemsCard, { mobile, readonly: true, submitted: submitted.value }) },
+      { global: { plugins: [pinia, ElementPlus] } })
+    await wrapper.get('[aria-label="预览材料 发票.png"]').trigger('click')
+    expect(getReimbursementFileContent).toHaveBeenCalledOnce()
+    submitted.value = true
+    await flushPromises()
+    const signal = vi.mocked(getReimbursementFileContent).mock.calls[0]![2]?.signal
+    expect(signal?.aborted).toBe(true)
+    pending.resolve(new Blob(['original'], { type: 'image/png' }))
+    await flushPromises()
+    expect(createUrl).not.toHaveBeenCalled()
+    expect(wrapper.findAllComponents({ name: 'ElDialog' }).every((dialog) => !dialog.props('modelValue'))).toBe(true)
+    expect(wrapper.find('.receipt-file-preview-link, .material-preview').exists()).toBe(false)
     wrapper.unmount()
   })
 

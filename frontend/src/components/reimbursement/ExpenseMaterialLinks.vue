@@ -4,7 +4,7 @@ import type { ExpenseItem } from '@/types/expenses'
 import type { ReimbursementDraftFile } from '@/types/reimbursements'
 import { isActiveProof, isRecordedProof, missingExpenseMaterials } from '@/utils/expenseProofs'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   item: ExpenseItem
   files: ReimbursementDraftFile[]
   disabled: boolean
@@ -13,7 +13,8 @@ const props = defineProps<{
   error?: string
   hasItinerarySuggestion?: boolean
   allowPurged?: boolean
-}>()
+  allowPreview?: boolean
+}>(), { allowPreview: true, error: '' })
 const emit = defineEmits<{
   preview: [file: ReimbursementDraftFile]
   purpose: [file: ReimbursementDraftFile]
@@ -39,7 +40,7 @@ const hasReusableHotel = computed(() => props.files.some((file) => isActiveProof
 
 function hotelSummary(file: ReimbursementDraftFile): string {
   const details = file.hotelBillDetails
-  if (!details) return '未提取住宿信息，请预览原件核对；已确认的材料用途不受影响。'
+  if (!details) return props.allowPreview ? '未提取住宿信息，请预览原件核对；已确认的材料用途不受影响。' : ''
   return [details.guest, details.checkIn && `${details.checkIn} 入住`, details.checkOut && `${details.checkOut} 离店`,
     details.nights && `${details.nights} 晚`, details.nightlyRate && `单价 ${details.nightlyRate}`,
     details.total && `合计 ${details.total}`, details.currency].filter(Boolean).join(' · ')
@@ -60,7 +61,7 @@ function hotelSummary(file: ReimbursementDraftFile): string {
     >
       <span class="attached-label">票据材料</span>
       <button
-        v-if="file.status !== 'PURGED'"
+        v-if="allowPreview && file.status !== 'PURGED'"
         class="material-preview"
         type="button"
         :disabled="previewLoading"
@@ -111,7 +112,7 @@ function hotelSummary(file: ReimbursementDraftFile): string {
       <div class="attached-material">
         <span class="attached-label">已附住宿明细</span>
         <button
-          v-if="file.status !== 'PURGED'"
+          v-if="allowPreview && file.status !== 'PURGED'"
           class="material-preview"
           type="button"
           :disabled="previewLoading"
@@ -153,7 +154,10 @@ function hotelSummary(file: ReimbursementDraftFile): string {
           </el-button>
         </div>
       </div>
-      <p class="attached-label">
+      <p
+        v-if="hotelSummary(file)"
+        class="attached-label"
+      >
         {{ hotelSummary(file) }}
       </p>
     </div>
@@ -209,7 +213,7 @@ function hotelSummary(file: ReimbursementDraftFile): string {
     >
       <span class="attached-label">已附凭证</span>
       <button
-        v-if="file.status !== 'PURGED'"
+        v-if="allowPreview && file.status !== 'PURGED'"
         class="material-preview"
         type="button"
         :disabled="previewLoading"

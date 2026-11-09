@@ -736,7 +736,22 @@ describe('TripSubsidyCard', () => {
   it.each([false, true])('locks all subsidy controls after submission, mobile=%s', async (mobile) => {
     const expense = useExpenseStore()
     const wrapper = mountCard('business', approvals, true, mobile)
+    expense.subsidyTrips[0]!.excludedPeriods = [{
+      startDate: '2026-09-02', startTime: '09:00', endDate: '2026-09-02', endTime: '18:00',
+    }]
+    await nextTick()
     expect(wrapper.findComponent({ name: 'ElForm' }).props('disabled')).toBe(true)
+    const add = wrapper.get('[aria-label="补助 1 添加非补助时段"]')
+    expect.soft(add.element, 'readonly add action is disabled').toHaveProperty('disabled', true)
+    expect.soft(add.classes(), 'readonly add action has disabled styling').toContain('is-disabled')
+    const excluded = wrapper.get('.excluded-period-editor')
+    for (const input of excluded.findAll('input')) {
+      expect.soft(input.element, 'readonly absence dates and periods are disabled').toHaveProperty('disabled', true)
+    }
+    const before = JSON.stringify(expense.subsidyTrips)
+    await add.trigger('click')
+    await wrapper.get('[aria-label="补助 1 删除非补助时段 1"]').trigger('click')
+    expect(JSON.stringify(expense.subsidyTrips)).toBe(before)
     const toggle = wrapper.get('.el-card__header [role="switch"]')
     expect(toggle.attributes('aria-disabled')).toBe('true')
     await toggle.trigger('click')

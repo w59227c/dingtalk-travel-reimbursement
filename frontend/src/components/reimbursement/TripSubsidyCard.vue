@@ -402,7 +402,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
               <el-button
                 v-if="!attendanceMode(group)"
                 :aria-label="`补助 ${index + 1} 添加非补助时段`"
-                :disabled="group.excludedPeriods.length >= 100"
+                :disabled="props.readonly || group.excludedPeriods.length >= 100"
                 @click="addExcludedPeriod(group)"
               >
                 添加非补助时段
@@ -444,7 +444,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                   <el-form-item :label="endpoint.label">
                     <div class="subsidy-endpoint-controls">
                       <el-date-picker
-                        :disabled="attendanceMode(group)"
+                        :disabled="props.readonly || attendanceMode(group)"
                         :model-value="excluded[endpoint.dateField]"
                         type="date"
                         :popper-class="props.mobile ? 'excluded-period-picker--mobile' : undefined"
@@ -456,20 +456,20 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
                         @update:model-value="setExcludedDate(excluded, endpoint.dateField, $event)"
                       />
                       <el-radio-group
-                        :disabled="attendanceMode(group)"
+                        :disabled="props.readonly || attendanceMode(group)"
                         :model-value="period(excluded[endpoint.timeField])"
                         :aria-label="`补助 ${index + 1} 非补助时段 ${excludedIndex + 1} ${endpoint.label}时段`"
                         @update:model-value="setExcludedPeriod(excluded, endpoint.timeField, $event)"
                       >
                         <el-radio-button
                           value="morning"
-                          :disabled="disabledExcludedPeriod(group, excluded, endpoint.timeField, excluded[endpoint.dateField], 'morning')"
+                          :disabled="props.readonly || attendanceMode(group) || disabledExcludedPeriod(group, excluded, endpoint.timeField, excluded[endpoint.dateField], 'morning')"
                         >
                           上午
                         </el-radio-button>
                         <el-radio-button
                           value="afternoon"
-                          :disabled="disabledExcludedPeriod(group, excluded, endpoint.timeField, excluded[endpoint.dateField], 'afternoon')"
+                          :disabled="props.readonly || attendanceMode(group) || disabledExcludedPeriod(group, excluded, endpoint.timeField, excluded[endpoint.dateField], 'afternoon')"
                         >
                           下午
                         </el-radio-button>

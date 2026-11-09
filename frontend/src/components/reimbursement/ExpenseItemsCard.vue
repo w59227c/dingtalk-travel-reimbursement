@@ -390,6 +390,12 @@ function scheduleDurableOcrPoll(): void {
 
 watch(shouldPollDurableOcr, scheduleDurableOcrPoll, { immediate: true })
 
+watch(() => props.submitted, (submitted) => {
+  if (!submitted) return
+  receiptPreviewVisible.value = false
+  releaseReceiptPreview()
+}, { flush: 'sync' })
+
 watch(
   () => [
     drafts.currentDraft?.id,
@@ -987,7 +993,7 @@ function replaceReceiptPreviewUrl(blob: Blob): void {
 
 async function previewDurableFile(file: ReimbursementDraftFile | undefined): Promise<void> {
   const draft = drafts.currentDraft
-  if (!draft || !file || file.status !== 'ACTIVE') return
+  if (props.submitted || !draft || !file || file.status !== 'ACTIVE') return
   releaseReceiptPreview()
   const isPdf = file.mediaType === 'application/pdf'
   receiptPreviewName.value = file.name
@@ -1009,6 +1015,7 @@ async function previewDurableFile(file: ReimbursementDraftFile | undefined): Pro
     }
     if (
       controller.signal.aborted
+      || props.submitted
       || drafts.currentDraft?.id !== draft.id
       || receiptPreviewFileId.value !== file.id
       || receiptPreviewMode.value !== 'direct'
@@ -1037,7 +1044,7 @@ async function loadCompatiblePdfPage(pageNumber: number): Promise<void> {
   const draft = drafts.currentDraft
   const fileId = receiptPreviewFileId.value
   if (
-    !draft
+    props.submitted || !draft
     || receiptPreviewKind.value !== 'pdf'
     || !fileId
     || previewLoading.value
@@ -1062,6 +1069,7 @@ async function loadCompatiblePdfPage(pageNumber: number): Promise<void> {
         )
         if (
           controller.signal.aborted
+          || props.submitted
           || drafts.currentDraft?.id !== draft.id
           || receiptPreviewFileId.value !== fileId
           || receiptPreviewMode.value !== 'compatible'
@@ -2051,7 +2059,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       >
         <div class="receipt-main">
           <div class="receipt-name-line">
-            <strong v-if="isPurgedFile(file)">
+            <strong v-if="props.submitted || isPurgedFile(file)">
               {{ file.name }}
             </strong>
             <button
@@ -2298,7 +2306,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               <span class="expense-material-row__label">来源票据</span>
               <div class="expense-material-row__content">
                 <button
-                  v-if="!isPurgedFile(durableFileByItemId(scope.row.id))"
+                  v-if="!props.submitted && !isPurgedFile(durableFileByItemId(scope.row.id))"
                   type="button"
                   class="receipt-file-preview-link"
                   :disabled="previewLoading"
@@ -2328,7 +2336,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               <span class="expense-material-row__label">{{ attachmentKindLabels[file.attachmentKind] }}</span>
               <div class="expense-material-row__content">
                 <button
-                  v-if="file.status !== 'PURGED'"
+                  v-if="!props.submitted && file.status !== 'PURGED'"
                   type="button"
                   class="receipt-file-preview-link"
                   :disabled="previewLoading"
@@ -2376,6 +2384,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               :item="scope.row"
               :files="durableFiles"
               :allow-purged="showLockedFileMetadata"
+              :allow-preview="!props.submitted"
               :has-itinerary-suggestion="Boolean(suggestionFor(scope.row))"
               :disabled="Boolean(durableActionDisabledReason)"
               :preview-loading="previewLoading"
@@ -2553,7 +2562,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             <span class="expense-material-row__label">来源票据</span>
             <div class="expense-material-row__content">
               <button
-                v-if="!isPurgedFile(durableFileByItemId(item.id))"
+                v-if="!props.submitted && !isPurgedFile(durableFileByItemId(item.id))"
                 type="button"
                 class="receipt-file-preview-link"
                 :disabled="previewLoading"
@@ -2582,7 +2591,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             <span class="expense-material-row__label">{{ attachmentKindLabels[file.attachmentKind] }}</span>
             <div class="expense-material-row__content">
               <button
-                v-if="file.status !== 'PURGED'"
+                v-if="!props.submitted && file.status !== 'PURGED'"
                 type="button"
                 class="receipt-file-preview-link"
                 :disabled="previewLoading"
@@ -2630,6 +2639,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             :item="item"
             :files="durableFiles"
             :allow-purged="showLockedFileMetadata"
+            :allow-preview="!props.submitted"
             :has-itinerary-suggestion="Boolean(suggestionFor(item))"
             :disabled="Boolean(durableActionDisabledReason)"
             :preview-loading="previewLoading"

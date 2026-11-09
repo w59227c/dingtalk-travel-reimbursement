@@ -7,6 +7,7 @@ import { nextTick } from 'vue'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import type {
   OaTravelApproval,
+  ReimbursementDraft,
   ReimbursementRelatedApproval,
   ReimbursementRelatedApprovalSelection,
 } from '@/types/reimbursements'
@@ -50,6 +51,19 @@ const linked: ReimbursementRelatedApproval = {
     endTimeMs: Date.parse('2026-09-04T23:59:59.999+08:00'),
   },
   verifiedAt: '2026-09-04T00:00:00Z',
+}
+
+function restoredDraft(): ReimbursementDraft {
+  return {
+    id: 'draft', status: 'DRAFT', revision: 1, department: { id: '1', name: '演示部门' },
+    templateConfigVersion: 1, relatedApprovalCount: 1, expiresAt: '', createdAt: '', updatedAt: '', lockedAt: null,
+    template: { processCode: 'PROC-R', configVersion: 1, schemaFingerprint: 'a'.repeat(64) },
+    input: { companyValue: 'company-1', budgetCodeValue: 'budget-1', accountingSourceVerified: true,
+      project: { mode: 'manual', text: '预算1 · 演示项目' }, trip: null, items: [],
+      ocrDispositionVersion: 1, dismissedOcrFileIds: [] },
+    totals: { expenseTotal: '0.00', subsidyTotal: '0.00', totalAmount: '0.00', receiptCount: 0, uppercaseAmount: '零元整', subsidy: null },
+    relatedApprovals: [structuredClone(linked)], relatedApprovalSummary: null,
+  }
 }
 
 describe.each([false, true])('approval query bounds, mobile=%s', (mobile) => {
@@ -124,6 +138,48 @@ describe('TravelApprovalSelector', () => {
       unobserve(): void {}
       disconnect(): void {}
     }
+  })
+
+  it.each([false, true])('shows each candidate company and budget without borrowing the saved selection, mobile=%s', (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = restoredDraft()
+    drafts.travelApprovals = [candidate, {
+      ...candidate, processInstanceId: 'travel-2',
+      companyOption: { value: 'company-2', label: '另一演示公司', key: null },
+      budgetCodeOption: { value: 'budget-2', label: 'DEMO-02 · 另一演示项目', key: null },
+    }, { ...candidate, processInstanceId: 'travel-missing', companyOption: null, budgetCodeOption: null }]
+    const wrapper = mount(TravelApprovalSelector, {
+      props: { modelValue: [selection], linkedApprovals: [linked], mobile },
+      global: { plugins: [ElementPlus] },
+    })
+    const rows = wrapper.findAll('.travel-approval-row')
+    expect(rows[0]!.get('.approval-accounting-line').text()).toBe('北京公司 · 预算1')
+    expect(rows[1]!.get('.approval-accounting-line').text()).toBe('另一演示公司 · DEMO-02 · 另一演示项目')
+    expect(rows[2]!.find('.approval-accounting-line').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('restores verified linked accounting without a query cache and hides unverified values, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = restoredDraft()
+    drafts.travelApprovalsError = '暂不重新查询'
+    const wrapper = mount(TravelApprovalSelector, {
+      props: { modelValue: [selection], linkedApprovals: [linked], mobile },
+      global: { plugins: [ElementPlus] },
+    })
+    expect(wrapper.get('.approval-accounting-line').text()).toBe('company-1 · 预算1 · 演示项目')
+    drafts.currentDraft.input.accountingSourceVerified = false
+    await nextTick()
+    expect(wrapper.find('.approval-accounting-line').exists()).toBe(false)
+    drafts.currentDraft.status = 'LOCKED'
+    drafts.currentDraft.submittedDetails = { employeeName: '合成员工', companyLabel: '提交时公司',
+      budgetLabel: '提交时预算', travelTypeLabel: '提交时类别' }
+    await nextTick()
+    expect(wrapper.get('.approval-accounting-line').text()).toBe('提交时公司 · 提交时预算')
+    drafts.currentDraft.relatedApprovals = []
+    await nextTick()
+    expect(wrapper.find('.approval-accounting-line').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it.each([false, true])('uses the matching approval header and query layout, mobile=%s', (mobile) => {

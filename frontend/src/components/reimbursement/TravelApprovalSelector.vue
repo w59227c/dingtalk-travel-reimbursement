@@ -9,6 +9,7 @@ import type {
 } from '@/types/reimbursements'
 import { mappedTravelTypeOption } from '@/utils/travelTypes'
 import { APPROVAL_QUERY_HINT, approvalQueryDateError, approvalQueryStartDisabled, approvalQueryEndDisabled } from '@/utils/approvalQueryDates'
+import ApprovalAccountingLine from './ApprovalAccountingLine.vue'
 
 const props = withDefaults(defineProps<{
   modelValue: ReimbursementRelatedApprovalSelection[]
@@ -237,9 +238,29 @@ function unavailableReason(row: ApprovalRow): string {
   return ''
 }
 
-function accountingLabel(row: ApprovalRow): string {
+function accountingFor(row: ApprovalRow): { company?: string; budget?: string } {
   const approval = candidateCache.get(row.processInstanceId)
-  return [approval?.companyOption?.label, approval?.budgetCodeOption?.label].filter(Boolean).join(' · ')
+  if (approval) return {
+    company: approval.companyOption?.label || approval.companyOption?.value,
+    budget: approval.budgetCodeOption?.label || approval.budgetCodeOption?.value,
+  }
+  const draft = drafts.currentDraft
+  if (!row.linkedOnly || !draft?.relatedApprovals.some((linked) => (
+    linked.processInstanceId === row.processInstanceId && linked.profileKey === row.profileKey
+  ))) return {}
+  if (draft.status === 'LOCKED') return {
+    company: draft.submittedDetails?.companyLabel,
+    budget: draft.submittedDetails?.budgetLabel,
+  }
+  if (!draft.input.accountingSourceVerified) return {}
+  return {
+    company: drafts.reimbursementOptions?.companyOptions.find(
+      (option) => option.value === draft.input.companyValue,
+    )?.label || draft.input.companyValue,
+    budget: drafts.reimbursementOptions?.budgetCodeOptions.find(
+      (option) => option.value === draft.input.budgetCodeValue,
+    )?.label || draft.input.project?.text || draft.input.budgetCodeValue,
+  }
 }
 </script>
 
@@ -398,9 +419,9 @@ function accountingLabel(row: ApprovalRow): string {
               已关联
             </el-tag>
           </span>
-          <span>{{ row.startDate }} 至 {{ row.endDate }} · 出差类别：{{ row.travelTypeLabel }}</span>
+          <span><span class="travel-approval-dates">{{ row.startDate }} 至 {{ row.endDate }}</span> · 出差类别：{{ row.travelTypeLabel }}</span>
           <small>审批编号：{{ row.businessId }}</small>
-          <small v-if="accountingLabel(row)">{{ accountingLabel(row) }}</small>
+          <ApprovalAccountingLine v-bind="accountingFor(row)" />
           <small
             v-if="unavailableReason(row)"
             role="status"
@@ -529,6 +550,8 @@ function accountingLabel(row: ApprovalRow): string {
   color: var(--el-text-color-secondary);
   overflow-wrap: anywhere;
 }
+
+.travel-approval-dates { white-space: nowrap; }
 
 .travel-approval-title {
   display: flex;

@@ -6,6 +6,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
+import ApprovalAccountingLine from '@/components/reimbursement/ApprovalAccountingLine.vue'
 import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vue'
 import ReimbursementAttentionNotice from '@/components/reimbursement/ReimbursementAttentionNotice.vue'
 import TravelApprovalSelector from '@/components/reimbursement/TravelApprovalSelector.vue'
@@ -1884,7 +1885,7 @@ onBeforeUnmount(() => {
   >
     <section
       class="hero"
-      :class="{ 'hero--mobile': props.mobile, 'hero--history': historyOrigin }"
+      :class="{ 'hero--mobile': props.mobile }"
       aria-labelledby="page-title"
       data-testid="reimbursement-workspace-start"
     >
@@ -2310,7 +2311,7 @@ onBeforeUnmount(() => {
                   <h2 id="submitted-receipt-title">
                     审批已成功发起
                   </h2>
-                  <p>后续审批进度可在钉钉查看。</p>
+                  <p>票据材料和后续审批进度可在钉钉查看。</p>
                 </div>
               </div>
               <div class="receipt-amount">
@@ -2380,14 +2381,32 @@ onBeforeUnmount(() => {
               v-if="drafts.currentDraft.relatedApprovals.length"
               class="receipt-approvals"
             >
-              <h3>关联出差审批</h3>
+              <h3>关联出差审批（{{ drafts.currentDraft.relatedApprovals.length }} 张）</h3>
               <ul>
                 <li
                   v-for="approval in drafts.currentDraft.relatedApprovals"
                   :key="approval.processInstanceId"
                 >
                   <strong>{{ approval.title }}</strong>
-                  <small>{{ approval.startDate }} 至 {{ approval.endDate }}<template v-if="approval.businessId"> · {{ approval.businessId }}</template></small>
+                  <p class="receipt-approval-meta">
+                    <span
+                      class="receipt-approval-dates"
+                      aria-label="出差日期"
+                    >{{ approval.startDate }} 至 {{ approval.endDate }}</span><span
+                      v-if="receiptDetails?.travelTypeLabel"
+                      aria-label="出差类别"
+                    > · {{ receiptDetails.travelTypeLabel }}</span>
+                  </p>
+                  <p
+                    v-if="approval.businessId"
+                    class="receipt-approval-number"
+                  >
+                    审批编号：{{ approval.businessId }}
+                  </p>
+                  <ApprovalAccountingLine
+                    :company="receiptDetails?.companyLabel"
+                    :budget="receiptDetails?.budgetLabel"
+                  />
                 </li>
               </ul>
             </div>
@@ -3223,10 +3242,13 @@ onBeforeUnmount(() => {
 .receipt-info dd { font-size: 14px; line-height: 1.5; }
 .receipt-approvals { margin-top: 16px; }
 .receipt-approvals h3 { margin: 0 0 6px; color: var(--el-text-color-secondary); font-size: 12px; font-weight: 400; }
-.receipt-approvals ul { display: grid; gap: 6px; padding: 0; margin: 0; list-style: none; }
-.receipt-approvals li { display: grid; gap: 3px; overflow-wrap: anywhere; }
+.receipt-approvals ul { display: grid; gap: 12px; padding: 0; margin: 0; list-style: none; }
+.receipt-approvals li { display: grid; gap: 6px; overflow-wrap: anywhere; }
+.receipt-approvals li + li { padding-top: 12px; border-top: 1px solid var(--el-border-color-lighter); }
 .receipt-approvals li strong { color: var(--el-text-color-primary); font-size: 14px; font-weight: 550; }
-.receipt-approvals li small { color: var(--el-text-color-secondary); font-size: 12px; }
+.receipt-approval-meta { margin: 0; color: var(--el-text-color-regular); font-size: 13px; line-height: 1.6; }
+.receipt-approval-dates { white-space: nowrap; }
+.receipt-approval-number { margin: 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 .receipt-attachment-summary { margin: 14px 0 0; }
 .submitted-receipt-toolbar > .receipt-attachment-summary { margin: 6px 0 0; }
 .department-choice-copy { margin: 0 0 16px; color: var(--el-text-color-regular); line-height: 1.7; }
@@ -3409,11 +3431,9 @@ onBeforeUnmount(() => {
   align-items: stretch;
 }
 .page-shell--mobile :is(.submitted-receipt, .manual-review-panel, .submission-feedback-panel, .template-recovery-panel) { padding: var(--workspace-card-padding); }
-.page-shell--mobile .hero-meta { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.page-shell--mobile .hero-links { justify-self: end; flex-wrap: nowrap; gap: 16px; }
+.page-shell--mobile .hero-meta { gap: 8px; }
+.page-shell--mobile .hero-links { flex: none; flex-wrap: nowrap; gap: 10px; }
 .page-shell--mobile .hero-link { min-height: 40px; padding-block: 8px; }
-.page-shell--mobile .hero--history .hero-meta { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
-.page-shell--mobile .hero--history .hero-links { gap: 10px; }
 .page-shell--mobile .submission-feedback-heading h2 { font-size: 17px; }
 .page-shell--mobile .submission-feedback-actions { gap: 8px; margin-top: 16px; padding-top: 14px; }
 .page-shell--mobile .submission-feedback-actions .el-button { flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px; white-space: normal; height: auto; }
