@@ -487,6 +487,7 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
             role="status"
             aria-live="polite"
           >
+            <span v-if="!props.readonly && !expense.calculationsCurrent">上次计算，待更新</span>
             <span v-if="attendanceMode(group)">出勤 {{ Number(subsidyFor(group, index)?.effectiveDays) }} 天</span>
             <span v-else>审批自然日 {{ subsidyFor(group, index)?.calendarDays }} 天</span>
             <span v-if="!attendanceMode(group) && subsidyFor(group, index)?.excludedDays !== undefined">

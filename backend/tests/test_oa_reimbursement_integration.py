@@ -1252,6 +1252,62 @@ def test_submit_auto_syncs_travel_template_timestamp_for_existing_relation(
     assert polled.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value
 
 
+@pytest.mark.parametrize("with_materials", [False, True])
+def test_submission_requires_the_confirmed_total_when_daily_rates_change(
+    enabled_manual_worker_client,
+    with_materials,
+):
+    client = enabled_manual_worker_client
+    client.app.state.settings.admin_user_ids = "mock-user"
+    headers = {
+        "X-CSRF-Token": mock_login(client)["csrfToken"],
+        "Idempotency-Key": "12121212-1212-4212-8212-121212121212",
+    }
+    reimbursement, travel, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement, travel)
+    draft_id, _ = _persist_ready_draft(
+        client,
+        workflow,
+        travel_type,
+        subsidy_only=True,
+        with_materials=with_materials,
+    )
+    reviewed = client.get(f"/api/reimbursements/drafts/{draft_id}").json()["data"]
+    assert reviewed["totals"]["totalAmount"] == "300.00"
+    settings = client.get("/api/admin/settings").json()["data"]
+    changed = client.put(
+        "/api/admin/settings",
+        headers=headers,
+        json={
+            "expectedRevision": settings["revision"],
+            "appTitle": settings["appTitle"],
+            "adminUserIds": settings["adminUserIds"],
+            "calculationMode": settings["calculationMode"],
+            "subsidyRates": {**settings["subsidyRates"], "short_term_project": "200.00"},
+        },
+    )
+    assert changed.status_code == 200, changed.text
+    url = f"/api/oa/reimbursements/{draft_id}/submit"
+    payload = {"expectedRevision": reviewed["revision"], "expectedTotalAmount": "300.00"}
+    rejected = client.post(url, headers=headers, json=payload)
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["error"]["code"] == "REIMBURSEMENT_TOTAL_CHANGED"
+    with client.app.state.database_session_factory() as database:
+        draft = database.get(ReimbursementDraft, draft_id)
+        assert draft.revision == reviewed["revision"] and draft.status == "REVIEW_READY"
+        assert draft.locked_at is None
+        assert database.query(ReimbursementSubmission).count() == 0
+        assert database.query(ReimbursementUpload).count() == 0
+    accepted = client.post(url, headers=headers, json={**payload, "expectedTotalAmount": "600.00"})
+    assert accepted.status_code == 202, accepted.text
+    replay = client.post(url, headers=headers, json=payload)
+    assert replay.status_code == 202, replay.text
+    assert replay.json()["data"]["submissionId"] == accepted.json()["data"]["submissionId"]
+    with client.app.state.database_session_factory() as database:
+        task = database.query(ReimbursementSubmission).one()
+        assert json.loads(task.form_snapshot_json)["totals"]["totalAmount"] == "600.00"
+
+
 @pytest.fixture
 def enabled_manual_worker_client(client_factory, monkeypatch):
     async def wait_for_manual_worker(_self, stop: asyncio.Event) -> None:

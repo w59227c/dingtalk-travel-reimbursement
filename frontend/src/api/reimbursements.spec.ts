@@ -357,7 +357,7 @@ describe('persistent reimbursement API', () => {
     expect(apiErrorCode(caught)).toBe('REIMBURSEMENT_DRAFT_REVISION_CONFLICT')
   })
 
-  it('submits one exact draft revision with a UUID key and reads its task', async () => {
+  it.each([undefined, '44.89'])('submits one exact draft revision and confirmed total (%s) with a UUID key', async (expectedTotalAmount) => {
     const signal = new AbortController().signal
     const queued = {
       submissionId: 'submission/一',
@@ -381,7 +381,7 @@ describe('persistent reimbursement API', () => {
       'draft/一',
       7,
       '123e4567-e89b-42d3-a456-426614174000',
-      { signal },
+      { signal, expectedTotalAmount },
     )).resolves.toBe(queued)
     await expect(getOaReimbursementSubmission('submission/一', { signal }))
       .resolves.toBe(queued)
@@ -390,7 +390,7 @@ describe('persistent reimbursement API', () => {
 
     expect(http.post).toHaveBeenCalledWith(
       '/oa/reimbursements/draft%2F%E4%B8%80/submit',
-      { expectedRevision: 7 },
+      { expectedRevision: 7, ...(expectedTotalAmount === undefined ? {} : { expectedTotalAmount }) },
       {
         headers: { 'Idempotency-Key': '123e4567-e89b-42d3-a456-426614174000' },
         signal,

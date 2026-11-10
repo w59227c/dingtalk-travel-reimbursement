@@ -184,18 +184,18 @@ export const useExpenseStore = defineStore('expense', () => {
     items.value.reduce((sum, item) => sum + (moneyToCents(item.amount) ?? 0), 0),
   )
   const localReceiptCount = computed(() =>
-    items.value.reduce((sum, item) => sum + item.receiptCount, 0),
+    items.value.reduce((sum, item) => sum + (item.sourceFileId ? 1 : item.receiptCount), 0),
   )
   const displayExpenseTotal = computed(
-    () => totals.value?.expenseTotal ?? centsToMoney(localExpenseCents.value),
+    () => calculationsCurrent.value ? totals.value!.expenseTotal : centsToMoney(localExpenseCents.value),
   )
   const displaySubsidyTotal = computed(() => {
     if (!includeSubsidy.value) return '0.00'
     return totals.value?.subsidyTotal ?? '0.00'
   })
-  const displayReceiptCount = computed(() => totals.value?.receiptCount ?? localReceiptCount.value)
+  const displayReceiptCount = computed(() => calculationsCurrent.value ? totals.value!.receiptCount : localReceiptCount.value)
   const displayTotal = computed(() => {
-    if (totals.value) return totals.value.totalAmount
+    if (calculationsCurrent.value) return totals.value!.totalAmount
     const subsidyCents = moneyToCents(displaySubsidyTotal.value) ?? 0
     return centsToMoney(localExpenseCents.value + subsidyCents)
   })
@@ -694,6 +694,7 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   async function refreshCalculations(): Promise<void> {
+    if (snapshotLocked.value) return
     const payload = subsidyTrips.value.length ? tripPayloads() : tripPayload()
     const version = ++calculationVersion
     calculatedSignature.value = ''
@@ -711,14 +712,18 @@ export const useExpenseStore = defineStore('expense', () => {
       return
     }
     calculating.value = true
+    const signature = calculationSignature(payload)
+    const acceptsResult = () => version === calculationVersion && signature === calculationSignature(
+      subsidyTrips.value.length ? tripPayloads() : tripPayload(),
+    )
     try {
       const result = await calculateTotals(payload, items.value)
-      if (version === calculationVersion) {
+      if (acceptsResult()) {
         totals.value = result
-        calculatedSignature.value = calculationSignature(payload)
+        calculatedSignature.value = signature
       }
     } catch (error) {
-      if (version !== calculationVersion) return
+      if (!acceptsResult()) return
       totals.value = null
       calculationError.value = axios.isAxiosError(error)
         ? (error.response?.data as { error?: { message?: string } } | undefined)?.error?.message ??
@@ -730,6 +735,7 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   const calculationsCurrent = computed(() => {
+    if (snapshotLocked.value) return totals.value !== null
     const payload = subsidyTrips.value.length ? tripPayloads() : tripPayload()
     if (includeSubsidy.value && (policyInputError.value || !payload || (Array.isArray(payload)
       && payload.length !== subsidyTrips.value.length))) return false
@@ -737,6 +743,11 @@ export const useExpenseStore = defineStore('expense', () => {
       totals.value && calculatedSignature.value === calculationSignature(payload),
     )
   })
+  const pendingTotalLabel = computed(() => missingCalendarYears.value.length ? '待核对'
+    : includeSubsidy.value && !calculationsCurrent.value ? calculating.value ? '计算中…' : '待计算' : '')
+  const subsidyCalculationReason = computed(() => !includeSubsidy.value || calculationsCurrent.value ? ''
+    : policyInputError.value || (calculating.value ? '正在计算补助和合计，请稍候'
+      : calculationError.value || '请先计算最新补助和合计'))
 
   function buildDraftExpenseItems(): ReimbursementDraftExpenseItemInput[] {
     return items.value.map((item) => ({
@@ -861,6 +872,8 @@ export const useExpenseStore = defineStore('expense', () => {
     displayReceiptCount,
     displayTotal,
     calculationsCurrent,
+    pendingTotalLabel,
+    subsidyCalculationReason,
     tripPayload,
     tripPayloads,
     syncSubsidyApprovals,

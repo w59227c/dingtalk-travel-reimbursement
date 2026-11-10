@@ -9,9 +9,9 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TypeAlias
 
-from sqlalchemy import Engine, Select, inspect, select, text
+from sqlalchemy import Engine, Select, and_, inspect, or_, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.errors import ApiError
@@ -22,6 +22,7 @@ from app.models.reimbursement import (
     ReimbursementDraftFileRole,
     ReimbursementDraftFileStatus,
     ReimbursementDraftStatus,
+    ReimbursementOcrStatus,
     ReimbursementSubmission,
     ReimbursementSubmissionStatus,
     ReimbursementUpload,
@@ -32,6 +33,7 @@ from app.models.reimbursement import (
     utc_now,
 )
 from app.services.reimbursement_drafts import DraftActor, bump_owned_draft_revision
+from app.services.reimbursement_ocr_state import OCR_STALE_GRACE_SECONDS, recover_stale_running_ocr
 from app.services.reimbursement_staging import (
     ReimbursementStaging,
     ReimbursementStagingError,
@@ -140,6 +142,27 @@ class _DeletingDraftFileCleanup:
     reserved_bytes: int
     size_bytes: int
     sha256: str
+
+    @classmethod
+    def from_records(
+        cls, file: ReimbursementDraftFile, draft: ReimbursementDraft
+    ) -> _DeletingDraftFileCleanup:
+        if file.size_bytes is None or file.sha256 is None:
+            raise ReimbursementReservationConflict("draft file metadata is incomplete")
+        return cls(
+            file_id=file.id,
+            draft_id=draft.id,
+            actor=DraftActor(
+                draft.corp_id, draft.owner_user_id, draft.department_id, draft.department_name
+            ),
+            draft_revision=draft.revision,
+            draft_status=draft.status,
+            draft_expires_at=draft.expires_at,
+            storage_key=file.storage_key,
+            reserved_bytes=file.reserved_bytes,
+            size_bytes=file.size_bytes,
+            sha256=file.sha256,
+        )
 
 
 class ReimbursementQuotaCoordinator:
@@ -775,6 +798,134 @@ class ReimbursementQuotaCoordinator:
                 reclaimed += 1
         return reclaimed
 
+    def reclaim_retired_draft_files(
+        self,
+        *,
+        ocr_timeout_seconds: int,
+        draft_id: str | None = None,
+        limit: int = 20,
+        now: datetime | None = None,
+    ) -> int:
+        """Purge abandoned, idle workspace files without deleting their state records."""
+        if not 1 <= limit <= 1000 or ocr_timeout_seconds < 1:
+            raise ValueError("invalid retired cleanup limits")
+        schema = inspect(self._engine)
+        if not all(
+            schema.has_table(table_name)
+            for table_name in (
+                ReimbursementDraft.__tablename__,
+                ReimbursementDraftFile.__tablename__,
+                ReimbursementSubmission.__tablename__,
+                ReimbursementUpload.__tablename__,
+            )
+        ):
+            return 0
+
+        cutoff = _naive_utc(now) if now is not None else utc_now()
+        busy_file = aliased(ReimbursementDraftFile)
+        idle = (
+            ~select(busy_file.id)
+            .where(
+                busy_file.draft_id == ReimbursementDraft.id,
+                or_(
+                    busy_file.file_status.in_({"RESERVED", "WRITING"}),
+                    and_(
+                        busy_file.file_status == "ACTIVE",
+                        busy_file.ocr_status == ReimbursementOcrStatus.RUNNING.value,
+                        busy_file.updated_at
+                        > cutoff - timedelta(seconds=ocr_timeout_seconds + OCR_STALE_GRACE_SECONDS),
+                    ),
+                ),
+            )
+            .exists()
+        )
+        candidate_file = aliased(ReimbursementDraftFile)
+        statement = select(ReimbursementDraft).where(
+            *_retired_draft_cleanup_conditions(),
+            idle,
+            select(candidate_file.id)
+            .where(
+                candidate_file.draft_id == ReimbursementDraft.id,
+                candidate_file.file_status.in_({"ACTIVE", "DELETING"}),
+                candidate_file.size_bytes.is_not(None),
+                candidate_file.sha256.is_not(None),
+            )
+            .exists(),
+        )
+        if draft_id is not None:
+            statement = statement.where(ReimbursementDraft.id == draft_id)
+        with self._write_session() as database:
+            drafts = database.scalars(
+                statement.order_by(ReimbursementDraft.updated_at, ReimbursementDraft.id).limit(
+                    limit
+                )
+            ).all()
+            candidates = [draft.id for draft in drafts]
+            for draft in drafts:
+                # Rotate attempts before filesystem access, including busy or
+                # unreadable directories. Never refresh an OCR file's lease.
+                draft.updated_at = cutoff
+        reclaimed = 0
+        for candidate in candidates:
+            try:
+                with self._staging.recovery_guard(candidate, exclusive=True):
+                    with self._write_session() as database:
+                        draft = database.scalar(
+                            select(ReimbursementDraft).where(
+                                ReimbursementDraft.id == candidate,
+                                *_retired_draft_cleanup_conditions(),
+                                idle,
+                            )
+                        )
+                        if draft is None:
+                            continue
+                        recover_stale_running_ocr(
+                            database,
+                            draft_id=candidate,
+                            ocr_timeout_seconds=ocr_timeout_seconds,
+                            now=cutoff,
+                        )
+                        files = database.scalars(
+                            select(ReimbursementDraftFile).where(
+                                ReimbursementDraftFile.draft_id == candidate,
+                                ReimbursementDraftFile.file_status.in_({"ACTIVE", "DELETING"}),
+                                ReimbursementDraftFile.size_bytes.is_not(None),
+                                ReimbursementDraftFile.sha256.is_not(None),
+                            )
+                        ).all()
+                        cleanups = []
+                        for file in files:
+                            file.file_status = ReimbursementDraftFileStatus.DELETING.value
+                            file.updated_at = cutoff
+                            cleanups.append(_DeletingDraftFileCleanup.from_records(file, draft))
+                    # Persist the intent before disk work. Missing bytes are safe on
+                    # retry; quota is released only after physical deletion succeeds.
+                    for item in cleanups:
+                        try:
+                            self._staging.delete(
+                                item.storage_key,
+                                expected_size=item.size_bytes,
+                                expected_sha256=item.sha256,
+                                missing_ok=True,
+                            )
+                            if self._finalize_deleting_draft_file(
+                                item, cutoff=cutoff, retired=True
+                            ):
+                                reclaimed += 1
+                        except (OSError, ReimbursementStagingError, ReimbursementQuotaError) as exc:
+                            _LOGGER.error(
+                                "Retired workspace file cleanup needs retry",
+                                extra={"exception_type": type(exc).__name__},
+                            )
+            except StagingRecoveryBusy:
+                continue
+            except (OSError, ReimbursementStagingError, ReimbursementQuotaError) as exc:
+                _LOGGER.error(
+                    "Retired workspace cleanup needs retry",
+                    extra={"exception_type": type(exc).__name__},
+                )
+        return reclaimed
+
     def reclaim_expired(self, *, now: datetime | None = None) -> int:
         """Delete expired drafts and release abandoned local write attempts.
 
@@ -978,23 +1129,7 @@ class ReimbursementQuotaCoordinator:
                 )
             ).all()
             return [
-                _DeletingDraftFileCleanup(
-                    file_id=file.id,
-                    draft_id=file.draft_id,
-                    actor=DraftActor(
-                        corp_id=draft.corp_id,
-                        user_id=draft.owner_user_id,
-                        department_id=draft.department_id,
-                        department_name=draft.department_name,
-                    ),
-                    draft_revision=draft.revision,
-                    draft_status=draft.status,
-                    draft_expires_at=draft.expires_at,
-                    storage_key=file.storage_key,
-                    reserved_bytes=file.reserved_bytes,
-                    size_bytes=file.size_bytes,
-                    sha256=file.sha256,
-                )
+                _DeletingDraftFileCleanup.from_records(file, draft)
                 for file, draft in rows
                 if file.size_bytes is not None and file.sha256 is not None
             ]
@@ -1004,6 +1139,7 @@ class ReimbursementQuotaCoordinator:
         item: _DeletingDraftFileCleanup,
         *,
         cutoff: datetime,
+        retired: bool = False,
     ) -> bool:
         """CAS one physically removed delete intent to PURGED in a short transaction."""
 
@@ -1028,7 +1164,11 @@ class ReimbursementQuotaCoordinator:
                     ReimbursementDraft.status == item.draft_status,
                     ReimbursementDraft.locked_at.is_(None),
                     ReimbursementDraft.expires_at == item.draft_expires_at,
-                    ReimbursementDraft.expires_at > cutoff,
+                    *(
+                        _retired_draft_cleanup_conditions()
+                        if retired
+                        else (ReimbursementDraft.expires_at > cutoff,)
+                    ),
                     ~select(ReimbursementSubmission.id)
                     .where(ReimbursementSubmission.draft_id == ReimbursementDraftFile.draft_id)
                     .exists(),
@@ -1189,6 +1329,35 @@ class ReimbursementQuotaCoordinator:
         ):
             raise ReimbursementReservationConflict("reservation attempt changed")
         return record
+
+
+def _retired_draft_cleanup_conditions() -> tuple[ColumnElement[bool], ...]:
+    recovery = aliased(ReimbursementDraft)
+    source_file = aliased(ReimbursementDraftFile)
+    return (
+        ReimbursementDraft.workspace_retired.is_(True),
+        ReimbursementDraft.recovery_pending.is_(False),
+        ReimbursementDraft.status.in_(_ACTIVE_DRAFT_STATUSES),
+        ReimbursementDraft.locked_at.is_(None),
+        ~select(ReimbursementSubmission.id)
+        .where(
+            ReimbursementSubmission.draft_id == ReimbursementDraft.id,
+        )
+        .exists(),
+        ~select(recovery.id)
+        .where(
+            recovery.recovery_source_draft_id == ReimbursementDraft.id,
+            recovery.recovery_pending.is_(True),
+        )
+        .exists(),
+        ~select(ReimbursementUpload.id)
+        .join(
+            source_file,
+            source_file.id == ReimbursementUpload.source_draft_file_id,
+        )
+        .where(source_file.draft_id == ReimbursementDraft.id)
+        .exists(),
+    )
 
 
 def _delete_draft_file_cleanup(

@@ -24,6 +24,14 @@ from app.services.reimbursement_drafts import DraftActor
 from app.services.reimbursement_submissions import create_submission
 
 
+@pytest.mark.parametrize("amount", [300, 300.0, "-1.00", "0.001", "NaN", "1000000000000.00"])
+def test_confirmed_submission_total_requires_an_exact_supported_decimal_string(amount) -> None:
+    with pytest.raises(ValueError):
+        SubmitReimbursementRequest.model_validate(
+            {"expectedRevision": 1, "expectedTotalAmount": amount}
+        )
+
+
 def _manual_review_checkpoint(client, submission_id: str) -> None:
     from app.integrations.dingtalk.workflow import (
         CreateProcessInstanceCommand,

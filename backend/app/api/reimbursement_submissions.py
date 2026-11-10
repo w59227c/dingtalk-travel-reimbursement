@@ -145,6 +145,15 @@ async def submit_reimbursement(
         ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
     )
     snapshot = build_snapshot(source)
+    if (
+        body.expected_total_amount is not None
+        and body.expected_total_amount != snapshot.totals.total_amount
+    ):
+        raise ApiError(
+            "REIMBURSEMENT_TOTAL_CHANGED",
+            "报销金额已更新，请重新计算并核对最新金额后提交",
+            409,
+        )
     snapshot_json = serialize_snapshot(snapshot)
     result = create_or_get_submission(
         database,

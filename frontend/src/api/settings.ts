@@ -19,11 +19,6 @@ export interface AdminExpenseSettings extends ExpenseSettings {
   environmentAdminUserIds: string[]
 }
 
-export async function getExpenseSettings(): Promise<ExpenseSettings> {
-  const response = await http.get<ApiEnvelope<ExpenseSettings>>('/settings')
-  return response.data.data
-}
-
 export async function getAdminExpenseSettings(): Promise<AdminExpenseSettings> {
   const response = await http.get<ApiEnvelope<AdminExpenseSettings>>('/admin/settings')
   return response.data.data

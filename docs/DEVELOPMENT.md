@@ -49,12 +49,12 @@ make dev
 同源代理到后端。打开前端地址后点击“使用固定测试身份”。脚本会强制使用合成的
 `local-dev-user / 本地开发用户 / 本地开发部门`，该身份同时是本地管理员；请求不能覆盖它。
 `make backend-install` 已包含锁定的 OCR 依赖。`make dev-backend` 默认校验本地模型并启用
-真实 PaddleOCR；依赖或模型缺失时直接拒绝启动，不会静默关闭 OCR。
+PP-OCRv6 small 模型与 ONNX Runtime CPU；依赖或模型缺失时直接拒绝启动，不会静默关闭 OCR。
 
 ### macOS arm64 本地 OCR 联调
 
 当前 Apple Silicon Mac 可以使用官方 macOS arm64 CPU wheel 做开发测试；不启用 GPU 或 HPI，
-也不改变“生产 OCR 必须运行在 Linux x86_64/amd64”的安全边界。本地开发默认启用真实 Paddle：
+也不改变“生产 OCR 必须运行在 Linux x86_64/amd64”的部署边界。本地开发默认启用真实本地 OCR：
 
 1. 按 [模型目录说明](../backend/models/README.md) 从官方地址取得两个推理模型，记录原始归档
    SHA-256，并解压到指定的两个目录。模型文件不提交仓库。

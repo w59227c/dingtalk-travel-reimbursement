@@ -367,61 +367,6 @@ def _normalized_temp_id(temp_id: str) -> str:
     return normalized_id
 
 
-def find_session_file(settings: Settings, session_id_hash: str, temp_id: str) -> StoredFile:
-    """Perform only cheap stat/magic lookup; never parse image or PDF here."""
-
-    normalized_id = _normalized_temp_id(temp_id)
-    directory = session_directory(settings, session_id_hash)
-    try:
-        directory_fd = os.open(directory, os.O_RDONLY | _DIRECTORY | _NOFOLLOW)
-    except OSError as exc:
-        raise ApiError("TEMP_FILE_NOT_FOUND", "临时票据不存在或已过期", 404) from exc
-    try:
-        existing: list[tuple[str, str, os.stat_result]] = []
-        for extension in _FILE_EXTENSIONS:
-            name = f"{normalized_id}.{extension}"
-            try:
-                file_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if stat.S_ISREG(file_stat.st_mode):
-                existing.append((name, extension, file_stat))
-        if len(existing) != 1:
-            raise ApiError("TEMP_FILE_NOT_FOUND", "临时票据不存在或已过期", 404)
-        name, extension, file_stat = existing[0]
-        cutoff = datetime.now(UTC) - timedelta(minutes=settings.upload_ttl_minutes)
-        if datetime.fromtimestamp(file_stat.st_mtime, UTC) <= cutoff:
-            os.unlink(name, dir_fd=directory_fd)
-            raise ApiError("TEMP_FILE_EXPIRED", "临时票据已过期，请重新上传", 410)
-        descriptor = os.open(name, os.O_RDONLY | _NOFOLLOW, dir_fd=directory_fd)
-        try:
-            opened_stat = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(opened_stat.st_mode)
-                or opened_stat.st_dev != file_stat.st_dev
-                or opened_stat.st_ino != file_stat.st_ino
-            ):
-                raise ApiError("TEMP_FILE_INVALID", "临时票据无效", 400)
-            magic = os.read(descriptor, 16)
-            if _extension_from_magic(magic) != extension:
-                raise ApiError("FILE_TYPE_MISMATCH", "文件扩展名与内容不一致", 400)
-            os.utime(descriptor, None)
-        finally:
-            os.close(descriptor)
-        return StoredFile(
-            temp_id=normalized_id,
-            path=directory / name,
-            extension=extension,
-            media_type={"jpg": "image/jpeg", "png": "image/png", "pdf": "application/pdf"}[
-                extension
-            ],
-            size=file_stat.st_size,
-            original_name="",
-        )
-    finally:
-        os.close(directory_fd)
-
-
 def delete_session_file(settings: Settings, session_id_hash: str, temp_id: str) -> None:
     normalized_id = _normalized_temp_id(temp_id)
     directory = session_directory(settings, session_id_hash)

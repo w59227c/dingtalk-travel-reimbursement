@@ -184,7 +184,7 @@ describe('ExpenseSummaryCard', () => {
     wrapper.unmount()
   })
 
-  it('leaves subsidy calculation errors in the subsidy card instead of repeating them here', () => {
+  it('offers recalculation at the final totals when subsidy calculation fails', () => {
     const expense = useExpenseStore()
     expense.includeSubsidy = true
     expense.calculationError = '出差补助金额计算失败，请重试'
@@ -192,7 +192,9 @@ describe('ExpenseSummaryCard', () => {
       global: { plugins: [ElementPlus] },
     })
 
-    expect(wrapper.text()).not.toContain('出差补助金额计算失败，请重试')
+    expect(wrapper.text()).toContain('出差补助金额计算失败，请重试')
+    expect(wrapper.get('.grand-total strong').text()).toBe('待计算')
+    expect(wrapper.findAll('button').some((button) => button.text().trim() === '重新计算')).toBe(true)
     wrapper.unmount()
   })
 })

@@ -7,10 +7,10 @@
 - `GET /api/health` 只表示 FastAPI 进程存活，不访问依赖。
 - `GET /api/ready` 检查 SQLite 连接、当前 Alembic revision 与关键表字段、Excel 模板完整契约、临时目录可写性，以及
   报销持久暂存目录的受控权限、写入/删除能力和最小可用空间，并检查
-  已启用 OCR 的模型精确文件集合、固定 SHA 清单和锁定包版本；返回内容只有组件状态，不包含路径、Secret 或异常细节。模型内容校验按文件 stat 指纹缓存，文件变化才重新计算 SHA；就绪检查不会初始化或加载 Paddle 模型。
+  已启用 OCR 的模型精确文件集合、固定 SHA 清单和锁定包版本；返回内容只有组件状态，不包含路径、Secret 或异常细节。模型内容校验按文件 stat 指纹缓存，文件变化才重新计算 SHA；就绪检查不会初始化或加载 OCR 模型。
 - 模板严格校验结果按文件 stat 指纹缓存在最多 8 个条目的进程内缓存中；模板文件变化会重新
   执行完整 ZIP 与工作簿契约校验，常规 10 秒 readiness 轮询不会重复解析不变的 `.xlsx`。
-- OCR 默认启用并纳入就绪检查；模型、固定 SHA 或 Paddle 版本不完整时返回 503，
+- OCR 默认启用并纳入就绪检查；模型、固定 SHA 或锁定的 OCR 运行依赖不完整时返回 503，
   不会把缺少识别能力的实例标记为就绪。仅诊断或聚焦测试可显式设置 `OCR_ENABLED=false`。
 - 生产启动会在独立受限子进程中完成一次真实模型初始化和空白图片推理；自检失败时 FastAPI 不接受流量。
 - Compose 后端 healthcheck 使用 readiness，Web 容器等到后端可接单才启动。Dockerfile 仍以
@@ -23,7 +23,7 @@ Nginx 始终以同源方式提供 Vue 和 `/api`。`SESSION_COOKIE_SECURE=false`
 
 真实 `DINGTALK_CLIENT_SECRET` 和 `SESSION_SECRET` 由部署平台的 Secret 环境注入或受权限保护的
 宿主机环境文件提供，不提交仓库、不进入镜像，也不要把会展开环境值的 Compose 配置输出保存或
-发送。`.env.example` 只列空键名。
+发送。`.env.example` 提供键名和安全默认值，私密凭据留空。
 
 应用 Nginx 关闭版本标识和含查询参数的访问日志，设置 CSP、`nosniff`、no-referrer 与受限
 Permissions Policy；`/api`、认证和下载均为 `no-store`，仅 Vite 哈希资源长期缓存。它不依据
@@ -106,7 +106,7 @@ make deploy
 - 真实钉钉租户的 CorpId、应用凭据、权限、应用访问地址、多部门用户和管理员账号联调。
 - 公司当前正式空白模板，并在公司 Microsoft Excel 中核对打开、打印和版式；现有脱敏模板
   只证明开发闭环。
-- Paddle 模型制品以及公司脱敏 JPG/PNG/独立单页 PDF 样本，用于 Linux 目标机准确率、资源
+- 经固定 SHA 校验的 ONNX 模型制品以及公司脱敏 JPG/PNG/独立单页 PDF 样本，用于 Linux 目标机准确率、资源
   上限和断网 smoke test。
 - 原生 Linux/amd64 生产机上的断网冷启动、持久卷恢复和实际 HTTP/HTTPS 入口验收。
 - 公司确认现行补助制度、12:00 整点归属、预算代码选项、网约车材料和境外人民币金额确认方式，以及管理员钉钉 userId。

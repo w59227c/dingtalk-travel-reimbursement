@@ -410,7 +410,7 @@ const attachmentPendingHint = computed(() => awaitingMaterialUpload.value
 const submissionButtonReason = computed(() => formReadOnlyReason.value
   || (accountingOptionsChanged.value ? '请重新关联出差审批' : '')
   || (needsApprovalReconfirmation.value ? '请先重新确认出差审批' : '')
-  || subsidyInputError.value || submissionServiceReason.value
+  || subsidyInputError.value || expense.subsidyCalculationReason || submissionServiceReason.value
   || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (drafts.busy ? '请等待材料处理完成' : '')
   || (drafts.pendingUploads.length ? '有材料尚未完成上传，请查看上传进度' : '')
@@ -434,6 +434,7 @@ const previewDisabledReason = computed(() => (initializationError.value ? '请�
   || (saveRequiresReload.value ? '请先核对最新报销内容' : '')
   || (accountingOptionsChanged.value ? '请重新关联出差审批' : '')
   || subsidyInputError.value
+  || (!formReadOnly.value ? expense.subsidyCalculationReason : '')
   || (!formReadOnly.value && drafts.pendingUploads.length ? '请等待材料上传完成后再预览 Excel' : '')
   || (!formReadOnly.value && materialSubmissionIssues.value.length
     ? '请先处理全部待确认或未完成的材料（含待关联材料），再预览 Excel' : '')
@@ -980,7 +981,7 @@ async function openCurrentWorkspace(): Promise<void> {
     confirmingDraftReload.value = true
     try {
       await ElMessageBox.confirm(
-        '这笔报销已被新开内容替换，本页尚未保存的修改无法再保存。打开当前报销将舍弃这些修改，服务器已保存的内容和材料会保留。',
+        '这笔报销已被新开内容替换，本页尚未保存的修改无法再保存。打开当前报销将舍弃这些修改，请先留存需要的内容。',
         '打开当前报销',
         { confirmButtonText: '舍弃本页修改并打开', cancelButtonText: '保留本页', type: 'warning' },
       )
@@ -1065,7 +1066,7 @@ onBeforeRouteLeave(async (to) => {
     const draftId = drafts.currentDraft?.id
     try {
       await ElMessageBox.confirm(
-        '当前 OA 表单尚未确认，暂时无法保存本页修改。进入系统设置后，本页尚未保存的修改会被舍弃，请先留存需要的内容。服务器已保存的报销和材料会保留。',
+        '当前 OA 表单尚未确认，暂时无法保存本页修改。进入系统设置后，本页尚未保存的修改会被舍弃，请先留存需要的内容。',
         '前往系统设置处理表单',
         { confirmButtonText: '舍弃本页修改并前往设置', cancelButtonText: '保留本页', type: 'warning' },
       )
@@ -1099,6 +1100,7 @@ function validateSubmission(): SubmissionValidationIssue | null {
   if (expense.includeSubsidy && expense.tripPayloads().length !== selectedRelatedApprovals.value.length) {
     return issue(expense.policyInputError || '请完整确认每个补助项的出发和返回时段', 1)
   }
+  if (expense.subsidyCalculationReason) return issue(expense.subsidyCalculationReason, 1)
   if (expense.items.length && (expense.categoryLoadError || !expense.categories.length)) return issue('请先加载费用类别', 2)
   if (!expense.items.length && !hasValidSubsidy.value) return issue('请添加费用明细或申请有效的出差补助', 2)
   if (expense.itemReadinessError) return issue(expense.itemReadinessError, 2)
@@ -1145,6 +1147,10 @@ async function confirmAndSubmit(): Promise<void> {
   if (error) { ElMessage.warning(error.message); await revealValidationIssue(error); return }
   const scope = sessionScope(), draftId = drafts.currentDraft?.id
   const acceptsSubmit = () => !disposed && scope === sessionScope() && draftId === drafts.currentDraft?.id
+  const confirmedInput = inputSignature(currentFormInput.value)
+  const confirmedTotalAmount = expense.displayTotal
+  const confirmedTotals = JSON.stringify([expense.displayExpenseTotal, expense.displaySubsidyTotal,
+    expense.displayTotal, expense.displayReceiptCount])
   let failureTarget: AttentionKind | undefined
   submitFlowPending.value = true
   try {
@@ -1160,7 +1166,15 @@ async function confirmAndSubmit(): Promise<void> {
     if (!acceptsSubmit()) return
     const ready = await drafts.markReviewReady()
     if (!acceptsSubmit() || ready.id !== draftId) return
-    await submission.submit(ready.id, ready.revision)
+    if (confirmedInput !== inputSignature(currentFormInput.value)) {
+      throw new Error('报销内容已更新，请核对后重新提交')
+    }
+    if (confirmedTotals !== JSON.stringify([ready.totals.expenseTotal, ready.totals.subsidyTotal,
+      ready.totals.totalAmount, ready.totals.receiptCount])) {
+      hydrate(ready)
+      throw new Error('报销金额已更新，请核对最新金额后重新提交')
+    }
+    await submission.submit(ready.id, ready.revision, confirmedTotalAmount)
     if (acceptsSubmit()) ElMessage.success('正在生成材料并提交 OA')
   } catch (error) {
     if (disposed || scope !== sessionScope() || draftId !== drafts.currentDraft?.id) return
@@ -1168,11 +1182,15 @@ async function confirmAndSubmit(): Promise<void> {
       expiredDraftId.value = drafts.currentDraft.id
     }
     void refreshOptionsAfterError(error)
+    if (apiErrorCode(error) === 'REIMBURSEMENT_TOTAL_CHANGED') void expense.refreshCalculations()
     if (error !== 'cancel' && error !== 'close') {
       const message = submission.errorMessage || saveError.value || drafts.mutationError
         || (error instanceof Error ? error.message : '提交失败，请重试')
       ElMessage.error(message)
-      if (saveError.value || saveRequiresReload.value) failureTarget = 'save'
+      if (apiErrorCode(error) === 'REIMBURSEMENT_TOTAL_CHANGED') {
+        workspaceActionError.value = message
+        failureTarget = 'workspace'
+      } else if (saveError.value || saveRequiresReload.value) failureTarget = 'save'
       else if (submission.activeDraftId === draftId && submission.errorMessage) failureTarget = 'submission'
       else { workspaceActionError.value = message; failureTarget = 'workspace' }
     }
@@ -1458,7 +1476,7 @@ async function replaceOutdatedForm(): Promise<void> {
   replacingTemplate.value = true
   try {
     await ElMessageBox.confirm(
-      '将打开新版 OA 表单。旧记录和已上传材料会保留，但本页内容不会自动转入新表单，需要重新填写和上传。',
+      '将打开新版 OA 表单，当前填写内容和材料不会自动转入。确认后将放弃当前内容，需要重新填写并上传材料。',
       '按新表单重新填写',
       { confirmButtonText: '重新填写', cancelButtonText: '返回查看', type: 'warning' },
     )
@@ -2162,7 +2180,7 @@ onBeforeUnmount(() => {
           >
             <div>
               <strong>OA 表单已更新</strong>
-              <p>当前记录不能继续保存或提交。请按新表单重新填写；原记录和已上传材料仍会保留。</p>
+              <p>当前记录不能继续保存或提交。按新表单重新填写后，需要重新关联审批并上传材料。</p>
             </div>
             <el-button
               type="primary"
@@ -2904,7 +2922,7 @@ onBeforeUnmount(() => {
             <footer class="mobile-step-footer">
               <div class="mobile-footer-total">
                 <span>当前合计</span>
-                <strong>{{ expense.missingCalendarYears.length ? '待核对' : `¥${expense.displayTotal}` }}</strong>
+                <strong>{{ expense.pendingTotalLabel || `¥${expense.displayTotal}` }}</strong>
               </div>
               <div class="mobile-footer-actions">
                 <el-button

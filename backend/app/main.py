@@ -150,6 +150,23 @@ def create_app(
         poll_interval_seconds=runtime_settings.dingtalk_oa_worker_poll_interval_seconds,
     )
 
+    def cleanup_retired_reimbursements(draft_id: str | None = None) -> None:
+        try:
+            reclaimed = reimbursement_quota.reclaim_retired_draft_files(
+                ocr_timeout_seconds=runtime_settings.ocr_operation_timeout_seconds,
+                draft_id=draft_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "Retired reimbursement file cleanup failed",
+                extra={"exception_type": type(exc).__name__},
+            )
+            return
+        if reclaimed:
+            logger.info(
+                "Reclaimed retired reimbursement files", extra={"reclaimed_count": reclaimed}
+            )
+
     def cleanup_expired_reimbursements() -> None:
         try:
             reclaimed = reimbursement_quota.reclaim_expired()
@@ -181,13 +198,17 @@ def create_app(
             )
 
     async def periodic_temp_cleanup(stop: asyncio.Event) -> None:
+        next_expiry_cleanup = perf_counter() + runtime_settings.temp_cleanup_interval_seconds
         while not stop.is_set():
             try:
                 await asyncio.wait_for(
                     stop.wait(),
-                    timeout=runtime_settings.temp_cleanup_interval_seconds,
+                    timeout=min(30, runtime_settings.temp_cleanup_interval_seconds),
                 )
             except TimeoutError:
+                await asyncio.to_thread(cleanup_retired_reimbursements)
+                if perf_counter() < next_expiry_cleanup:
+                    continue
                 try:
                     await asyncio.to_thread(
                         cleanup_expired_temp_files,
@@ -200,6 +221,9 @@ def create_app(
                         extra={"exception_type": type(exc).__name__},
                     )
                 await asyncio.to_thread(cleanup_expired_reimbursements)
+                next_expiry_cleanup = (
+                    perf_counter() + runtime_settings.temp_cleanup_interval_seconds
+                )
 
     async def stop_periodic_temp_cleanup(
         stop: asyncio.Event,
@@ -239,6 +263,7 @@ def create_app(
             reimbursement_staging.prepare()
             cleanup_expired_temp_files(runtime_settings, file_coordinator)
             cleanup_interrupted_reimbursements()
+            cleanup_retired_reimbursements()
             cleanup_expired_reimbursements()
             with database_session_factory() as database:
                 purge_expired_sessions(database)
@@ -285,6 +310,7 @@ def create_app(
     application.state.dingtalk_storage = dingtalk_storage
     application.state.reimbursement_staging = reimbursement_staging
     application.state.reimbursement_quota = reimbursement_quota
+    application.state.cleanup_retired_reimbursements = cleanup_retired_reimbursements
     application.state.session_cleanup_gate = session_cleanup_gate
     application.state.ocr_service = ocr_service
     application.state.process_runner = process_runner

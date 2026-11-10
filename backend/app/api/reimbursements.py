@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
@@ -39,14 +39,18 @@ router = APIRouter(tags=["reimbursement-drafts"])
 
 
 def _checked_actor(
-    current: CurrentSession, expected_id: str | None, expected_name: str | None,
+    current: CurrentSession,
+    expected_id: str | None,
+    expected_name: str | None,
 ) -> DraftActor:
     actor = draft_actor(current)
     if (expected_id is not None and actor.department_id != expected_id) or (
         expected_name is not None and actor.department_name != expected_name
     ):
         raise ApiError(
-            "REIMBURSEMENT_DEPARTMENT_CHANGED", "当前报销部门已变化，请刷新页面后重试", 409,
+            "REIMBURSEMENT_DEPARTMENT_CHANGED",
+            "当前报销部门已变化，请刷新页面后重试",
+            409,
         )
     return actor
 
@@ -55,22 +59,27 @@ def _checked_actor(
 def create_draft(
     body: CreateReimbursementDraftRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(require_csrf)],
 ) -> dict[str, object]:
     actor = _checked_actor(current, body.expected_department_id, body.expected_department_name)
-    return success(
-        create_reimbursement_draft(
-            database,
-            actor=actor,
-            draft_input=body.input,
-            ttl_days=request.app.state.settings.reimbursement_draft_ttl_days,
-            max_items=request.app.state.settings.expense_max_items,
-            reuse_existing=body.reuse_existing,
-            replaces_draft_id=body.replaces_draft_id,
-            replaces_draft_revision=body.replaces_draft_revision,
-        )
+    created = create_reimbursement_draft(
+        database,
+        actor=actor,
+        draft_input=body.input,
+        ttl_days=request.app.state.settings.reimbursement_draft_ttl_days,
+        max_items=request.app.state.settings.expense_max_items,
+        reuse_existing=body.reuse_existing,
+        replaces_draft_id=body.replaces_draft_id,
+        replaces_draft_revision=body.replaces_draft_revision,
     )
+    if body.replaces_draft_id:
+        background_tasks.add_task(
+            request.app.state.cleanup_retired_reimbursements,
+            body.replaces_draft_id,
+        )
+    return success(created)
 
 
 @router.get("/reimbursements/drafts")

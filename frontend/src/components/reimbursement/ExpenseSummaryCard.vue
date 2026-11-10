@@ -30,14 +30,14 @@ watch([() => drafts.currentDraft?.id, () => auth.status, () => auth.session?.use
   () => auth.session?.csrfToken], () => { previewGeneration++; preparingPreview.value = false }, { flush: 'sync' })
 onBeforeUnmount(() => { disposed = true; previewGeneration++ })
 const summaryCalculationError = computed(() => {
-  if (!expense.calculationError) return ''
-  if (expense.includeSubsidy && !expense.itemReadinessError) return ''
+  if (props.readonly || expense.calculationError === expense.policyInputError) return ''
   return expense.calculationError
 })
 
 const disabledReason = computed(() => {
   if (!drafts.currentDraft) return '正在准备报销表单'
   if (props.previewDisabledReason) return props.previewDisabledReason
+  if (!props.readonly && expense.subsidyCalculationReason) return expense.subsidyCalculationReason
   if (drafts.pendingMutations > 0 && !props.beforePreview) return '请等待内容保存完成'
   return ''
 })
@@ -82,10 +82,10 @@ async function downloadExcel(): Promise<void> {
       class="totals-grid"
     >
       <div><span>票据金额</span><strong>¥{{ expense.displayExpenseTotal }}</strong></div>
-      <div><span>出差补助</span><strong>{{ expense.missingCalendarYears.length ? '待核对' : `¥${expense.displaySubsidyTotal}` }}</strong></div>
+      <div><span>出差补助</span><strong>{{ expense.pendingTotalLabel || `¥${expense.displaySubsidyTotal}` }}</strong></div>
       <div><span>票据张数</span><strong>{{ expense.displayReceiptCount }} 张</strong></div>
       <div class="grand-total">
-        <span>合计</span><strong>{{ expense.missingCalendarYears.length ? '待核对' : `¥${expense.displayTotal}` }}</strong>
+        <span>合计</span><strong>{{ expense.pendingTotalLabel || `¥${expense.displayTotal}` }}</strong>
       </div>
     </div>
     <el-alert

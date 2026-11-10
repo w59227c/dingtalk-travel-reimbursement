@@ -109,6 +109,45 @@ vi.mock('@/api/expenses', () => ({
 }))
 
 describe('expense store', () => {
+  it.each(['project', 'internal', 'overseas', 'same_city_project'] as const)('keeps locked %s totals independent of editable policy checks', async (tripType) => {
+    const store = useExpenseStore()
+    const draft = durableDraft([{ sourceFileId: 'historical-file', category: 'other', date: '2026-09-01',
+      displayDate: '2026-09-01', description: '历史合成费用', amount: '44.89', receiptCount: 2 }])
+    draft.status = 'LOCKED'
+    draft.input.trip = { tripType, startDate: '2026-09-01', startTime: '09:00', endDate: '2026-09-02', endTime: '18:00',
+      ...(tripType === 'same_city_project' ? { attendanceDates: ['2026-09-01', '2026-09-02'] } : {}) }
+    store.attendanceCalendar = { years: [], days: {} }
+    store.hydrateFromDraft(draft, [])
+    expect(store.calculationsCurrent).toBe(true)
+    expect(store.pendingTotalLabel).toBe('')
+    expect(store.displayExpenseTotal).toBe(draft.totals.expenseTotal)
+    expect(store.displayTotal).toBe(draft.totals.totalAmount)
+    expect(store.displayReceiptCount).toBe(draft.totals.receiptCount)
+    await store.refreshCalculations()
+    expect(calculateTotals).not.toHaveBeenCalled()
+    expect(store.totals).toEqual(expect.objectContaining(draft.totals))
+    store.hydrateFromDraft({ ...draft, status: 'DRAFT' }, [])
+    expect(store.calculationsCurrent).toBe(false)
+    expect(store.pendingTotalLabel).not.toBe('')
+  })
+
+  it.each(['amount', 'receiptCount'])('does not accept old totals after editing %s while a calculation is running', async (field) => {
+    const store = useExpenseStore()
+    const draft = durableDraft([{ category: 'other', date: '2026-09-01', displayDate: '2026-09-01',
+      description: '合成费用', amount: '44.89', receiptCount: 1 }])
+    store.hydrateFromDraft(draft, [])
+    let finish!: (value: typeof draft.totals) => void
+    vi.mocked(calculateTotals).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const pending = store.refreshCalculations()
+    if (field === 'amount') store.items[0]!.amount = '50.00'
+    else store.items[0]!.receiptCount = 2
+    finish(draft.totals)
+    await pending
+    expect(store.calculationsCurrent).toBe(false)
+    expect(store.displayExpenseTotal).toBe(field === 'amount' ? '50.00' : '44.89')
+    expect(store.displayReceiptCount).toBe(field === 'receiptCount' ? 2 : 1)
+  })
+
   it('requires all effective city-subsidy years while preserving attendance and exempting locked snapshots', () => {
     const store = useExpenseStore()
     const draft = durableDraft([])

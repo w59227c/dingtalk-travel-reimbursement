@@ -13,6 +13,7 @@ import type {
   ReimbursementSubmission,
   ReimbursementSubmissionStatus,
 } from '@/types/reimbursements'
+import { moneyToCents } from '@/utils/money'
 
 const STORAGE_KEY = 'dingtalk-travel-reimbursement.reimbursement-submissions.v1'
 const DEFAULT_POLL_AFTER_MS = 1_500
@@ -64,6 +65,7 @@ interface PersistedSubmission {
   expectedRevision: number
   idempotencyKey: string
   submissionId: string | null
+  expectedTotalAmount?: string
 }
 
 interface SubmitFlight {
@@ -103,6 +105,8 @@ function isPersistedSubmission(value: unknown): value is PersistedSubmission {
     && (record.expectedRevision ?? 0) > 0
     && typeof record.idempotencyKey === 'string'
     && UUID_PATTERN.test(record.idempotencyKey)
+    && (record.expectedTotalAmount === undefined || (typeof record.expectedTotalAmount === 'string'
+      && moneyToCents(record.expectedTotalAmount) !== null))
     && (record.submissionId === null
       || (typeof record.submissionId === 'string' && record.submissionId.length > 0))
 }
@@ -313,12 +317,14 @@ export const useReimbursementSubmissionStore = defineStore(
       expectedRevision: number,
       key: string,
       submissionId: string | null,
+      expectedTotalAmount?: string,
     ): void {
       const record = {
         draftId,
         expectedRevision,
         idempotencyKey: key,
         submissionId,
+        ...(expectedTotalAmount === undefined ? {} : { expectedTotalAmount }),
       }
       memoryRecords.set(draftId, record)
       writePersistedSubmission(record)
@@ -374,6 +380,7 @@ export const useReimbursementSubmissionStore = defineStore(
         record.expectedRevision,
         record.idempotencyKey,
         value.submissionId,
+        record.expectedTotalAmount,
       )
       schedulePoll(value)
       return true
@@ -393,7 +400,8 @@ export const useReimbursementSubmissionStore = defineStore(
           record.draftId,
           record.expectedRevision,
           record.idempotencyKey,
-          { signal: controller.signal },
+          { signal: controller.signal,
+            ...(record.expectedTotalAmount === undefined ? {} : { expectedTotalAmount: record.expectedTotalAmount }) },
         )
         adoptSubmission(value, record, requestGeneration)
         return value
@@ -424,8 +432,10 @@ export const useReimbursementSubmissionStore = defineStore(
     function submit(
       draftId: string,
       expectedRevision: number,
+      expectedTotalAmount?: string,
     ): Promise<ReimbursementSubmission> {
-      if (!draftId || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
+      if (!draftId || !Number.isInteger(expectedRevision) || expectedRevision < 1
+        || (expectedTotalAmount !== undefined && moneyToCents(expectedTotalAmount) === null)) {
         return Promise.reject(new Error('报销内容或版本无效'))
       }
       const requestGeneration = activateDraft(draftId)
@@ -451,9 +461,11 @@ export const useReimbursementSubmissionStore = defineStore(
         expectedRevision: stored?.expectedRevision ?? expectedRevision,
         idempotencyKey: stored?.idempotencyKey ?? newIdempotencyKey(),
         submissionId: null,
+        ...((stored?.expectedTotalAmount ?? expectedTotalAmount) === undefined ? {}
+          : { expectedTotalAmount: stored?.expectedTotalAmount ?? expectedTotalAmount }),
       }
       idempotencyKey.value = record.idempotencyKey
-      saveRecord(draftId, record.expectedRevision, record.idempotencyKey, null)
+      saveRecord(draftId, record.expectedRevision, record.idempotencyKey, null, record.expectedTotalAmount)
       const promise = postSubmission(record, requestGeneration).finally(() => {
         if (submitFlight?.promise === promise) submitFlight = null
       })

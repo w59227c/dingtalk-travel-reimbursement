@@ -340,4 +340,5 @@ export interface ReimbursementSubmission {
 
 export interface SubmitReimbursementInput {
   expectedRevision: number
+  expectedTotalAmount?: string
 }

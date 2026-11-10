@@ -456,6 +456,142 @@ async function openReviewStep(wrapper: VueWrapper, mobile: boolean): Promise<voi
 }
 
 describe('ReimburseView single-form OA flow', () => {
+  it.each(([false, true] as const).flatMap((mobile) =>
+    (['QUEUED', 'FAILED_RETRYABLE', 'MANUAL_REVIEW'] as const).flatMap((status) =>
+      (['legacy', 'missing_calendar'] as const).map((kind) => ({ mobile, status, kind })),
+    ),
+  ))('shows frozen totals and receipt counts for a locked $kind/$status claim, mobile=$mobile', async ({ mobile, status, kind }) => {
+    vi.useFakeTimers()
+    const trip = kind === 'legacy'
+      ? { tripType: 'internal' as const, startDate: '2026-09-01', startTime: '09:00',
+        endDate: '2026-09-02', endTime: '18:00', confirmedEffectiveDays: '2.0', policyConfirmed: true }
+      : { tripType: 'same_city_project' as const, startDate: '2026-09-01', startTime: '09:00',
+        endDate: '2026-09-02', endTime: '18:00', attendanceDates: ['2026-09-01', '2026-09-02'] }
+    serverDraft = makeDraft({ status: 'LOCKED', lockedAt: '2026-09-04T00:01:00Z',
+      relatedApprovalCount: 1, relatedApprovals: [structuredClone(linkedApproval)],
+      input: { ...structuredClone(baseInput), trip, items: [{ ...baseInput.items[0]!, receiptCount: 2 }] },
+      totals: { ...makeDraft().totals, subsidyTotal: '200.00', totalAmount: '244.89', receiptCount: 2 } })
+    vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({ status }))
+    vi.mocked(getOaReimbursementSubmission).mockResolvedValue(submissionResult({ status }))
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile, true)
+    try {
+      expense.attendanceCalendar = { years: [], days: {} }
+      await openReviewStep(wrapper, mobile)
+      await vi.advanceTimersByTimeAsync(650)
+      expect(expense.calculationsCurrent).toBe(true)
+      expect(wrapper.get('.grand-total strong').text()).toBe('¥244.89')
+      expect(wrapper.findAll('.totals-grid > div')[1]!.get('strong').text()).toBe('¥200.00')
+      expect(wrapper.findAll('.totals-grid > div')[2]!.get('strong').text()).toBe('2 张')
+      if (mobile) expect(wrapper.get('.mobile-footer-total strong').text()).toBe('¥244.89')
+      expect(wrapper.findAll('button').some((button) => button.text().trim() === '重新计算')).toBe(false)
+      const preview = vi.spyOn(drafts, mobile ? 'openExcelPreviewInDingTalk' : 'downloadExcelPreview').mockResolvedValue()
+      await visibleButton(wrapper, mobile ? '打开 Excel' : '预览 Excel').trigger('click')
+      await flushPromises()
+      expect(preview).toHaveBeenCalledOnce()
+      expect(calculateTotals).not.toHaveBeenCalled()
+      expect(updateReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('recalculates and permits confirmation again after a total-change rejection, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
+    serverDraft.input = canonicalNoSubsidyInput()
+    serverDraft.input.accountingSourceVerified = true
+    serverDraft.relatedApprovals = [structuredClone(linkedApproval)]
+    serverDraft.relatedApprovalCount = 1
+    const { wrapper, expense } = await mountView(undefined, false, mobile, true)
+    try {
+      serverDraft.totals = { ...serverDraft.totals, subsidyTotal: '300.00', totalAmount: '344.89' }
+      expense.includeSubsidy = true
+      vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
+      await expense.refreshCalculations()
+      await openReviewStep(wrapper, mobile)
+      vi.mocked(submitOaReimbursement).mockImplementationOnce(async () => {
+        serverDraft.input.accountingSourceVerified = true
+        serverDraft.totals = { ...serverDraft.totals, subsidyTotal: '600.00', totalAmount: '644.89' }
+        vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
+        throw { isAxiosError: true, response: { status: 409,
+          data: { error: { code: 'REIMBURSEMENT_TOTAL_CHANGED', message: '报销金额已更新，请重新计算并核对最新金额后提交' } } } }
+      })
+      await visibleButton(wrapper, '提交 OA').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('报销金额已更新，请重新计算并核对最新金额后提交')
+      expect(wrapper.get('.grand-total strong').text()).toBe('¥644.89')
+      expect(submitOaReimbursement).toHaveBeenCalledOnce()
+      expect(vi.mocked(submitOaReimbursement).mock.calls[0]?.[3]?.expectedTotalAmount).toBe('344.89')
+      await visibleButton(wrapper, '提交 OA').trigger('click')
+      await flushPromises()
+      expect(submitOaReimbursement).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(submitOaReimbursement).mock.calls[1]?.[3]?.expectedTotalAmount).toBe('644.89')
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('requires current subsidy totals and recovers after recalculation, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
+    serverDraft.input = canonicalNoSubsidyInput()
+    serverDraft.input.accountingSourceVerified = true
+    serverDraft.relatedApprovals = [structuredClone(linkedApproval)]
+    serverDraft.relatedApprovalCount = 1
+    const { wrapper, expense } = await mountView(undefined, false, mobile, true)
+    try {
+      vi.mocked(calculateTotals).mockRejectedValue(new Error('synthetic calculator unavailable'))
+      expense.includeSubsidy = true
+      await openReviewStep(wrapper, mobile)
+      await nextTick()
+      expect(visibleButton(wrapper, '提交 OA').element.disabled).toBe(true)
+      await vi.advanceTimersByTimeAsync(300)
+      await flushPromises()
+      expect(expense.calculationError).toBeTruthy()
+      expect(wrapper.get('.grand-total strong').text()).toBe('待计算')
+      if (mobile) expect(wrapper.get('.mobile-footer-total strong').text()).toBe('待计算')
+      expect(visibleButton(wrapper, '提交 OA').element.disabled).toBe(true)
+      expect(visibleButton(wrapper, mobile ? '打开 Excel' : '预览 Excel').element.disabled).toBe(true)
+      expect(confirm).not.toHaveBeenCalled()
+      expect(submitOaReimbursement).not.toHaveBeenCalled()
+
+      serverDraft.totals = { ...serverDraft.totals, subsidyTotal: '300.00', totalAmount: '344.89' }
+      vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
+      await visibleButton(wrapper, '重新计算').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.grand-total strong').text()).toBe('¥344.89')
+      expect(visibleButton(wrapper, '提交 OA').element.disabled).toBe(false)
+      await visibleButton(wrapper, '提交 OA').trigger('click')
+      await flushPromises()
+      expect(confirm).toHaveBeenCalledOnce()
+      expect(submitOaReimbursement).toHaveBeenCalledOnce()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('requires another confirmation when server review changes the totals, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
+    serverDraft.input = canonicalNoSubsidyInput()
+    serverDraft.input.accountingSourceVerified = true
+    serverDraft.relatedApprovals = [structuredClone(linkedApproval)]
+    serverDraft.relatedApprovalCount = 1
+    const { wrapper } = await mountView(undefined, false, mobile, true)
+    try {
+      vi.mocked(markReimbursementDraftReviewReady).mockImplementationOnce(async () => {
+        serverDraft = { ...serverDraft, status: 'REVIEW_READY', revision: serverDraft.revision + 1,
+          totals: { ...serverDraft.totals, expenseTotal: '50.00', totalAmount: '50.00' } }
+        serverDraft.input.accountingSourceVerified = true
+        serverDraft.input.items[0]!.amount = '50.00'
+        return serverDraft
+      })
+      await openReviewStep(wrapper, mobile)
+      await visibleButton(wrapper, '提交 OA').trigger('click')
+      await flushPromises()
+      expect(submitOaReimbursement).not.toHaveBeenCalled()
+      expect(wrapper.text()).toContain('报销金额已更新，请核对最新金额后重新提交')
+      expect(wrapper.get('.grand-total strong').text()).toBe('¥50.00')
+      await visibleButton(wrapper, '提交 OA').trigger('click')
+      await flushPromises()
+      expect(submitOaReimbursement).toHaveBeenCalledOnce()
+    } finally { wrapper.unmount() }
+  })
+
   it.each([false, true])('shows accounting and approved dates before submission and links back to approvals, mobile=%s', async (mobile) => {
     serverDraft.input = canonicalNoSubsidyInput()
     serverDraft.relatedApprovals = [structuredClone(linkedApproval)]
@@ -1842,6 +1978,8 @@ describe('ReimburseView single-form OA flow', () => {
       .mockResolvedValue()
     await vi.advanceTimersByTimeAsync(650)
     expect(expense.tripPayloads()).toEqual([])
+    expect(wrapper.get('.grand-total strong').text()).toBe('¥244.89')
+    if (mobile) expect(wrapper.get('.mobile-footer-total strong').text()).toBe('¥244.89')
     expect(wrapper.findComponent({ name: 'ExpenseSummaryCard' }).props('previewDisabledReason')).toBe('')
     expect(wrapper.findComponent({ name: 'ExpenseSummaryCard' }).props('beforePreview')).toBeUndefined()
     await visibleButton(wrapper, mobile ? '打开 Excel' : '预览 Excel').trigger('click')
@@ -2315,6 +2453,9 @@ describe('ReimburseView single-form OA flow', () => {
       startDate: '2026-08-31',
       endDate: '2026-09-02',
     })])
+    serverDraft.totals = { ...serverDraft.totals, subsidyTotal: '300.00', totalAmount: '344.89' }
+    vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
+    await expense.refreshCalculations()
     await visibleButton(wrapper, '提交 OA').trigger('click')
     await flushPromises()
     expect(confirm).toHaveBeenCalledOnce()
@@ -2468,6 +2609,7 @@ describe('ReimburseView single-form OA flow', () => {
     const drafts = useReimbursementDraftStore()
     expense.categories.push({ id: 'rail_fare', name: '火车票', order: 2, manualSelectable: true })
     Object.assign(expense.items[0]!, { category: 'rail_fare', amount, railType, receiptCount: 10, paymentProofFileIds: linked ? ['proof-1'] : [] })
+    serverDraft.totals = { ...serverDraft.totals, expenseTotal: amount, totalAmount: amount, receiptCount: 1 }
     drafts.files.push({ ...activeFile, id: 'proof-1', role: 'ATTACHMENT_ONLY', attachmentKind: kind, ocrResult: null })
     wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
     await flushPromises()

@@ -1802,55 +1802,6 @@ def remove_discarded_generated_upload(
     return True
 
 
-def list_linked_local_release_candidates(
-    database: Session,
-    *,
-    corp_id: str,
-    user_id: str,
-    submission_id: str,
-) -> tuple[LinkedLocalReleaseCandidate, ...]:
-    """Snapshot safe local-delete work without holding a database transaction."""
-
-    normalized_corp = _required_text(corp_id, maximum=128)
-    normalized_user = _required_text(user_id, maximum=128)
-    normalized_submission = _required_text(submission_id, maximum=36)
-    records = database.scalars(
-        select(ReimbursementUpload)
-        .join(
-            ReimbursementSubmission,
-            ReimbursementSubmission.id == ReimbursementUpload.submission_id,
-        )
-        .where(
-            ReimbursementSubmission.id == normalized_submission,
-            ReimbursementSubmission.corp_id == normalized_corp,
-            ReimbursementSubmission.originator_user_id == normalized_user,
-            ReimbursementSubmission.process_instance_id.is_not(None),
-            ReimbursementUpload.upload_status == ReimbursementUploadStatus.LINKED.value,
-            ReimbursementUpload.local_status == ReimbursementUploadLocalStatus.READY.value,
-            ReimbursementUpload.size_bytes.is_not(None),
-            ReimbursementUpload.sha256.is_not(None),
-        )
-        .order_by(ReimbursementUpload.sort_order, ReimbursementUpload.id)
-    ).all()
-    candidates = tuple(
-        LinkedLocalReleaseCandidate(
-            corp_id=normalized_corp,
-            user_id=normalized_user,
-            submission_id=record.submission_id,
-            upload_id=record.id,
-            upload_status_version=record.status_version,
-            role=record.role,
-            local_storage_key=record.local_storage_key,
-            size_bytes=int(record.size_bytes),
-            sha256=str(record.sha256),
-            source_draft_file_id=record.source_draft_file_id,
-        )
-        for record in records
-    )
-    database.rollback()
-    return candidates
-
-
 def list_due_linked_local_release_candidates(
     database: Session,
     *,
@@ -2440,48 +2391,6 @@ def recover_expired_submission_leases(
         oa_create_reconciliations=reconciliations,
         uncertain_uploads=uncertain_uploads,
         manual_reviews=manual_reviews,
-    )
-
-
-def require_leased_submission(
-    database: Session,
-    *,
-    lease: SubmissionLease,
-    worker_id: str,
-    now: datetime | None = None,
-) -> ReimbursementSubmission:
-    observed_at = _naive_utc(now) if now is not None else utc_now()
-    return _require_leased_submission(
-        database,
-        lease=lease,
-        worker_id=worker_id,
-        now=observed_at,
-    )
-
-
-def list_leased_uploads(
-    database: Session,
-    *,
-    lease: SubmissionLease,
-    worker_id: str,
-    now: datetime | None = None,
-) -> tuple[ReimbursementUpload, ...]:
-    observed_at = _naive_utc(now) if now is not None else utc_now()
-    current = _require_leased_submission(
-        database,
-        lease=lease,
-        worker_id=worker_id,
-        now=observed_at,
-    )
-    return tuple(
-        database.scalars(
-            select(ReimbursementUpload)
-            .where(
-                ReimbursementUpload.submission_id == current.id,
-                ReimbursementUpload.draft_id == current.draft_id,
-            )
-            .order_by(ReimbursementUpload.sort_order, ReimbursementUpload.id)
-        ).all()
     )
 
 

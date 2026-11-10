@@ -249,11 +249,11 @@ describe('reimbursement submission store', () => {
     expect(restoredStore.status).toBe('VALIDATING')
   })
 
-  it('reuses the persisted UUID when the first POST result was unknown', async () => {
+  it.each([undefined, '344.89'])('reuses the persisted UUID and confirmed amount after an unknown POST result (%s)', async (expectedTotalAmount) => {
     vi.mocked(submitOaReimbursement).mockRejectedValueOnce(new Error('connection lost'))
     const firstStore = useReimbursementSubmissionStore()
 
-    await expect(firstStore.submit('draft-1', 7)).rejects.toThrow('connection lost')
+    await expect(firstStore.submit('draft-1', 7, expectedTotalAmount)).rejects.toThrow('connection lost')
     const originalKey = firstStore.idempotencyKey
     expect(originalKey).toBeTruthy()
     expect(firstStore.requestAction).toBe('retry')
@@ -270,6 +270,10 @@ describe('reimbursement submission store', () => {
       originalKey,
     ])
     expect(restoredStore.idempotencyKey).toBe(originalKey)
+    expect(vi.mocked(submitOaReimbursement).mock.calls[1]?.[3]).toEqual({
+      signal: expect.any(AbortSignal),
+      ...(expectedTotalAmount === undefined ? {} : { expectedTotalAmount }),
+    })
   })
 
   it('replays an uncertain POST with its persisted revision instead of a newer caller revision', async () => {

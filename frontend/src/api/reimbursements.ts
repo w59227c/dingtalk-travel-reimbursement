@@ -1,6 +1,6 @@
 import axios, { type AxiosProgressEvent } from 'axios'
 
-import { downloadBlob, filenameFromContentDisposition } from './excel'
+import { filenameFromContentDisposition } from './excel'
 import { http } from './http'
 import type { ApiEnvelope } from '@/types/auth'
 import type {
@@ -424,26 +424,14 @@ export async function getReimbursementPdfPreviewPage(
   return { blob: response.data, pageNumber, pageCount }
 }
 
-export async function downloadReimbursementDraftExcelPreview(
-  draftId: string,
-  expectedRevision: number,
-  options: ReimbursementRequestOptions = {},
-): Promise<void> {
-  const preview = await getReimbursementDraftExcelPreview(
-    draftId,
-    expectedRevision,
-    options,
-  )
-  downloadBlob(preview.blob, preview.filename)
-}
-
 export async function submitOaReimbursement(
   draftId: string,
   expectedRevision: number,
   idempotencyKey: string,
-  options: ReimbursementRequestOptions = {},
+  options: ReimbursementRequestOptions & { expectedTotalAmount?: string } = {},
 ): Promise<ReimbursementSubmission> {
-  const body: SubmitReimbursementInput = { expectedRevision }
+  const body: SubmitReimbursementInput = { expectedRevision,
+    ...(options.expectedTotalAmount === undefined ? {} : { expectedTotalAmount: options.expectedTotalAmount }) }
   const response = await http.post<ApiEnvelope<ReimbursementSubmission>>(
     `/oa/reimbursements/${encodeURIComponent(draftId)}/submit`,
     body,
