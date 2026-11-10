@@ -69,7 +69,7 @@ def process_instance_payload(**overrides: object) -> dict[str, object]:
                 "id": "budget-id",
                 "name": "预算代码",
                 "componentType": "DDSelectField",
-                "value": "26007 项目",
+                "value": "DEMO-001 项目",
             },
         ],
     }

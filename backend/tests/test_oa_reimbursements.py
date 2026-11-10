@@ -59,9 +59,9 @@ def _catalog():
                         component_id="budget",
                         options=(
                             FormOption(
-                                value="26007",
-                                label="MES 项目",
-                                key="budget-26007",
+                                value="DEMO-001",
+                                label="示例项目",
+                                key="budget-DEMO-001",
                             ),
                         ),
                     ),
@@ -168,7 +168,7 @@ def test_options_returns_only_confirmed_exact_catalog_options(monkeypatch) -> No
         "reimbursementProcessCode": "PROC-REIMBURSEMENT",
         "attendanceCalendar": {"years": [], "days": {}},
         "companyOptions": [{"value": "北京", "label": "北京公司", "key": "company-beijing"}],
-        "budgetCodeOptions": [{"value": "26007", "label": "MES 项目", "key": "budget-26007"}],
+        "budgetCodeOptions": [{"value": "DEMO-001", "label": "示例项目", "key": "budget-DEMO-001"}],
         "travelProfiles": [
             {
                 "profileKey": "domestic",

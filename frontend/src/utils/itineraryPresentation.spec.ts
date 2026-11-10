@@ -12,7 +12,7 @@ function proof(): ReimbursementDraftFile {
       fileId: 'proof', version: 1, kind: 'itinerary', status: 'recognized', source: 'pdf_text', pageCount: 1,
       processedPageCount: 1, complete: true, warnings: [], error: null,
       summary: { currency: 'CNY', amount: '9.20', startDate: '2026-07-06', endDate: '2026-07-06', invoiceNumbers: [], orderNumbers: [] },
-      trips: [{ page: 1, row: 1, date: '2026-07-06', amount: '9.20', origin: '示例存储', destination: '泊寓', invoiceNumbers: [], orderNumbers: [] }],
+      trips: [{ page: 1, row: 1, date: '2026-07-06', amount: '9.20', origin: '示例存储', destination: '示例酒店', invoiceNumbers: [], orderNumbers: [] }],
     },
   }
 }
@@ -31,9 +31,9 @@ describe('itinerary option presentation', () => {
     const result = itineraryOptionPresentation(proof())
     expect(result.label).toBe('打车行程单3.pdf · ¥9.20 · 1 次行程')
     expect(result.summary).toBe('合计 ¥9.20 · 2026-07-06 · 1 次行程')
-    expect(result.route).toBe('示例存储 → 泊寓')
+    expect(result.route).toBe('示例存储 → 示例酒店')
     expect(result.association).toBe('尚未关联')
-    for (const term of ['9.20', '2026-07-06', '示例存储', '泊寓', '打车行程单3.pdf']) expect(result.searchText).toContain(term)
+    for (const term of ['9.20', '2026-07-06', '示例存储', '示例酒店', '打车行程单3.pdf']) expect(result.searchText).toContain(term)
     const file = proof()
     file.ocrResult = null
     expect(itineraryOptionPresentation(file).summary).toBe('行程信息待识别')
@@ -46,14 +46,14 @@ describe('itinerary option presentation', () => {
     const result = file.ocrResult as ItineraryOcrResult
     result.summary.amount = '29.20'
     result.summary.endDate = '2026-07-07'
-    result.trips.push({ ...result.trips[0]!, row: 2, date: '2026-07-07', amount: '20.00', origin: '泊寓', destination: '示例存储' })
+    result.trips.push({ ...result.trips[0]!, row: 2, date: '2026-07-07', amount: '20.00', origin: '示例酒店', destination: '示例存储' })
     const presentation = itineraryOptionPresentation(file, [], {
       sourceFileId: 'invoice', itineraryFileId: 'proof', basis: 'amount_date_route',
       transportType: 'ride_hailing', trip: result.trips[0]!,
     })
     expect(presentation.summary).toBe('合计 ¥29.20 · 2026-07-06 至 2026-07-07 · 2 次行程')
     expect(presentation.matchedTripSummary).toBe('推荐行程 ¥9.20 · 2026-07-06')
-    expect(presentation.route).toBe('示例存储 → 泊寓')
+    expect(presentation.route).toBe('示例存储 → 示例酒店')
     expect(presentation.searchText).toContain('20.00')
     expect(itineraryOptionPresentation(file).route).toContain('多行程：')
   })

@@ -312,8 +312,8 @@ def test_historical_travel_department_requires_a_current_department_choice(
         [10, 20, 30, 40],
         {
             10: "其他临时部门",
-            20: "技术管理中心",
-            30: "技术管理中心",
+            20: "示例管理部门",
+            30: "示例管理部门",
             40: "产品开发部",
         },
     )
@@ -355,7 +355,7 @@ def test_historical_travel_department_requires_a_current_department_choice(
         "selectedDepartment": None,
         "selectionRequired": True,
         "departments": [
-            {"id": "20", "name": "技术管理中心"},
+            {"id": "20", "name": "示例管理部门"},
             {"id": "40", "name": "产品开发部"},
         ],
     }
@@ -468,8 +468,8 @@ def test_login_filters_other_departments_and_deduplicates_remaining_names(
         [10, 20, 30, 40, 50, 60],
         {
             10: "其他1",
-            20: "技术管理中心",
-            30: "技术管理中心",
+            20: "示例管理部门",
+            30: "示例管理部门",
             40: "其他2",
             50: "产品开发部",
             60: "其他xxx",
@@ -482,7 +482,7 @@ def test_login_filters_other_departments_and_deduplicates_remaining_names(
 
     assert data["selectedDepartment"] is None
     assert data["departments"] == [
-        {"id": "20", "name": "技术管理中心"},
+        {"id": "20", "name": "示例管理部门"},
         {"id": "50", "name": "产品开发部"},
     ]
 
@@ -518,21 +518,21 @@ def test_existing_session_departments_are_filtered_and_deduplicated(
         record.departments_json = json.dumps(
             [
                 {"id": "10", "name": "其他1"},
-                {"id": "20", "name": "技术管理中心"},
-                {"id": "30", "name": "技术管理中心"},
+                {"id": "20", "name": "示例管理部门"},
+                {"id": "30", "name": "示例管理部门"},
                 {"id": "40", "name": "其他xxx"},
                 {"id": "50", "name": "产品开发部"},
             ]
         )
         record.current_department_id = "30"
-        record.current_department_name = "技术管理中心"
+        record.current_department_name = "示例管理部门"
         database.commit()
 
     me = client.get("/api/me")
 
     assert me.status_code == 200
     assert me.json()["data"]["departments"] == [
-        {"id": "20", "name": "技术管理中心"},
+        {"id": "20", "name": "示例管理部门"},
         {"id": "50", "name": "产品开发部"},
     ]
     assert me.json()["data"]["selectedDepartment"] is None

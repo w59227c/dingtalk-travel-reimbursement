@@ -149,7 +149,7 @@ def _schema(process_code: str, components: tuple[FormComponent, ...]) -> FormSch
 
 def _schemas() -> tuple[FormSchema, FormSchema, FormOption]:
     company = FormOption(value="北京", label="北京公司", key="company-beijing")
-    budget = FormOption(value="26007 项目", label="26007 项目", key="budget-26007")
+    budget = FormOption(value="DEMO-001 项目", label="DEMO-001 项目", key="budget-DEMO-001")
     travel_type = FormOption(
         value="市外项目出差（短期）",
         label="市外项目出差（短期）",
@@ -335,7 +335,7 @@ class LocalWorkflowBoundary:
                         "travel-company-id", "所属公司", "TextField", "北京", None, None
                     ),
                     WorkflowFormValue(
-                        "travel-budget-id", "预算代码", "TextField", "26007 项目", None, None
+                        "travel-budget-id", "预算代码", "TextField", "DEMO-001 项目", None, None
                     ),
                 ),
             )
@@ -468,8 +468,8 @@ def _draft_input(
         {
             "ocrDispositionVersion": 1,
             "companyValue": "北京",
-            "budgetCodeValue": "26007 项目",
-            "project": {"mode": "manual", "text": "26007 MES 项目"},
+            "budgetCodeValue": "DEMO-001 项目",
+            "project": {"mode": "manual", "text": "DEMO-001 示例项目"},
             "trip": {
                 "tripType": "short_term_project",
                 "excludedPeriods": excluded_periods or [],
@@ -1078,7 +1078,7 @@ def test_submit_auto_syncs_budget_option_label_without_reconfirming_catalog(
         replace(
             component,
             options=tuple(
-                replace(option, label="26007 新项目名称") for option in component.options
+                replace(option, label="DEMO-001 新项目名称") for option in component.options
             ),
         )
         if component.component_id == "budget-id"
@@ -1112,8 +1112,8 @@ def test_submit_auto_syncs_budget_option_label_without_reconfirming_catalog(
         assert draft is not None
         assert submission.schema_fingerprint == snapshot.template.schema_fingerprint
         assert submission.schema_fingerprint != draft.schema_fingerprint
-        assert snapshot.selections.budget_code.label == "26007 新项目名称"
-        assert snapshot.input.project.display_text == "26007 新项目名称"
+        assert snapshot.selections.budget_code.label == "DEMO-001 新项目名称"
+        assert snapshot.input.project.display_text == "DEMO-001 新项目名称"
     assert asyncio.run(_worker(client, workflow, LocalStorageBoundary()).run_once()) is True
     polled = client.get(
         f"/api/oa/reimbursements/submissions/{response.json()['data']['submissionId']}"

@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from zipfile import ZipFile
 
 import httpx
 import pytest
@@ -115,7 +116,7 @@ def _schema(process_code: str, components: tuple[FormComponent, ...]) -> FormSch
 
 def _catalog() -> OaTemplateCatalogContract:
     company = FormOption(value="北京", label="北京公司", key="company-beijing")
-    budget = FormOption(value="26007 项目", label="26007 项目", key="budget-26007")
+    budget = FormOption(value="DEMO-001 项目", label="DEMO-001 项目", key="budget-DEMO-001")
     travel_type = FormOption(
         value="市外项目出差（短期）",
         label="市外项目出差（短期）",
@@ -172,8 +173,8 @@ def _draft_input(
     value: dict[str, object] = {
         "ocrDispositionVersion": 1,
         "companyValue": "北京",
-        "budgetCodeValue": "26007 项目",
-        "project": {"mode": "manual", "text": "26007 MES 项目"},
+        "budgetCodeValue": "DEMO-001 项目",
+        "project": {"mode": "manual", "text": "DEMO-001 示例项目"},
         "items": [
             {
                 "category": "local_transport",
@@ -261,14 +262,14 @@ def _source(*, original_count: int = 2) -> SnapshotSource:
             union_id="union-1",
             name="测试员工",
             department_id="100",
-            department_name="工业物联二部",
-            microapp_agent_id=4_951_124_324,
+            department_name="示例业务部门",
+            microapp_agent_id=1_234_567_890,
         ),
         catalog=catalog,
         draft_input=draft_input,
         resolved_project=ResolvedProject(
-            display_text="26007 MES 项目",
-            filename_component="26007",
+            display_text="DEMO-001 示例项目",
+            filename_component="DEMO-001",
         ),
         totals_data=totals_data,
         related_approvals=related,
@@ -504,7 +505,7 @@ def test_builds_all_ten_oa_fields_and_round_trips_exact_request() -> None:
     assert body["processCode"] == "PROC-REIMBURSEMENT"
     assert body["originatorUserId"] == "employee-1"
     assert body["deptId"] == 100
-    assert body["microappAgentId"] == 4_951_124_324
+    assert body["microappAgentId"] == 1_234_567_890
     values = body["formComponentValues"]
     assert [item["name"] for item in values] == [
         "所属公司",
@@ -520,7 +521,7 @@ def test_builds_all_ten_oa_fields_and_round_trips_exact_request() -> None:
     ]
     assert [item["value"] for item in values[:6]] == [
         "北京",
-        "26007 项目",
+        "DEMO-001 项目",
         "市外项目出差（短期）",
         "2026-09-01",
         "2026-09-03",
@@ -686,7 +687,7 @@ def test_attachment_manifest_requires_bundle_then_generated_excel() -> None:
     renamed_excel = ApprovalAttachment(
         space_id=generated.space_id,
         file_id=generated.file_id,
-        file_name="差旅费报销单-测试员工-26007 (1).xlsx",
+        file_name="差旅费报销单-测试员工-DEMO-001 (1).xlsx",
         file_size=generated.file_size,
         file_type=generated.file_type,
     )
@@ -706,8 +707,8 @@ def test_excel_input_is_rebuilt_only_for_the_frozen_template(tmp_path: Path) -> 
     excel_input = snapshot_excel_input(snapshot)
 
     assert excel_input.employee_name == "测试员工"
-    assert excel_input.department_name == "工业物联二部"
-    assert excel_input.project.display_text == "26007 项目"
+    assert excel_input.department_name == "示例业务部门"
+    assert excel_input.project.display_text == "DEMO-001 项目"
     assert excel_input.totals.total_amount == Decimal("1058.39")
     assert not hasattr(excel_input.items[0], "source_file_id")
     verify_excel_template(snapshot, template)
@@ -715,6 +716,77 @@ def test_excel_input_is_rebuilt_only_for_the_frozen_template(tmp_path: Path) -> 
     template.write_bytes(b"template-v2")
     with pytest.raises(ApiError, match="模板已更新"):
         verify_excel_template(snapshot, template)
+
+
+@pytest.mark.parametrize(
+    "expected_hash",
+    [
+        "39ba8327577e3ea109aa462b82c0fde265f6e7fa6c50fc2a824c6890326b27c5",
+        "20b1f83491c1a9226187cf60132b6c86790bb946d0b394a56326d964e31439a2",
+    ],
+)
+def test_sanitized_template_preserves_legacy_snapshot_without_rewriting_it(expected_hash):
+    template = Path(__file__).parents[1] / "app/templates/expense_template.xlsx"
+    snapshot = build_snapshot(replace(_source(), excel_template_sha256=expected_hash))
+    frozen = serialize_snapshot(snapshot)
+    digest = snapshot_sha256(snapshot)
+
+    verify_excel_template(snapshot, template)
+
+    assert serialize_snapshot(snapshot) == frozen
+    assert snapshot_sha256(snapshot) == digest
+
+
+@pytest.mark.parametrize("changed_member", ["docProps/core.xml", "xl/worksheets/sheet1.xml"])
+def test_legacy_template_compatibility_rejects_any_unregistered_archive_change(
+    tmp_path, changed_member
+):
+    template = Path(__file__).parents[1] / "app/templates/expense_template.xlsx"
+    changed = tmp_path / "edited-template.xlsx"
+    with ZipFile(template) as source, ZipFile(changed, "w") as target:
+        for member in source.infolist():
+            content = source.read(member.filename)
+            target.writestr(
+                member, content + b"\n" if member.filename == changed_member else content
+            )
+    snapshot = build_snapshot(replace(
+        _source(),
+        excel_template_sha256="39ba8327577e3ea109aa462b82c0fde265f6e7fa6c50fc2a824c6890326b27c5",
+    ))
+
+    with pytest.raises(ApiError) as caught:
+        verify_excel_template(snapshot, changed)
+
+    assert caught.value.code == "EXCEL_TEMPLATE_CHANGED"
+
+
+def test_sanitized_template_does_not_accept_unknown_snapshot_fingerprint():
+    template = Path(__file__).parents[1] / "app/templates/expense_template.xlsx"
+    snapshot = build_snapshot(replace(_source(), excel_template_sha256="b" * 64))
+
+    with pytest.raises(ApiError) as caught:
+        verify_excel_template(snapshot, template)
+
+    assert caught.value.code == "EXCEL_TEMPLATE_CHANGED"
+
+
+def test_template_metadata_compatibility_does_not_allow_returning_to_original(monkeypatch):
+    from app.services import oa_reimbursement_payload
+
+    template = Path(__file__).parents[1] / "app/templates/expense_template.xlsx"
+    snapshot = build_snapshot(replace(
+        _source(), excel_template_sha256=hash_excel_template(template)
+    ))
+    monkeypatch.setattr(
+        oa_reimbursement_payload,
+        "hash_excel_template",
+        lambda _: "39ba8327577e3ea109aa462b82c0fde265f6e7fa6c50fc2a824c6890326b27c5",
+    )
+
+    with pytest.raises(ApiError) as caught:
+        verify_excel_template(snapshot, template)
+
+    assert caught.value.code == "EXCEL_TEMPLATE_CHANGED"
 
 
 @pytest.mark.asyncio
@@ -759,7 +831,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
         corp_id="corp-fixed",
         user_id="employee-1",
         department_id="100",
-        department_name="工业物联二部",
+        department_name="示例业务部门",
     )
     with client.app.state.database_session_factory() as database:
         staging = client.app.state.reimbursement_staging
@@ -857,7 +929,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
                 originator_name="测试员工",
                 draft_id=draft.id,
                 expected_revision=5,
-                microapp_agent_id=4_951_124_324,
+                microapp_agent_id=1_234_567_890,
                 excel_template_path=client.app.state.settings.excel_template_path,
                 max_items=100,
                 ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,
@@ -872,7 +944,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
             originator_name="测试员工",
             draft_id=draft.id,
             expected_revision=5,
-            microapp_agent_id=4_951_124_324,
+            microapp_agent_id=1_234_567_890,
             excel_template_path=client.app.state.settings.excel_template_path,
             max_items=100,
             ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,
@@ -904,7 +976,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
             originator_name="测试员工",
             draft_id=draft.id,
             expected_revision=5,
-            microapp_agent_id=4_951_124_324,
+            microapp_agent_id=1_234_567_890,
             excel_template_path=client.app.state.settings.excel_template_path,
             max_items=100,
             ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,
@@ -924,7 +996,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
                 originator_name="测试员工",
                 draft_id=draft.id,
                 expected_revision=5,
-                microapp_agent_id=4_951_124_324,
+                microapp_agent_id=1_234_567_890,
                 excel_template_path=client.app.state.settings.excel_template_path,
                 max_items=100,
                 ocr_timeout_seconds=client.app.state.settings.ocr_operation_timeout_seconds,

@@ -287,10 +287,10 @@ async def test_worker_rejects_changed_source_even_when_target_is_same(monkeypatc
 @pytest.mark.parametrize(
     "labels,expected",
     [
-        (("26007项目",), True),
-        (("26007\t项目",), True),
-        (("26007 其他项目",), False),
-        (("26007项目", "26007 项目"), False),
+        (("DEMO-001项目",), True),
+        (("DEMO-001\t项目",), True),
+        (("DEMO-001 其他项目",), False),
+        (("DEMO-001项目", "DEMO-001 项目"), False),
     ],
 )
 def test_budget_full_label_whitespace_matching_never_prefix_or_ambiguous(labels, expected):
@@ -313,7 +313,8 @@ def test_same_budget_value_with_different_full_label_is_not_a_match():
     source_schema = SimpleNamespace(
         components=(
             SimpleNamespace(
-                component_id="source-budget", options=(FormOption("26007", "26007 项目", "source"),)
+                component_id="source-budget",
+                options=(FormOption("DEMO-001", "DEMO-001 项目", "source"),),
             ),
         )
     )
@@ -323,7 +324,7 @@ def test_same_budget_value_with_different_full_label_is_not_a_match():
         company_component_id="source-company",
         budget_code_component_id="source-budget",
         company_options=_catalog().reimbursement.schema.components[0].options,
-        budget_options=(FormOption("26007", "26007 另一个项目", "target"),),
+        budget_options=(FormOption("DEMO-001", "DEMO-001 另一个项目", "target"),),
     )
     assert budget is None
     assert reason

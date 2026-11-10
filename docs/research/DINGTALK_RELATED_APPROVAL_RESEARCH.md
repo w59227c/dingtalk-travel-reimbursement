@@ -97,14 +97,14 @@ GET /api/travel-approvals?type=domestic&from=2026-05-01&to=2026-09-01
 
 ```json
 {
-  "processInstanceId": "RgJJ1veyQl2A...",
+  "processInstanceId": "SYNTHETIC-TRAVEL-001",
   "businessId": "审批页展示的业务编号",
   "title": "测试员工提交的境内出差申请",
   "status": "COMPLETED",
   "result": "agree",
   "startTime": "2026-06-30",
   "endTime": "2026-07-07",
-  "project": "26007 合肥示例前道MES项目"
+  "project": "DEMO-001 示例项目"
 }
 ```
 
@@ -152,7 +152,7 @@ GET /api/travel-approvals?type=domestic&from=2026-05-01&to=2026-09-01
   "formComponentValues": [
     {
       "name": "预算代码",
-      "value": "26007 合肥示例前道MES项目"
+      "value": "DEMO-001 示例项目"
     },
     {
       "name": "关联审批单",
@@ -194,7 +194,7 @@ GET /api/travel-approvals?type=domestic&from=2026-05-01&to=2026-09-01
 
 □ 测试员工提交的境内出差申请
   2026-06-30 至 2026-07-07
-  26007 合肥示例前道MES项目
+  DEMO-001 示例项目
   审批通过
 
 [确定]

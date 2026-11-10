@@ -52,7 +52,7 @@ vi.mock('@/utils/dingtalk', () => ({ downloadAndOpenDingTalkDocument: vi.fn() })
 const input: ReimbursementDraftInput = {
   ocrDispositionVersion: 1,
   companyValue: '北京',
-  budgetCodeValue: '26007',
+  budgetCodeValue: 'DEMO-001',
   project: { mode: 'manual', text: '示例项目' },
   trip: null,
   dismissedOcrFileIds: [],

@@ -40,7 +40,7 @@ vi.mock('@/api/http', () => ({
 const input: ReimbursementDraftInput = {
   ocrDispositionVersion: 1,
   companyValue: '北京',
-  budgetCodeValue: '26007',
+  budgetCodeValue: 'DEMO-001',
   project: { mode: 'manual', text: '示例项目' },
   trip: null,
   dismissedOcrFileIds: [],
@@ -108,7 +108,7 @@ describe('persistent reimbursement API', () => {
       templateConfigVersion: 12,
       reimbursementProcessCode: 'PROC-REIMBURSEMENT',
       companyOptions: [{ value: '北京', label: '北京公司', key: 'beijing' }],
-      budgetCodeOptions: [{ value: '26007', label: 'MES 项目', key: null }],
+      budgetCodeOptions: [{ value: 'DEMO-001', label: '示例项目', key: null }],
       travelProfiles: [{
         profileKey: 'business',
         displayName: '商务出差',

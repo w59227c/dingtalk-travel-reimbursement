@@ -83,9 +83,9 @@ def test_budget_option_ignores_client_project_and_full_label_reaches_excel(
     from app.services import reimbursement_drafts
 
     catalog = _catalog_with_travel()
-    label = "26007 " + "国际项目预算明细" * 50
+    label = "DEMO-001 " + "国际项目预算明细" * 50
     catalog.reimbursement.schema.components[1].options = (
-        FormOption(value="26007", label=label, key=None),
+        FormOption(value="DEMO-001", label=label, key=None),
     )
     monkeypatch.setattr(reimbursement_drafts, "require_submission_ready_catalog", lambda _: catalog)
     monkeypatch.setattr(reimbursement_files, "require_submission_ready_catalog", lambda _: catalog)

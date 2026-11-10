@@ -57,7 +57,7 @@ def _draft_input(*, amount: str = "44.89") -> dict[str, object]:
     return {
         "ocrDispositionVersion": 1,
         "companyValue": "北京",
-        "budgetCodeValue": "26007",
+        "budgetCodeValue": "DEMO-001",
         "project": {"mode": "manual", "text": "P-001 示例项目"},
         "trip": {
             "tripType": "business",
@@ -1180,7 +1180,7 @@ def test_excel_preview_recalculates_from_saved_draft_without_submission_side_eff
     try:
         worksheet = workbook.active
         assert str(worksheet[EXCEL_TEMPLATE.total_amount_cell].value) == "244.89"
-        assert worksheet[EXCEL_TEMPLATE.project_cell].value == "MES 项目"
+        assert worksheet[EXCEL_TEMPLATE.project_cell].value == "示例项目"
     finally:
         workbook.close()
     with client.app.state.database_session_factory() as database:

@@ -32,7 +32,7 @@ from app.services.subsidy_calculation import (
 )
 
 TEMPLATE_PATH = Path(__file__).parents[1] / "app" / "templates" / "expense_template.xlsx"
-CANONICAL_TEMPLATE_SHA256 = "39ba8327577e3ea109aa462b82c0fde265f6e7fa6c50fc2a824c6890326b27c5"
+CANONICAL_TEMPLATE_SHA256 = "20b1f83491c1a9226187cf60132b6c86790bb946d0b394a56326d964e31439a2"
 
 
 def trip() -> dict[str, object]:
@@ -181,6 +181,19 @@ def test_template_matches_official_form_format() -> None:
     assert worksheet["B55"].fill.fgColor.rgb == "FFB5C6EA"
     assert worksheet["G55"].number_format.startswith("_ \\¥*")
     workbook.close()
+
+
+def test_template_and_generated_workbook_do_not_expose_editor_metadata(client_factory) -> None:
+    template = load_workbook(TEMPLATE_PATH, data_only=False)
+    generated = open_result(generate(client_factory(), body(items=[item()])))
+    try:
+        for workbook in (template, generated):
+            assert workbook.properties.creator == "Expense App"
+            assert workbook.properties.lastModifiedBy is None
+            assert workbook.properties.lastPrinted is None
+    finally:
+        template.close()
+        generated.close()
 
 
 def test_generated_workbook_preserves_cells_order_totals_layout_and_safety(client_factory) -> None:

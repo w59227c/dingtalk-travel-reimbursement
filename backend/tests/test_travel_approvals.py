@@ -55,7 +55,7 @@ def _catalog(*profiles):
         FormOption(value="北京", label="北京公司", key="company-1"),
         FormOption(value="无锡", label="无锡公司", key="company-2"),
     )
-    budgets = (FormOption(value="26007", label="26007 项目", key="budget-1"),)
+    budgets = (FormOption(value="DEMO-001", label="DEMO-001 项目", key="budget-1"),)
     reimbursement = SimpleNamespace(
         process_code="PROC-REIMBURSEMENT",
         mappings={"company": "company-id", "budgetCode": "budget-id"},
@@ -86,7 +86,9 @@ def _instance(
 ) -> WorkflowProcessInstance:
     values = [
         WorkflowFormValue("source-company", "所属公司", "DDSelectField", "北京公司", None, None),
-        WorkflowFormValue("source-budget", "预算代码", "DDSelectField", "26007 项目", None, None),
+        WorkflowFormValue(
+            "source-budget", "预算代码", "DDSelectField", "DEMO-001 项目", None, None
+        ),
     ]
     if start_date is not None:
         values.append(
@@ -190,7 +192,7 @@ def test_runtime_options_preserve_exact_oa_values_and_catalog_version() -> None:
             {"value": "北京", "label": "北京公司", "key": "company-1"},
             {"value": "无锡", "label": "无锡公司", "key": "company-2"},
         ],
-        "budgetCodeOptions": [{"value": "26007", "label": "26007 项目", "key": "budget-1"}],
+        "budgetCodeOptions": [{"value": "DEMO-001", "label": "DEMO-001 项目", "key": "budget-1"}],
         "travelProfiles": [
             {
                 "profileKey": "domestic",
@@ -236,7 +238,7 @@ def test_accounting_resolves_source_option_key_by_exact_label_across_forms() -> 
     )
     assert reason is None
     assert company.value == "北京"
-    assert budget.value == "26007"
+    assert budget.value == "DEMO-001"
 
 
 def test_unconfigured_source_mapping_requires_one_exact_visible_field_label() -> None:
@@ -410,8 +412,8 @@ async def test_listing_pages_each_profile_uses_only_current_identity_and_filters
         "key": "company-1",
     }
     assert candidates[0].as_dict()["budgetCodeOption"] == {
-        "value": "26007",
-        "label": "26007 项目",
+        "value": "DEMO-001",
+        "label": "DEMO-001 项目",
         "key": "budget-1",
     }
     assert candidates[0].as_dict()["unavailableReason"] is None

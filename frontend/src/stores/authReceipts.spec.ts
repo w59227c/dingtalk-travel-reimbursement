@@ -222,11 +222,11 @@ describe('authentication clears scoped client memory', () => {
       queryWindow: { from: '2026-07-01', to: '2026-07-31' },
     }
     vi.mocked(selectDepartmentFromTravelApprovalRequest).mockResolvedValue({
-      selectedDepartment: { id: '200', name: '工业物联二部' },
+      selectedDepartment: { id: '200', name: '示例业务部门' },
       selectionRequired: false,
       departments: [
         { id: '100', name: '测试部门' },
-        { id: '200', name: '工业物联二部' },
+        { id: '200', name: '示例业务部门' },
       ],
     })
 
@@ -234,10 +234,10 @@ describe('authentication clears scoped client memory', () => {
 
     expect(selectDepartmentFromTravelApprovalRequest).toHaveBeenCalledWith(selection, undefined)
     expect(auth.status).toBe('authenticated')
-    expect(auth.session?.selectedDepartment).toEqual({ id: '200', name: '工业物联二部' })
+    expect(auth.session?.selectedDepartment).toEqual({ id: '200', name: '示例业务部门' })
     expect(auth.session?.departments).toEqual([
       { id: '100', name: '测试部门' },
-      { id: '200', name: '工业物联二部' },
+      { id: '200', name: '示例业务部门' },
     ])
     expect(drafts.drafts).toEqual([])
   })
@@ -256,7 +256,7 @@ describe('authentication clears scoped client memory', () => {
       selectedDepartment: null,
       selectionRequired: true,
       departments: [
-        { id: '100', name: '技术管理中心' },
+        { id: '100', name: '示例管理部门' },
         { id: '200', name: '产品开发部' },
       ],
     })

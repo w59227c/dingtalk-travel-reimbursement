@@ -9,7 +9,7 @@
 - `backend/tests/`：后端单元、集成、迁移和安全回归测试。
 - `frontend/src/`：Vue 页面、组件、状态管理和 API 客户端。
 - `nginx/`：生产静态页面与同源 `/api` 反向代理配置，由 Compose 实际挂载。
-- `docs/`：产品设计、实现计划和已完成调研。
+- `docs/`：业务契约、集成设计、开发部署与必要调研依据。
 - `scripts/`：开发启动、Nginx 策略检查和 OCR 制品校验工具。
 
 本机 `.env`、SQLite 数据、上传材料、OCR 模型和依赖目录均已忽略。`make clean` 只删除
@@ -26,6 +26,7 @@ Python/前端缓存和可重新生成的构建产物，不会删除这些运行�
 - 后端业务调用钉钉继续使用 `httpx` 0.28.1；测试环境另外锁定 `httpx2` 2.12.0，专供新版 Starlette `TestClient` 使用，不混用两套客户端处理业务请求。
 - 当前 npm 11 标准生成结果并未为全部依赖条目写入 `resolved`/`integrity`。这里不手工拼接 URL 或哈希，也不宣称具备完整的锁文件校验和覆盖；若上线环境把完整哈希作为供应链硬性要求，应在干净 npm 环境中重新生成并单独复核后再发布。
 - 后端已使用 uv 生成并提交 `uv.lock`；本地安装、检查与容器构建统一使用 `--frozen`，确保声明与锁文件不一致时立即失败。
+- OCR 锁定 PaddleOCR 3.7.0、PaddleX 3.7.2 和 `opencv-contrib-python==4.10.0.84`。ONNX Runtime 不取消这条依赖链的版本约束，依据见 [PaddleOCR 打包配置](https://github.com/PaddlePaddle/PaddleOCR/blob/v3.7.0/pyproject.toml)和 [PaddleX 打包配置](https://github.com/PaddlePaddle/PaddleX/blob/v3.7.2/setup.py)。不要单独升级 OpenCV 或绕过约束；升级须成套更新兼容依赖和锁文件，并重跑二维码测试、支持平台的 OCR 运行时检查及镜像离线冒烟。
 
 ## 本地普通浏览器联调
 

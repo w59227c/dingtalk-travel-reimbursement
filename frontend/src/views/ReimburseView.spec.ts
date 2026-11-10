@@ -85,7 +85,7 @@ const options = {
   templateConfigVersion: 12,
   reimbursementProcessCode: 'PROC-REIMBURSEMENT',
   companyOptions: [{ value: '北京', label: '北京分公司', key: 'beijing' }],
-  budgetCodeOptions: [{ value: '26007', label: '26007 · MES 项目', key: null }],
+  budgetCodeOptions: [{ value: 'DEMO-001', label: 'DEMO-001 · 示例项目', key: null }],
   travelProfiles: [{
     profileKey: 'business',
     displayName: '境内出差',
@@ -98,8 +98,8 @@ const options = {
 const baseInput: ReimbursementDraftInput = {
   ocrDispositionVersion: 1,
   companyValue: '北京',
-  budgetCodeValue: '26007',
-  project: { mode: 'manual', text: '合肥示例前道 MES 项目' },
+  budgetCodeValue: 'DEMO-001',
+  project: { mode: 'manual', text: '示例项目' },
   trip: null,
   dismissedOcrFileIds: [],
   items: [{
@@ -352,7 +352,7 @@ function installServerMocks(): void {
         status: 'DRAFT',
         revision: expectedRevision + 1,
         relatedApprovalCount: selections.length,
-        input: { ...serverDraft.input, companyValue: hasSelection ? '北京' : '', budgetCodeValue: hasSelection ? '26007' : '', accountingSourceVerified: hasSelection },
+        input: { ...serverDraft.input, companyValue: hasSelection ? '北京' : '', budgetCodeValue: hasSelection ? 'DEMO-001' : '', accountingSourceVerified: hasSelection },
         relatedApprovals: hasSelection ? [linkedApproval] : [],
         relatedApprovalSummary: hasSelection
           ? { count: 1, startDate: linkedApproval.startDate, endDate: linkedApproval.endDate }
@@ -825,18 +825,18 @@ describe('ReimburseView single-form OA flow', () => {
       auth.status = 'department_required'
       auth.session!.selectedDepartment = null
       auth.session!.departments = [
-        { id: '100', name: '技术管理中心' },
-        { id: '200', name: '工业物联二部' },
+        { id: '100', name: '示例管理部门' },
+        { id: '200', name: '示例业务部门' },
       ]
     }, false, mobile)
     const departmentResolution = deferred<Awaited<ReturnType<typeof selectDepartmentFromTravelApproval>>>()
     vi.mocked(selectDepartmentFromTravelApproval).mockReturnValue(departmentResolution.promise)
     const resolvedDepartment = {
-      selectedDepartment: { id: '200', name: '工业物联二部' },
+      selectedDepartment: { id: '200', name: '示例业务部门' },
       selectionRequired: false,
       departments: [
-        { id: '100', name: '技术管理中心' },
-        { id: '200', name: '工业物联二部' },
+        { id: '100', name: '示例管理部门' },
+        { id: '200', name: '示例业务部门' },
       ],
     }
 
@@ -856,7 +856,7 @@ describe('ReimburseView single-form OA flow', () => {
 
     expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(selection, undefined)
     expect(useAuthStore().session?.selectedDepartment).toEqual({
-      id: '200', name: '工业物联二部',
+      id: '200', name: '示例业务部门',
     })
     expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledWith(
       'draft-1',
@@ -876,8 +876,8 @@ describe('ReimburseView single-form OA flow', () => {
         auth.session!.selectedDepartment = null
         auth.session!.departments = [
           { id: 'other', name: '其他临时部门' },
-          { id: '100', name: '技术管理中心' },
-          { id: '300', name: '技术管理中心' },
+          { id: '100', name: '示例管理部门' },
+          { id: '300', name: '示例管理部门' },
           { id: '400', name: '产品开发部' },
         ]
       }, false, mobile)
@@ -887,7 +887,7 @@ describe('ReimburseView single-form OA flow', () => {
               selectedDepartment: { id: '400', name: '产品开发部' },
               selectionRequired: false,
               departments: [
-                { id: '100', name: '技术管理中心' },
+                { id: '100', name: '示例管理部门' },
                 { id: '400', name: '产品开发部' },
               ],
             }
@@ -896,8 +896,8 @@ describe('ReimburseView single-form OA flow', () => {
               selectionRequired: true,
               departments: [
                 { id: 'other', name: '其他临时部门' },
-                { id: '100', name: '技术管理中心' },
-                { id: '300', name: '技术管理中心' },
+                { id: '100', name: '示例管理部门' },
+                { id: '300', name: '示例管理部门' },
                 { id: '400', name: '产品开发部' },
               ],
             },
@@ -915,7 +915,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(dialog.props('modelValue')).toBe(true)
       expect(wrapper.findAllComponents({ name: 'ElOption' }).map(
         (option) => option.props('label'),
-      )).toEqual(['技术管理中心', '产品开发部'])
+      )).toEqual(['示例管理部门', '产品开发部'])
       wrapper.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', '400')
       await nextTick()
       await visibleButton(wrapper, '确认部门').trigger('click')
@@ -950,10 +950,10 @@ describe('ReimburseView single-form OA flow', () => {
     async (mobile) => {
       const { wrapper, drafts } = await mountView((auth) => {
         auth.session!.departments = [
-          { id: '100', name: '技术管理中心' },
+          { id: '100', name: '示例管理部门' },
           { id: '200', name: '产品开发部' },
         ]
-        auth.session!.selectedDepartment = { id: '100', name: '技术管理中心' }
+        auth.session!.selectedDepartment = { id: '100', name: '示例管理部门' }
       }, false, mobile)
       drafts.travelApprovals = [{
         ...linkedApproval,
@@ -975,7 +975,7 @@ describe('ReimburseView single-form OA flow', () => {
         selectedDepartment: { id: '200', name: '产品开发部' },
         selectionRequired: false,
         departments: [
-          { id: '100', name: '技术管理中心' },
+          { id: '100', name: '示例管理部门' },
           { id: '200', name: '产品开发部' },
         ],
       }
@@ -989,7 +989,7 @@ describe('ReimburseView single-form OA flow', () => {
 
       const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
       expect(summary.text()).toContain('北京分公司')
-      expect(summary.text()).toContain('26007 · MES 项目')
+      expect(summary.text()).toContain('DEMO-001 · 示例项目')
       expect(summary.text()).toContain('境内出差')
       expect(summary.text()).toContain('2026-08-31')
       expect(summary.text()).toContain('2026-09-02')
@@ -1169,7 +1169,7 @@ describe('ReimburseView single-form OA flow', () => {
     const { wrapper, expense, drafts } = await mountView()
     expect(getOaReimbursementOptions).toHaveBeenCalledOnce()
     expect(drafts.reimbursementOptions).toEqual(options)
-    expect(expense.manualProjectText).toBe('26007 · MES 项目')
+    expect(expense.manualProjectText).toBe('DEMO-001 · 示例项目')
     expect(expense.items).toHaveLength(1)
     expect(wrapper.text()).toContain('预算代码 / 项目')
     expect(wrapper.text()).not.toContain('草稿')
@@ -1177,7 +1177,7 @@ describe('ReimburseView single-form OA flow', () => {
     expect(wrapper.text()).not.toContain('项目管理')
     const basics = wrapper.get('[data-testid="reimbursement-basics-card"]')
     expect(basics.text()).toContain('北京分公司')
-    expect(basics.text()).toContain('26007 · MES 项目')
+    expect(basics.text()).toContain('DEMO-001 · 示例项目')
     expect(wrapper.findAllComponents({ name: 'ElSelect' })).toHaveLength(0)
     wrapper.unmount()
   })
@@ -1322,7 +1322,7 @@ describe('ReimburseView single-form OA flow', () => {
     await vi.waitFor(() => expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledTimes(1), { timeout: 2000 })
     await flushPromises()
     expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('北京分公司')
-    expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('26007 · MES 项目')
+    expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('DEMO-001 · 示例项目')
     const items = JSON.parse(JSON.stringify(expense.items))
     expense.includeSubsidy = true
     expense.trip.startDate = '2026-09-01'
@@ -1365,7 +1365,7 @@ describe('ReimburseView single-form OA flow', () => {
 
       const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
       expect(summary.text()).toContain('北京分公司')
-      expect(summary.text()).toContain('26007 · MES 项目')
+      expect(summary.text()).toContain('DEMO-001 · 示例项目')
       expect(summary.text()).toContain('境内出差')
       expect(summary.text()).toContain('2026-08-31')
       expect(summary.text()).toContain('2026-09-02')
@@ -1379,7 +1379,7 @@ describe('ReimburseView single-form OA flow', () => {
         input: {
           ...serverDraft.input,
           companyValue: '北京',
-          budgetCodeValue: '26007',
+          budgetCodeValue: 'DEMO-001',
           accountingSourceVerified: true,
         },
         relatedApprovals: [linkedApproval],
@@ -1426,7 +1426,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(drafts.currentDraft?.relatedApprovals).toEqual([])
       expect(wrapper.findComponent(TravelApprovalSelectorStub).props('modelValue')).toEqual([])
       expect(summary.text()).not.toContain('北京分公司')
-      expect(summary.text()).not.toContain('26007 · MES 项目')
+      expect(summary.text()).not.toContain('DEMO-001 · 示例项目')
       expect(summary.text()).toContain('网络中断')
       expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
       wrapper.unmount()
@@ -1487,7 +1487,7 @@ describe('ReimburseView single-form OA flow', () => {
         input: {
           ...serverDraft.input,
           companyValue: '北京',
-          budgetCodeValue: '26007',
+          budgetCodeValue: 'DEMO-001',
           accountingSourceVerified: true,
         },
         relatedApprovals: [authoritativeApproval],
@@ -1532,7 +1532,7 @@ describe('ReimburseView single-form OA flow', () => {
         input: {
           ...serverDraft.input,
           companyValue: '北京',
-          budgetCodeValue: '26007',
+          budgetCodeValue: 'DEMO-001',
           accountingSourceVerified: true,
         },
         relatedApprovals: [linkedApproval],
@@ -1552,7 +1552,7 @@ describe('ReimburseView single-form OA flow', () => {
       const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
       expect(wrapper.findComponent(TravelApprovalSelectorStub).props('modelValue')).toEqual([selection])
       expect(summary.text()).toContain('北京分公司')
-      expect(summary.text()).toContain('26007 · MES 项目')
+      expect(summary.text()).toContain('DEMO-001 · 示例项目')
       expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(false)
       expect(summary.text()).not.toContain('响应丢失')
       expect(wrapper.get('[data-testid="autosave-status"]').text()).not.toContain('保存失败')
@@ -1789,7 +1789,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(expense.items).toEqual(previousItems)
       expect(expense.trip).toEqual(previousTrip)
       expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('北京分公司')
-      expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('26007 · MES 项目')
+      expect(wrapper.get('[data-testid="derived-accounting-summary"]').text()).toContain('DEMO-001 · 示例项目')
       expect(wrapper.findComponent(TravelApprovalSelectorStub).props('modelValue')).toEqual(previousSelections)
       expect(submitOaReimbursement).not.toHaveBeenCalled()
       wrapper.unmount()
@@ -3125,7 +3125,7 @@ describe('ReimburseView single-form OA flow', () => {
   })
 
   it.each([false, true])('keeps a newly selected approval when the target department has a completed reimbursement, mobile=%s', async (mobile) => {
-    const original = { id: '100', name: '技术管理中心' }
+    const original = { id: '100', name: '示例管理部门' }
     const target = { id: '200', name: '产品开发部' }
     serverDraft = makeDraft({ department: original, input: canonicalNoSubsidyInput() })
     const { wrapper, drafts } = await mountView((auth) => {
@@ -3269,7 +3269,7 @@ describe('ReimburseView single-form OA flow', () => {
       items: [serverDraft, unused, expired], offset: 0, limit: 50, total: 3,
     })
     vi.mocked(listReimbursementSubmissionHistory).mockResolvedValue([
-      { id: submitted.id, lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 1, totalAmount: '1280.50', budgetLabel: '26007 · 合成项目' },
+      { id: submitted.id, lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 1, totalAmount: '1280.50', budgetLabel: 'DEMO-001 · 合成项目' },
     ])
     vi.mocked(getReimbursementDraft).mockImplementation(async (id) => id === submitted.id ? submitted : serverDraft)
     vi.mocked(listReimbursementDraftFiles).mockImplementation(async (id) => id === submitted.id
@@ -3289,7 +3289,7 @@ describe('ReimburseView single-form OA flow', () => {
     expect(wrapper.text()).toContain('最近 10 笔成功提交')
     const list = wrapper.get('[data-testid="reimbursement-history"]')
     expect(list.text()).toContain('¥1280.50')
-    expect(list.text()).toContain('26007 · 合成项目')
+    expect(list.text()).toContain('DEMO-001 · 合成项目')
     expect(list.text()).not.toContain('草稿')
     expect(list.text()).not.toContain('已过期')
     expect(list.findAll('button')).toHaveLength(1)

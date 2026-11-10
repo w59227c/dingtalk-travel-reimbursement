@@ -58,9 +58,9 @@ def _catalog():
                         component_id="budget-id",
                         options=(
                             FormOption(
-                                value="26007",
-                                label="MES 项目",
-                                key="budget-26007",
+                                value="DEMO-001",
+                                label="示例项目",
+                                key="budget-DEMO-001",
                             ),
                         ),
                     ),
@@ -97,8 +97,8 @@ def _input() -> dict[str, object]:
     return {
         "ocrDispositionVersion": 1,
         "companyValue": "北京",
-        "budgetCodeValue": "26007",
-        "project": {"mode": "manual", "text": "MES 项目"},
+        "budgetCodeValue": "DEMO-001",
+        "project": {"mode": "manual", "text": "示例项目"},
         "trip": {
             "tripType": "business",
             "startDate": "2026-09-01",
@@ -208,7 +208,7 @@ def _travel_instance(
             WorkflowFormValue(
                 "source-company", "所属公司", "DDSelectField", "北京公司", None, None
             ),
-            WorkflowFormValue("source-budget", "预算代码", "DDSelectField", "MES 项目", None, None),
+            WorkflowFormValue("source-budget", "预算代码", "DDSelectField", "示例项目", None, None),
             WorkflowFormValue(
                 component_id="travel-start",
                 name="开始日期",
@@ -686,7 +686,7 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
     assert all(set(record) == {
         "id", "lockedAt", "relatedApprovalCount", "totalAmount", "budgetLabel",
     } for record in records)
-    assert all(record["budgetLabel"] == "26007 项目" for record in records)
+    assert all(record["budgetLabel"] == "DEMO-001 项目" for record in records)
     assert all(record["totalAmount"] != "0.00" for record in records)
     with client.app.state.database_session_factory() as database:
         assert database.get(ReimbursementDraft, "synthetic-submission-00") is not None
@@ -1333,7 +1333,7 @@ def test_removed_current_budget_option_is_rejected_without_invalidating_catalog(
     )
 
     with pytest.raises(ApiError) as caught:
-        reimbursement_drafts._require_exact_option(catalog, "budgetCode", "26007")
+        reimbursement_drafts._require_exact_option(catalog, "budgetCode", "DEMO-001")
 
     assert caught.value.code == "REIMBURSEMENT_BUDGET_OPTION_INVALID"
     assert caught.value.status_code == 422
@@ -1440,8 +1440,8 @@ def test_related_accounting_cannot_be_overridden_and_clear_preserves_work(
     )
     assert related.status_code == 200, related.text
     derived = related.json()["data"]["input"]
-    assert (derived["companyValue"], derived["budgetCodeValue"]) == ("北京", "26007")
-    assert derived["project"] == {"mode": "manual", "text": "MES 项目"}
+    assert (derived["companyValue"], derived["budgetCodeValue"]) == ("北京", "DEMO-001")
+    assert derived["project"] == {"mode": "manual", "text": "示例项目"}
     assert derived["accountingSourceVerified"] is True
     spoofed = {**derived, "companyValue": "fake", "budgetCodeValue": "fake", "project": None}
     saved = client.put(

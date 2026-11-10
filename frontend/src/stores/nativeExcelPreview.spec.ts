@@ -14,7 +14,7 @@ vi.mock('@/api/reimbursements', async (original) => ({
 const input: ReimbursementDraftInput = {
   ocrDispositionVersion: 1,
   companyValue: '北京',
-  budgetCodeValue: '26007',
+  budgetCodeValue: 'DEMO-001',
   project: { mode: 'manual', text: '示例项目' },
   trip: null,
   dismissedOcrFileIds: [],

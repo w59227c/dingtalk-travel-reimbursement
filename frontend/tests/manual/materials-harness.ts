@@ -39,7 +39,7 @@ const baseFile = (id: string, name: string): ReimbursementDraftFile => ({
 const taxi = {
   ...baseFile('invoice-1', '打车发票3.pdf'), role: 'EXPENSE_SOURCE' as const,
   ocrResult: { fileId: 'invoice-1', type: 'invoice', categoryId: 'local_transport', categoryName: '市内交通费',
-    date: '2026-07-06', amount: '9.20', description: '示例存储技术有限公司东门→泊寓新桥产业园店',
+    date: '2026-07-06', amount: '9.20', description: '示例存储技术有限公司东门→示例产业园酒店',
     transportType: 'other' as const, receiptCount: 1 as const, source: 'ocr' as const, confidence: '0.96', warnings: [], status: 'recognized' as const, error: null },
 }
 const itinerary = {
@@ -47,7 +47,7 @@ const itinerary = {
   ocrResult: { fileId: 'trip-1', version: 1 as const, kind: 'itinerary' as const, status: 'recognized' as const, source: 'pdf_text' as const,
     pageCount: 1, processedPageCount: 1, complete: true, warnings: [], error: null,
     summary: { currency: 'CNY', amount: '9.20', startDate: '2026-07-06', endDate: '2026-07-06', invoiceNumbers: [], orderNumbers: [] },
-    trips: [{ page: 1, row: 1, date: '2026-07-06', amount: '9.20', origin: '示例存储技术有限公司东门', destination: '泊寓新桥产业园店', invoiceNumbers: [], orderNumbers: [] }],
+    trips: [{ page: 1, row: 1, date: '2026-07-06', amount: '9.20', origin: '示例存储技术有限公司东门', destination: '示例产业园酒店', invoiceNumbers: [], orderNumbers: [] }],
   },
 }
 const proof = { ...baseFile('payment-1', '酒店住宿付款截图-电子支付记录.png'), attachmentKind: 'payment_proof' as const, mediaType: 'image/png' }

@@ -861,10 +861,27 @@ def snapshot_excel_input(snapshot: ReimbursementSnapshot) -> ExcelGenerationInpu
     )
 
 
+# Audited forward-only replacement: every ZIP member except docProps/core.xml
+# is byte-identical. Never generalize this to ignoring arbitrary metadata edits.
+_METADATA_ONLY_TEMPLATE_REPLACEMENTS = {
+    "39ba8327577e3ea109aa462b82c0fde265f6e7fa6c50fc2a824c6890326b27c5": (
+        "20b1f83491c1a9226187cf60132b6c86790bb946d0b394a56326d964e31439a2"
+    ),
+}
+
+
 def verify_excel_template(snapshot: ReimbursementSnapshot, template_path: Path) -> None:
     snapshot = _require_snapshot(snapshot)
     observed = hash_excel_template(template_path)
-    if not hmac.compare_digest(observed, snapshot.excel.template_sha256):
+    expected = snapshot.excel.template_sha256
+    metadata_replacement = _METADATA_ONLY_TEMPLATE_REPLACEMENTS.get(expected)
+    if not (
+        hmac.compare_digest(observed, expected)
+        or (
+            metadata_replacement is not None
+            and hmac.compare_digest(observed, metadata_replacement)
+        )
+    ):
         raise ApiError(
             "EXCEL_TEMPLATE_CHANGED",
             "报销 Excel 模板已更新，请重新确认后提交",

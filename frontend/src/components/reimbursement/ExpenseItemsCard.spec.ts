@@ -70,7 +70,7 @@ function draft(revision = 1, id = 'draft-1'): ReimbursementDraft {
     input: {
       ocrDispositionVersion: 1,
       companyValue: '北京',
-      budgetCodeValue: '26007',
+      budgetCodeValue: 'DEMO-001',
       project: { mode: 'manual', text: '测试项目' },
       trip: null,
       items: [],

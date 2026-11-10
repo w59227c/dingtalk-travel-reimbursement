@@ -33,6 +33,7 @@ tmp/
 outputs/
 *.private.json
 production-oa-*.json
+/docs/智能差旅费报销平台使用指南.pdf
 backend/models/*
 backend/models.zip
 !backend/models/README.md

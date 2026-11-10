@@ -62,6 +62,6 @@ OCR 检查需要已下载模型及锁定的 OCR 依赖；测试只能使用合�
 | 就绪检查、备份与源码部署 | [运行与运维](docs/OPERATIONS.md) |
 | CI 与镜像发布配置 | [GitHub Actions](docs/GITHUB_ACTIONS_SETUP.md) |
 | 协作要求与验证命令 | [AGENTS.md](AGENTS.md) |
-| 其他设计、调研和历史计划 | [完整文档索引](docs/README.md) |
+| 调研依据与项目概览 | [完整文档索引](docs/README.md) |
 
 业务变更同步更新产品契约与 OA 设计；根 README 保持为项目入口，不再记录逐次界面调整和历史阶段细节。

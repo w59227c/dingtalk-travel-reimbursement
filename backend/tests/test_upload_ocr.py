@@ -183,7 +183,7 @@ async def test_passenger_pdf_fallback_merges_occurrence_route_with_text_amount(
                     ("开票日期：2026年07月08日", 0.99),
                     ("2026-07-06", 0.99),
                     ("示例存储技术有限公司(东", 0.99),
-                    ("泊寓·新桥产业园店", 0.99),
+                    ("示例·测试产业园店", 0.99),
                     ("其他", 0.99),
                     ("出租车", 0.99),
                     ("门)", 0.93),
@@ -214,7 +214,7 @@ async def test_passenger_pdf_fallback_merges_occurrence_route_with_text_amount(
     assert runner.preferences == [True, False]
     assert parsed.date.isoformat() == "2026-07-06"
     assert parsed.amount is not None and str(parsed.amount) == "9.20"
-    assert parsed.description == "示例存储技术有限公司(东门)-泊寓·新桥产业园店"
+    assert parsed.description == "示例存储技术有限公司(东门)-示例·测试产业园店"
     assert "INVOICE_DATE_USED_AS_OCCURRENCE" not in parsed.warnings
 
 

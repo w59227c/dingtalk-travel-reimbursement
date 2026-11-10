@@ -1,4 +1,4 @@
-"""Compact output is lossless; immutable pre-change snapshots remain byte-identical."""
+"""Compact output is lossless; anonymized legacy snapshots stay byte-identical."""
 
 import json
 import re
@@ -113,7 +113,7 @@ def workbook_text(snapshot):
 
 
 def test_pre_change_v11_snapshot_keeps_canonical_json_sha_and_excel_description():
-    # Generated with b113f89, before the formatter changed; all identities are synthetic.
+    # Generated with b113f89; identifiers were anonymized without changing business content.
     raw = (FIXTURES / "attendance_v11.json").read_text(encoding="utf-8")
     digest = (FIXTURES / "attendance_v11.sha256").read_text().strip()
     restored = parse_snapshot(raw, expected_sha256=digest)
