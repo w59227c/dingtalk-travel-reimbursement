@@ -29,6 +29,34 @@ const verifying: ReimbursementSubmission = {
 }
 
 describe('SubmissionRecoveryCard', () => {
+  it.each([false, true])('keeps cleanup recovery usable after an unsupported attachment attempt, mobile=%s', async (mobile) => {
+    const error = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
+    vi.spyOn(ElMessage, 'success').mockImplementation(() => undefined as never)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
+    vi.mocked(recoverReimbursementSubmission).mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { data: { error: { code: 'OA_ADMIN_RECOVERY_NOT_ALLOWED',
+        message: '附件已进入清理，不能绑定审批；请核实 OA 未创建后继续清理' } } },
+    }).mockResolvedValueOnce({ ...verifying, status: 'ORPHAN_CLEANUP', processInstanceId: null })
+    const wrapper = mount(SubmissionRecoveryCard, {
+      props: { mobile }, global: { plugins: [createPinia(), ElementPlus] },
+    })
+    try {
+      await wrapper.findAll('input')[0]!.setValue('submission-1')
+      await wrapper.findAll('input')[1]!.setValue('synthetic-instance')
+      await wrapper.get('[data-testid="verification-note"]').setValue('合成核对：确认无审批')
+      await wrapper.findAll('button').find(button => button.text().includes('绑定审批'))!.trigger('click')
+      await flushPromises()
+      expect(error).toHaveBeenCalledWith(expect.stringContaining('附件已进入清理'))
+      expect(wrapper.findComponent({ name: 'ElForm' }).props('disabled')).toBe(false)
+      await wrapper.findAll('button').find(button => button.text().includes('确认未创建'))!.trigger('click')
+      await flushPromises()
+      expect(recoverReimbursementSubmission).toHaveBeenCalledTimes(2)
+      expect(wrapper.find('.submission-recovery-result .el-alert--info').exists()).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(recoverReimbursementSubmission).mockResolvedValue(verifying)
@@ -59,7 +87,7 @@ describe('SubmissionRecoveryCard', () => {
       processInstanceId: 'oa-1',
       verificationNote: '已按发起人、时间和全部表单字段核对',
     })
-    expect(wrapper.find('.submission-recovery-result.el-alert--success').exists()).toBe(false)
+    expect(wrapper.find('.submission-recovery-result .el-alert--success').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -93,7 +121,7 @@ describe('SubmissionRecoveryCard', () => {
       verificationNote: '已检查钉钉审批列表，确认未创建',
       confirmUncertainUploadsAbsent: false,
     })
-    expect(wrapper.find('.submission-recovery-result.el-alert--success').exists()).toBe(false)
+    expect(wrapper.find('.submission-recovery-result .el-alert--success').exists()).toBe(false)
     wrapper.unmount()
   })
 
@@ -137,7 +165,7 @@ describe('SubmissionRecoveryCard', () => {
       action: 'CONFIRM_NOT_CREATED', verificationNote: '合成核对依据', confirmUncertainUploadsAbsent: true,
     })
     expect(wrapper.text()).toContain('正在清理未关联附件')
-    expect(wrapper.find('.submission-recovery-result.el-alert--success').exists()).toBe(false)
+    expect(wrapper.find('.submission-recovery-result .el-alert--success').exists()).toBe(false)
     wrapper.unmount()
   })
 

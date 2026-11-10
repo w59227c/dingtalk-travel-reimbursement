@@ -25,6 +25,8 @@ class JsonFormatter(logging.Formatter):
                 payload[key] = getattr(record, key)
         if hasattr(record, "exception_type"):
             payload["exceptionType"] = record.exception_type
+        elif record.exc_info and record.exc_info[0]:
+            payload["exceptionType"] = record.exc_info[0].__name__
         for attribute, field_name in (
             ("error_code", "errorCode"),
             ("upstream", "upstream"),
@@ -46,6 +48,16 @@ def configure_logging(level: str) -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(level)
+
+    # Uvicorn normally keeps a non-propagating handler that prints traceback
+    # exception bodies, including SQL bound parameters. Use the same safe
+    # formatter for ASGI failures as for application failures.
+    for name in ("uvicorn", "uvicorn.error"):
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.propagate = True
+        logger.setLevel(level)
+    logging.getLogger("uvicorn.access").disabled = True
 
     # httpx logs full request URLs at INFO. DingTalk's legacy OAPI carries the
     # application access token in the query string, so those records must never

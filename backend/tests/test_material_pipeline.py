@@ -4,10 +4,11 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 import pytest
 from conftest import mock_login
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.orm import Session, sessionmaker
 from test_material_classification import INVOICE, _auto_upload
 from test_reimbursement_files import _insert_draft
@@ -41,6 +42,84 @@ def _setup(client_factory):
     draft_id = _insert_draft(client)
     first = _auto_upload(client, csrf, draft_id, name="first.png")
     return client, csrf, draft_id, first
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("change", ["input", "retired", "recovery", "locked", "expired"])
+def test_ocr_completion_claims_current_state_before_writing(
+    client_factory, monkeypatch, overlap, change
+):
+    client, csrf, draft_id, first = _setup(client_factory)
+    file_id = first["file"]["id"]
+    if not overlap:
+        # Ordinary UI retry of a file whose classification needs confirmation.
+        with client.app.state.database_session_factory() as database:
+            file = database.get(ReimbursementDraftFile, file_id)
+            file.ocr_status = "FAILED"
+            file.ocr_result_json = json.dumps({
+                "_materialClassification": {"status": "needs_confirmation", "kind": "unknown"}
+            })
+            database.commit()
+
+    ready_to_finish = False
+    concurrent_input = None
+    original_ocr = client.app.state.ocr_service.recognize_material_file
+    original_require = reimbursement_files.require_owned_draft
+
+    async def recognize(*args, **kwargs):
+        nonlocal ready_to_finish
+        result = await original_ocr(*args, **kwargs)
+        ready_to_finish = True
+        return result
+
+    def change_after_completion_read(database, **kwargs):
+        nonlocal ready_to_finish, concurrent_input
+        draft = original_require(database, **kwargs)
+        if ready_to_finish:
+            ready_to_finish = False
+            # Commit from a second SQLite Session after the completion SELECT.
+            # This is the micro-window a read-only revision check cannot protect.
+            changes = {}
+            if change == "input":
+                value = json.loads(draft.input_json)
+                value["items"][0]["amount"] = "99.00"
+                concurrent_input = json.dumps(value, ensure_ascii=False, sort_keys=True)
+                changes = {"input_json": concurrent_input, "revision": draft.revision + 1}
+            elif change == "retired":
+                changes = {"workspace_retired": True}
+            elif change == "recovery":
+                changes = {"recovery_pending": True}
+            elif change == "locked":
+                changes = {"status": "LOCKED", "locked_at": utc_now()}
+            else:
+                changes = {"expires_at": utc_now() - timedelta(seconds=1)}
+            with client.app.state.database_session_factory() as other:
+                changed = other.execute(
+                    update(ReimbursementDraft)
+                    .where(
+                        ReimbursementDraft.id == draft_id,
+                        ReimbursementDraft.revision == draft.revision,
+                    )
+                    .values(**changes)
+                )
+                assert changed.rowcount == 1
+                other.commit()
+        return draft
+
+    monkeypatch.setattr(client.app.state.ocr_service, "recognize_material_file", recognize)
+    monkeypatch.setattr(reimbursement_files, "require_owned_draft", change_after_completion_read)
+    response = _ocr(client, csrf, draft_id, file_id, 2, overlap=overlap)
+
+    with client.app.state.database_session_factory() as database:
+        draft = database.get(ReimbursementDraft, draft_id)
+        file = database.get(ReimbursementDraftFile, file_id)
+        if change == "input":
+            assert draft.input_json == concurrent_input
+            assert draft.revision == (3 if overlap else 4)
+        assert file.processing_role == "ATTACHMENT_ONLY"
+        assert file.ocr_status == "FAILED"
+        assert "OCR_RESULT_CONFLICT" in file.ocr_result_json
+    assert response.status_code == 409, response.text
 
 
 def test_upload_finishes_while_single_ocr_slot_is_busy_and_both_results_persist(
@@ -237,7 +316,7 @@ def test_pipeline_guard_accepts_upload_revision_change_after_draft_read(
     client_factory, monkeypatch, phase
 ):
     client, csrf, draft_id, first = _setup(client_factory)
-    original_guard = reimbursement_files._guard_pipeline_draft
+    original_guard = reimbursement_files._guard_ocr_draft
     calls = 0
 
     def reserve_between_read_and_guard(database, **kwargs):
@@ -253,7 +332,7 @@ def test_pipeline_guard_accepts_upload_revision_change_after_draft_read(
         return original_guard(database, **kwargs)
 
     monkeypatch.setattr(
-        reimbursement_files, "_guard_pipeline_draft", reserve_between_read_and_guard
+        reimbursement_files, "_guard_ocr_draft", reserve_between_read_and_guard
     )
     result = _ocr(client, csrf, draft_id, first["file"]["id"], 2)
     assert result.status_code == 200, result.text

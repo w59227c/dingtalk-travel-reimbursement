@@ -26,6 +26,7 @@ import {
 import type { ListOaTravelApprovalsOptions } from '@/api/reimbursements'
 import { downloadBlob } from '@/api/excel'
 import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
+import { inputSignature } from '@/utils/reimbursementInput'
 import type {
   OaReimbursementOptions,
   OaTravelApproval,
@@ -70,6 +71,17 @@ interface DraftRead {
 
 interface RevisionedResult {
   revision: number
+}
+
+class UnconfirmedSaveConflict extends Error {}
+
+interface UnconfirmedSave {
+  draftId: string
+  epoch: number
+  intent: number
+  baseline: string
+  attempted: string
+  approvals: string
 }
 
 interface MutationOptions {
@@ -158,6 +170,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   const revisionConflict = ref(false)
 
   let lifecycleEpoch = 0
+  let unconfirmedSave: UnconfirmedSave | null = null
   let mutationQueue: Promise<unknown> | null = null
   let filePipeline: FilePipeline | null = null
   let filePipelineSequence = 0
@@ -914,7 +927,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     fallbackMessage: string,
     options: MutationOptions = {},
   ): Promise<T> {
-    const target = requireCurrentDraft()
+    let target = requireCurrentDraft()
     const draftId = target.id
     let expectedRevision = target.revision
     let canRetryRevisionConflict = options.retryRevisionConflictOnce === true
@@ -929,6 +942,14 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     try {
       while (true) {
         try {
+          if (unconfirmedSave?.draftId === draftId && unconfirmedSave.epoch === lifecycleEpoch
+            && unconfirmedSave.intent === intentVersion) {
+            const reconciled = await reconcileUnconfirmedSave(draftId, context, options.pipeline)
+            if (reconciled) {
+              target = reconciled
+              expectedRevision = reconciled.revision
+            }
+          }
           const result = await request(draftId, expectedRevision, context.controller.signal)
           if (
             accepts(context)
@@ -942,7 +963,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
           const cancelled = isCancellation(error)
           if (!cancelled && observeReadOnlyFailure(error, context, refreshGuard)) throw error
           const errorCode = apiErrorCode(error)
-          const conflict = errorCode === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT'
+          const conflict = errorCode === 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT' || error instanceof UnconfirmedSaveConflict
           const benign = errorCode !== null && options.benignErrorCodes?.includes(errorCode) === true
           const shouldReload = !benign && !options.pipeline && (conflict || options.reloadAfterFailure === true)
           const refreshed = accepts(context) && !cancelled && shouldReload
@@ -1050,14 +1071,80 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     if (adoptFileRevision(draftId, result.revision, context)) upsertFile(result.file)
   }
 
+  async function reconcileUnconfirmedSave(
+    draftId: string, context: RequestContext, pipeline?: FilePipeline,
+  ): Promise<ReimbursementDraft | null> {
+    const previous = unconfirmedSave
+    if (!previous || previous.draftId !== draftId || previous.epoch !== lifecycleEpoch
+      || previous.intent !== currentIntentVersion) return null
+    const readback = await getReimbursementDraft(draftId, { signal: context.controller.signal })
+    if (!accepts(context) || previous.epoch !== lifecycleEpoch
+      || previous.intent !== currentIntentVersion || currentDraft.value?.id !== draftId
+      || (pipeline && !isFilePipelineActive(pipeline.id))) {
+      throw new DOMException('Save context changed', 'AbortError')
+    }
+    const signature = inputSignature(readback.input)
+    if (readback.id !== draftId || !['DRAFT', 'REVIEW_READY'].includes(readback.status)
+      || readback.workspaceRetired || readback.recoveryPending
+      || JSON.stringify(readback.relatedApprovals) !== previous.approvals
+      || (signature !== previous.attempted && signature !== previous.baseline)) {
+      throw new UnconfirmedSaveConflict('报销内容已发生变化，请核对最新报销内容')
+    }
+    if (!adoptDraft(readback, context, draftId)) {
+      throw new DOMException('Save context changed', 'AbortError')
+    }
+    // The first upload starts its pipeline before this read. Its baseline may
+    // advance only to this proven result of our own save, before any file runs.
+    if (pipeline) pipeline.inputSignature = JSON.stringify(readback.input)
+    if (unconfirmedSave === previous) unconfirmedSave = null
+    return readback
+  }
+
+  function acknowledgeDraftInput(draftId: string, revision: number): void {
+    // A full form hydration has adopted this server input. An automatic
+    // readback alone must not abandon the unresolved write's comparison base.
+    if (currentDraft.value?.id !== draftId || currentDraft.value.revision !== revision) return
+    if (unconfirmedSave?.draftId === draftId && unconfirmedSave.epoch === lifecycleEpoch
+      && unconfirmedSave.intent === currentIntentVersion) unconfirmedSave = null
+  }
+
   async function saveDraft(input: ReimbursementDraftInput): Promise<ReimbursementDraft> {
+    const payload = JSON.parse(JSON.stringify(input)) as ReimbursementDraftInput
+    const desired = inputSignature(payload)
     return mutateCurrent(
-      (draftId, revision, signal) => updateReimbursementDraft(
-        draftId,
-        revision,
-        input,
-        { signal },
-      ),
+      async (draftId, revision, signal) => {
+        const epoch = lifecycleEpoch
+        const intent = currentIntentVersion
+        const acceptsSave = () => !signal.aborted && epoch === lifecycleEpoch
+          && intent === currentIntentVersion && currentDraft.value?.id === draftId
+        const editable = (draft: ReimbursementDraft) => draft.id === draftId
+          && ['DRAFT', 'REVIEW_READY'].includes(draft.status) && !draft.workspaceRetired && !draft.recoveryPending
+        const baseline = requireCurrentDraft()
+        const previous = unconfirmedSave
+        const attempt: UnconfirmedSave = {
+          draftId, epoch, intent, baseline: inputSignature(baseline.input), attempted: desired,
+          approvals: JSON.stringify(baseline.relatedApprovals),
+        }
+        try {
+          const result = await updateReimbursementDraft(draftId, revision, payload, { signal })
+          if (acceptsSave() && unconfirmedSave === previous) unconfirmedSave = null
+          return result
+        } catch (error) {
+          const uncertain = !isCancellation(error) && (apiErrorCode(error) === null
+            || (axios.isAxiosError(error) && (error.response?.status ?? 0) >= 500))
+          if (!uncertain || !acceptsSave()) throw error
+          unconfirmedSave = attempt
+          let readback: ReimbursementDraft | null = null
+          try { readback = await getReimbursementDraft(draftId, { signal }) } catch { /* Retry reconciles before another write. */ }
+          if (readback && acceptsSave() && editable(readback)
+            && JSON.stringify(readback.relatedApprovals) === attempt.approvals
+            && inputSignature(readback.input) === desired) {
+            if (unconfirmedSave === attempt) unconfirmedSave = null
+            return readback
+          }
+          throw error
+        }
+      },
       applyDraftMutation,
       '报销内容保存失败，请重试',
     )
@@ -1320,17 +1407,14 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     downloadingPreview.value = true
     mutationError.value = ''
     revisionConflict.value = false
+    const isCurrent = () => accepts(context) && intentVersion === currentIntentVersion
+      && requestVersion === previewRequestVersion && currentDraft.value?.id === draftId
+      && currentDraft.value.revision === revision
     try {
       const preview = await getReimbursementDraftExcelPreview(draftId, revision, {
         signal: context.controller.signal,
       })
-      if (
-        accepts(context)
-        && intentVersion === currentIntentVersion
-        && requestVersion === previewRequestVersion
-        && currentDraft.value?.id === draftId
-        && currentDraft.value.revision === revision
-      ) {
+      if (isCurrent()) {
         downloadBlob(preview.blob, preview.filename)
       }
     } catch (error) {
@@ -1389,21 +1473,20 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     downloadingPreview.value = true
     mutationError.value = ''
     revisionConflict.value = false
+    const isCurrent = () => accepts(context) && intentVersion === currentIntentVersion
+      && requestVersion === previewRequestVersion && currentDraft.value?.id === draftId
+      && currentDraft.value.revision === revision
     try {
       const ticket = await requestReimbursementDraftExcelPreviewTicket(draftId, revision, {
         signal: context.controller.signal,
       })
-      if (
-        !accepts(context)
-        || intentVersion !== currentIntentVersion
-        || requestVersion !== previewRequestVersion
-        || currentDraft.value?.id !== draftId
-        || currentDraft.value.revision !== revision
-      ) return
+      if (!isCurrent()) return
       await downloadAndOpenDingTalkDocument({
         url: new URL(ticket.downloadUrl, window.location.origin).href,
         headers: { 'X-Reimbursement-Download-Token': ticket.downloadToken },
         fileType: ticket.fileType,
+        signal: context.controller.signal,
+        isCurrent,
       })
     } catch (error) {
       if (observeReadOnlyFailure(error, context, refreshGuard)) throw error
@@ -1448,6 +1531,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   function reset(): void {
     if (filePipeline) cancelFilePipeline(filePipeline.id)
     lifecycleEpoch += 1
+    unconfirmedSave = null
     mutationQueue = null
     currentIntentVersion += 1
     draftCollectionVersion += 1
@@ -1532,6 +1616,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     createDraft,
     recoverDraft,
     saveDraft,
+    acknowledgeDraftInput,
     deleteDraft,
     deleteCurrentDraft,
     saveRelatedApprovals,

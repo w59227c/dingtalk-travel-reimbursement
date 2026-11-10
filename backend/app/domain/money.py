@@ -4,6 +4,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 MONEY_QUANTUM = Decimal("0.01")
 MAX_REIMBURSEMENT_AMOUNT = Decimal("999999999999.99")
+MAX_ORIGINAL_AMOUNT = Decimal("999999999999999.99")
 
 _DIGITS = "零壹贰叁肆伍陆柒捌玖"
 _SMALL_UNITS = ("", "拾", "佰", "仟")
@@ -11,6 +12,14 @@ _GROUP_UNITS = ("", "万", "亿")
 
 
 def quantize_money(value: Decimal) -> Decimal:
+    return _quantize_amount(value, maximum=MAX_REIMBURSEMENT_AMOUNT)
+
+
+def quantize_original_amount(value: Decimal) -> Decimal:
+    return _quantize_amount(value, maximum=MAX_ORIGINAL_AMOUNT)
+
+
+def _quantize_amount(value: Decimal, *, maximum: Decimal) -> Decimal:
     if not isinstance(value, Decimal):
         raise TypeError("money values must be Decimal")
     if not value.is_finite():
@@ -18,13 +27,17 @@ def quantize_money(value: Decimal) -> Decimal:
     rounded = value.quantize(MONEY_QUANTUM, rounding=ROUND_HALF_UP)
     if rounded < 0:
         raise ValueError("money values must not be negative")
-    if rounded > MAX_REIMBURSEMENT_AMOUNT:
+    if rounded > maximum:
         raise ValueError("money value exceeds supported limit")
     return rounded
 
 
 def money_string(value: Decimal) -> str:
     return format(quantize_money(value), ".2f")
+
+
+def original_amount_string(value: Decimal) -> str:
+    return format(quantize_original_amount(value), ".2f")
 
 
 def _four_digit_group(value: int) -> str:

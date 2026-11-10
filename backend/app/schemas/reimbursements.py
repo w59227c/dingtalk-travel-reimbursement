@@ -13,7 +13,12 @@ from pydantic import (
 )
 
 from app.domain.categories import ExpenseCategory
-from app.domain.money import MAX_REIMBURSEMENT_AMOUNT, quantize_money
+from app.domain.money import (
+    MAX_ORIGINAL_AMOUNT,
+    MAX_REIMBURSEMENT_AMOUNT,
+    quantize_money,
+    quantize_original_amount,
+)
 from app.domain.subsidy import MAX_ATTENDANCE_DATES, AdjustmentType
 from app.schemas.excel import ExcelGenerateRequest, ManualProjectInput, SelectedProjectInput
 from app.schemas.expenses import MAX_EXPENSE_ITEMS_HARD_LIMIT, TripPurpose
@@ -34,7 +39,8 @@ class ReimbursementEditingExcludedPeriodInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     adjustment_type: AdjustmentType = Field(
-        default=AdjustmentType.TEMPORARY_ABSENCE, alias="type",
+        default=AdjustmentType.TEMPORARY_ABSENCE,
+        alias="type",
         exclude_if=lambda value: value == AdjustmentType.TEMPORARY_ABSENCE,
     )
 
@@ -95,6 +101,15 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
     date: StrictCalendarDate | None = None
     display_date: str = Field(default="", alias="displayDate", max_length=100)
     description: str = Field(default="", max_length=500)
+    date_edited: bool = Field(
+        default=False, alias="dateEdited", strict=True, exclude_if=lambda value: not value
+    )
+    description_edited: bool = Field(
+        default=False,
+        alias="descriptionEdited",
+        strict=True,
+        exclude_if=lambda value: not value,
+    )
     amount: DecimalString | None = Field(default=None, ge=0, le=MAX_REIMBURSEMENT_AMOUNT)
     receipt_count: int = Field(default=1, alias="receiptCount", ge=1, le=10_000)
     itinerary_file_ids: list[str] = Field(
@@ -124,7 +139,7 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
         default=None, alias="originalCurrency", pattern=r"^[A-Z]{3}$"
     )
     original_amount: DecimalString | None = Field(
-        default=None, alias="originalAmount", ge=0, le=Decimal("999999999999999.99")
+        default=None, alias="originalAmount", ge=0, le=MAX_ORIGINAL_AMOUNT
     )
     original_details_edited: bool = Field(
         default=False,
@@ -147,13 +162,22 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
     def strip_editing_text(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("amount", "original_amount")
+    @field_validator("amount")
     @classmethod
     def normalize_amount(cls, value: Decimal | None) -> Decimal | None:
         if value is not None:
             if value.as_tuple().exponent < -2:
                 raise ValueError("amount supports at most two decimal places")
             return quantize_money(value)
+        return value
+
+    @field_validator("original_amount")
+    @classmethod
+    def normalize_original_amount(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None:
+            if value.as_tuple().exponent < -2:
+                raise ValueError("original amount supports at most two decimal places")
+            return quantize_original_amount(value)
         return value
 
     @field_validator("category")
@@ -258,7 +282,9 @@ class CreateReimbursementDraftRequest(BaseModel):
     expected_revision: int = Field(alias="expectedRevision", ge=0, le=0, strict=True)
     reuse_existing: bool = Field(default=False, alias="reuseExisting", strict=True)
     expected_department_id: str | None = Field(
-        default=None, alias="expectedDepartmentId", max_length=128,
+        default=None,
+        alias="expectedDepartmentId",
+        max_length=128,
     )
     expected_department_name: str | None = Field(
         default=None,

@@ -28,6 +28,7 @@ import {
   replaceReimbursementRelatedApprovals,
   submitOaReimbursement,
   updateReimbursementDraft,
+  uploadReimbursementDraftFile,
 } from '@/api/reimbursements'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
@@ -455,6 +456,23 @@ async function openReviewStep(wrapper: VueWrapper, mobile: boolean): Promise<voi
 }
 
 describe('ReimburseView single-form OA flow', () => {
+  it.each([false, true])('shows accounting and approved dates before submission and links back to approvals, mobile=%s', async (mobile) => {
+    serverDraft.input = canonicalNoSubsidyInput()
+    serverDraft.relatedApprovals = [structuredClone(linkedApproval)]
+    serverDraft.relatedApprovalCount = 1
+    const { wrapper } = await mountView(undefined, false, mobile)
+    if (mobile) await wrapper.findAll('.mobile-step-nav button')[3]!.trigger('click')
+    const overview = wrapper.get('[data-testid="review-overview"]')
+    expect(overview.text()).toContain(options.companyOptions[0]!.label)
+    expect(overview.text()).toContain(options.budgetCodeOptions[0]!.label)
+    expect(overview.text()).toContain(serverDraft.relatedApprovals[0]!.startDate)
+    expect(overview.text()).toContain(serverDraft.relatedApprovals[0]!.endDate)
+    expect(overview.text()).toContain('已关联 1 张审批')
+    await overview.get('button').trigger('click')
+    if (mobile) expect(wrapper.findAll('.mobile-step-nav button')[0]!.attributes('aria-current')).toBe('step')
+    expect(submitOaReimbursement).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
   it.each([false, true])('shows settings only to administrators and links the correct presentation (mobile=%s)', async (mobile) => {
     let authority!: ReturnType<typeof useAuthStore>
     const { wrapper } = await mountView((auth) => { authority = auth; auth.session!.isAdmin = false }, false, mobile)
@@ -963,6 +981,27 @@ describe('ReimburseView single-form OA flow', () => {
     expect(checklist.text()).toContain('票据尚未加入费用明细')
     expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeDefined()
     expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toContain('请先处理全部待确认或未完成的材料')
+    wrapper.unmount()
+  })
+
+  it.each([false, true].flatMap(mobile => [
+    ['itinerary', 'itineraryFileIds'], ['payment_proof', 'paymentProofFileIds'], ['hotel_bill', 'hotelBillFileIds'],
+  ].map(([kind, field]) => ({ mobile, kind, field }))))('blocks unassociated $kind for preview and submit until associated (mobile=$mobile)', async ({ mobile, kind, field }) => {
+    vi.useFakeTimers()
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    await openReviewStep(wrapper, mobile)
+    drafts.files.push({ ...activeFile, id: 'unlinked-proof', role: 'ATTACHMENT_ONLY',
+      attachmentKind: kind as 'itinerary' | 'payment_proof' | 'hotel_bill' })
+    await nextTick()
+    expect(wrapper.get('[data-testid="material-checklist"]').text()).toContain('尚未关联费用')
+    expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeDefined()
+    expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toContain('待关联材料')
+    Object.assign(expense.items[0]!, { [field!]: ['unlinked-proof'] })
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="material-checklist"]').exists()).toBe(false)
+    expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeUndefined()
+    expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toBe('')
     wrapper.unmount()
   })
 
@@ -3088,7 +3127,7 @@ describe('ReimburseView single-form OA flow', () => {
       items: [serverDraft, unused, expired], offset: 0, limit: 50, total: 3,
     })
     vi.mocked(listReimbursementSubmissionHistory).mockResolvedValue([
-      { id: submitted.id, lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 1 },
+      { id: submitted.id, lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 1, totalAmount: '1280.50', budgetLabel: '26007 · 合成项目' },
     ])
     vi.mocked(getReimbursementDraft).mockImplementation(async (id) => id === submitted.id ? submitted : serverDraft)
     vi.mocked(listReimbursementDraftFiles).mockImplementation(async (id) => id === submitted.id
@@ -3107,10 +3146,12 @@ describe('ReimburseView single-form OA flow', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('最近 10 笔成功提交')
     const list = wrapper.get('[data-testid="reimbursement-history"]')
+    expect(list.text()).toContain('¥1280.50')
+    expect(list.text()).toContain('26007 · 合成项目')
     expect(list.text()).not.toContain('草稿')
     expect(list.text()).not.toContain('已过期')
     expect(list.findAll('button')).toHaveLength(1)
-    await visibleButton(wrapper, '查看提交').trigger('click')
+    await visibleButton(wrapper, '查看明细').trigger('click')
     await flushPromises()
     expect(drafts.currentDraft?.id).toBe(submitted.id)
     expect(wrapper.get('[data-testid="submission-status"]').text()).toContain('审批已成功发起')
@@ -4041,7 +4082,7 @@ describe('ReimburseView single-form OA flow', () => {
     } else {
       await visibleButton(wrapper, '报销记录').trigger('click')
       await flushPromises()
-      await visibleButton(wrapper, '查看提交').trigger('click')
+      await visibleButton(wrapper, '查看明细').trigger('click')
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe(submitted.id)
       await visibleButton(wrapper, '返回当前报销').trigger('click')
@@ -4442,7 +4483,7 @@ describe('ReimburseView single-form OA flow', () => {
       const { wrapper, drafts } = await mountView(undefined, false, mobile)
       await visibleButton(wrapper, '报销记录').trigger('click')
       await flushPromises()
-      await visibleButton(wrapper, '查看提交').trigger('click')
+      await visibleButton(wrapper, '查看明细').trigger('click')
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe(historical.id)
       const workspaceReads = vi.mocked(listWorkspaceReimbursements).mock.calls.length
@@ -4562,4 +4603,201 @@ describe('ReimburseView single-form OA flow', () => {
     },
   )
 
+  it.each([false, true])('accepts its own saved content after a lost autosave response, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    try {
+      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision, input) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(input) }
+        // Real readback adds server-derived data, defaults and decimal formatting.
+        serverDraft.input.project = { mode: 'manual', text: '服务端预算完整标签' }
+        serverDraft.input.accountingSourceVerified = true
+        serverDraft.input.items[0]!.amount = '44.80'
+        throw new Error('Synthetic committed response lost')
+      })
+      expense.items[0]!.amount = '44.8'
+      expense.items[0]!.description = '合成员工已保存的修改'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      expect(drafts.currentDraft?.revision).toBe(2)
+      expect(drafts.revisionConflict).toBe(false)
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+      expect(wrapper.find('[data-testid="autosave-error"]').exists()).toBe(false)
+      expect(expense.items[0]!.description).toBe('合成员工已保存的修改')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each([false, true])('reconciles an unconfirmed earlier save before saving newer local edits, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    try {
+      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision, input) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(input) }
+        vi.mocked(getReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic readback unavailable'))
+        throw new Error('Synthetic committed response lost')
+      })
+      expense.items[0]!.description = '第一次已保存但响应丢失'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      expect(drafts.currentDraft?.revision).toBe(1)
+      expense.items[0]!.description = '断连后继续填写的新内容'
+      await nextTick()
+      await visibleButton(wrapper, '重试保存').trigger('click')
+      await flushPromises()
+      expect(drafts.revisionConflict).toBe(false)
+      expect(serverDraft.input.items[0]!.description).toBe('断连后继续填写的新内容')
+      expect(expense.items[0]!.description).toBe('断连后继续填写的新内容')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each([false, true])('protects a concurrent server edit after an unconfirmed save, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    try {
+      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision, input) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(input) }
+        vi.mocked(getReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic readback unavailable'))
+        throw new Error('Synthetic committed response lost')
+      })
+      expense.items[0]!.description = '本页第一次保存'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      serverDraft = structuredClone(serverDraft)
+      serverDraft.revision += 1
+      serverDraft.input.items[0]!.description = '另一页面已保存的内容'
+      expense.items[0]!.description = '本页断连后继续修改'
+      await nextTick()
+      await visibleButton(wrapper, '重试保存').trigger('click')
+      await flushPromises()
+      expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+      expect(serverDraft.input.items[0]!.description).toBe('另一页面已保存的内容')
+      expect(drafts.revisionConflict).toBe(true)
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each([false, true])('reconciles an unconfirmed save before deleting a material, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    const extraFile = { ...activeFile, id: 'extra-attachment', role: 'ATTACHMENT_ONLY' as const }
+    serverFiles.push(extraFile)
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    try {
+      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision, input) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(input) }
+        vi.mocked(getReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic readback unavailable'))
+        throw new Error('Synthetic committed response lost')
+      })
+      expense.items[0]!.description = '已保存后继续处理材料'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      vi.mocked(deleteReimbursementDraftFile).mockImplementationOnce(async (_id, fileId, revision) => {
+        expect(revision).toBe(serverDraft.revision)
+        serverDraft = { ...serverDraft, revision: revision + 1 }
+        serverFiles = serverFiles.filter((file) => file.id !== fileId)
+        return { draftId: serverDraft.id, deletedFileId: fileId, revision: serverDraft.revision }
+      })
+      await drafts.removeFile(extraFile.id)
+      await flushPromises()
+      expect(drafts.currentDraft?.revision).toBe(3)
+      expect(serverDraft.input.items[0]!.description).toBe(expense.items[0]!.description)
+      expect(drafts.files.some((file) => file.id === extraFile.id)).toBe(false)
+      expect(drafts.revisionConflict).toBe(false)
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each([false, true])('reconciles an unconfirmed save before starting an upload pipeline, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    serverDraft.input = canonicalNoSubsidyInput()
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    try {
+      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision, input) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(input) }
+        vi.mocked(getReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic readback unavailable'))
+        throw new Error('Synthetic committed response lost')
+      })
+      expense.items[0]!.description = '已保存后继续上传材料'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      vi.mocked(uploadReimbursementDraftFile).mockImplementationOnce(async (_id, revision) => {
+        expect(revision).toBe(serverDraft.revision)
+        const file = { ...activeFile, id: 'uploaded-after-save' }
+        serverDraft = { ...serverDraft, revision: revision + 1 }
+        serverFiles.push(file)
+        return { draftId: serverDraft.id, revision: serverDraft.revision, file }
+      }).mockRejectedValueOnce(new Error('Synthetic second upload interrupted'))
+      const pipeline = drafts.beginFilePipeline()
+      await drafts.uploadFile(new File(['synthetic'], 'synthetic.png'), 'EXPENSE_SOURCE', 'other', true, pipeline)
+      // Force the batch-end consistency read to verify the reconciled baseline.
+      await drafts.uploadFile(new File(['synthetic'], 'retry.png'), 'EXPENSE_SOURCE', 'other', true, pipeline)
+        .catch(() => undefined)
+      expect(await drafts.finishFilePipeline(pipeline)).toBe(true)
+      expect(drafts.currentDraft?.revision).toBe(3)
+      expect(drafts.revisionConflict).toBe(false)
+      expect(expense.items[0]!.description).toBe('已保存后继续上传材料')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it.each([false, true])('continues editing after explicitly adopting the latest input following an unconfirmed save, mobile=%s', async (mobile) => {
+    vi.useFakeTimers()
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    try {
+      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision, input) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(input) }
+        vi.mocked(getReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic readback unavailable'))
+        throw new Error('Synthetic committed response lost')
+      })
+      expense.items[0]!.description = 'Synthetic first save'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      serverDraft = structuredClone(serverDraft)
+      serverDraft.revision += 1
+      serverDraft.input.items[0]!.description = 'Synthetic concurrent server change'
+      expense.items[0]!.description = 'Synthetic unsaved local change'
+      await nextTick()
+      await visibleButton(wrapper, '重试保存').trigger('click')
+      await flushPromises()
+      expect(drafts.revisionConflict).toBe(true)
+      vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+        .mockResolvedValueOnce('confirm' as never)
+      await visibleButton(wrapper, '核对最新报销内容').trigger('click')
+      await flushPromises()
+      expect(drafts.revisionConflict).toBe(true)
+      expect(expense.items[0]!.description).toBe('Synthetic unsaved local change')
+      await visibleButton(wrapper, '核对最新报销内容').trigger('click')
+      await flushPromises()
+      expect(drafts.revisionConflict).toBe(false)
+      expect(expense.items[0]!.description).toBe('Synthetic concurrent server change')
+      expense.items[0]!.description = 'Synthetic new edit after accepted reload'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      expect(drafts.revisionConflict).toBe(false)
+      expect(updateReimbursementDraft).toHaveBeenCalledTimes(2)
+      expect(serverDraft.input.items[0]!.description).toBe('Synthetic new edit after accepted reload')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+    } finally { wrapper.unmount() }
+  })
 })

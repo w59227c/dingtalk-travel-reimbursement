@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import Select, delete, exists, func, select, update
+from sqlalchemy import Select, delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -146,12 +147,19 @@ def require_previewable_draft(
     *,
     draft_id: str,
     actor: DraftActor,
+    expected_revision: int | None = None,
 ) -> ReimbursementDraft:
     draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    if expected_revision is not None and draft.revision != expected_revision:
+        raise _revision_conflict_error()
     # Historical locked snapshots remain previewable after workspace retirement.
     # Every editable preview must still belong to a live, completed workspace.
     if draft.status != ReimbursementDraftStatus.LOCKED.value or draft.recovery_pending:
         _require_mutable(draft, now=utc_now())
+        files = database.scalars(
+            select(ReimbursementDraftFile).where(ReimbursementDraftFile.draft_id == draft.id)
+        ).all()
+        _validate_linked_support_files(_stored_input(draft), files)
     return draft
 
 
@@ -357,29 +365,34 @@ def list_reimbursement_submission_history(
     *,
     actor: DraftActor,
 ) -> list[dict[str, object]]:
-    rows = database.scalars(
+    from app.services.oa_reimbursement_payload import parse_locked_submission_snapshot
+
+    rows = database.execute(
         _department_drafts(actor)
+        .add_columns(ReimbursementSubmission)
+        .join(ReimbursementSubmission, ReimbursementSubmission.draft_id == ReimbursementDraft.id)
         .where(
             ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
             ReimbursementDraft.locked_at.is_not(None),
-            exists().where(
-                ReimbursementSubmission.draft_id == ReimbursementDraft.id,
-                ReimbursementSubmission.corp_id == actor.corp_id,
-                ReimbursementSubmission.originator_user_id == actor.user_id,
-                ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
-            ),
+            ReimbursementSubmission.corp_id == actor.corp_id,
+            ReimbursementSubmission.originator_user_id == actor.user_id,
+            ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
         )
         .order_by(ReimbursementDraft.locked_at.desc(), ReimbursementDraft.id.desc())
         .limit(10)
     ).all()
-    return [
-        {
+    results = []
+    for draft, submission in rows:
+        # Never recalculate successful history with current rates or options.
+        snapshot = parse_locked_submission_snapshot(draft, submission)
+        results.append({
             "id": draft.id,
             "lockedAt": _timestamp(draft.locked_at),
             "relatedApprovalCount": _related_id_count(draft.related_instance_ids_json),
-        }
-        for draft in rows
-    ]
+            "totalAmount": format(snapshot.totals.total_amount, ".2f"),
+            "budgetLabel": snapshot.selections.budget_code.label,
+        })
+    return results
 
 
 def _department_drafts(actor: DraftActor) -> Select[tuple[ReimbursementDraft]]:
@@ -714,6 +727,7 @@ def validate_draft_file_references(
     draft_input: ReimbursementDraftInput,
     require_terminal_disposition: bool = False,
     require_submission_proofs: bool = False,
+    require_linked_support_files: bool = True,
 ) -> None:
     """Validate receipt provenance without revealing another draft's files."""
 
@@ -783,6 +797,8 @@ def validate_draft_file_references(
                 raise _invalid_file_reference_error()
     if require_submission_proofs:
         validate_submission_evidence(draft_input, files_by_id)
+    if require_linked_support_files and (require_terminal_disposition or require_submission_proofs):
+        _validate_linked_support_files(draft_input, files)
 
     if not require_terminal_disposition:
         return
@@ -798,6 +814,27 @@ def validate_draft_file_references(
     }
     if not terminal_ids.issubset(reference_ids):
         raise _not_ready_error("请确认每张已识别票据的费用明细，或明确忽略识别结果")
+
+
+def _validate_linked_support_files(
+    draft_input: ReimbursementDraftInput, files: Sequence[ReimbursementDraftFile],
+) -> None:
+    for kind, field, label in (
+        ("itinerary", "itinerary_file_ids", "行程单"),
+        ("payment_proof", "payment_proof_file_ids", "付款凭证"),
+        ("hotel_bill", "hotel_bill_file_ids", "住宿明细"),
+    ):
+        linked = {file_id for item in draft_input.items for file_id in getattr(item, field)}
+        if any(
+            file.file_status == ReimbursementDraftFileStatus.ACTIVE.value
+            and file.processing_role == ReimbursementDraftFileRole.ATTACHMENT_ONLY.value
+            and file.attachment_kind == kind
+            and file.id not in linked
+            for file in files
+        ):
+            raise _not_ready_error(
+                f"还有未关联费用的{label}，请关联费用、修改用途或删除后再预览和提交"
+            )
 
 
 def validate_submission_evidence(

@@ -14,6 +14,7 @@ export interface ExpenseSettings {
 }
 
 export interface AdminExpenseSettings extends ExpenseSettings {
+  revision: string
   adminUserIds: string[]
   environmentAdminUserIds: string[]
 }
@@ -52,6 +53,7 @@ export async function updateExpenseSettings(
     }),
   ) as SubsidyRates
   const response = await http.put<ApiEnvelope<AdminExpenseSettings>>('/admin/settings', {
+    expectedRevision: input.revision,
     appTitle: input.appTitle,
     adminUserIds: input.adminUserIds,
     subsidyRates: normalizedRates,

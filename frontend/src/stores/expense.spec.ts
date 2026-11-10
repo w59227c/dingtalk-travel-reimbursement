@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { calculateTotals, getExpenseCategories } from '@/api/expenses'
 import { useExpenseStore } from '@/stores/expense'
+import { expenseReviewWarnings } from '@/utils/expenseReview'
+import { inputSignature } from '@/utils/reimbursementInput'
 import type { OcrReceiptCandidate } from '@/types/receipts'
 import type {
   ReimbursementDraft,
@@ -388,7 +390,71 @@ describe('expense store', () => {
       description: '人工修改后的行程',
       amount: '455.00',
       receiptCount: 1,
+      dateEdited: true,
+      descriptionEdited: true,
     })])
+  })
+
+  it('preserves explicit field edits through API serialization and ignores newer OCR differences as edit evidence', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('review-date')
+    source.ocrResult.warnings = ['INVOICE_DATE_USED_AS_OCCURRENCE', 'MISSING_ROUTE']
+    store.upsertDraftOcrItem(source)
+    store.upsertManualItem({ ...store.items[0]!, description: '人工补充用途' })
+    expect(store.buildDraftExpenseItems()[0]).not.toHaveProperty('dateEdited')
+    const saved = durableDraft(store.buildDraftExpenseItems())
+    // The API omits false edit markers and writes explicit null optional values.
+    const serialized = { ...saved.input, items: saved.input.items.map(item => ({ ...item,
+      dateEdited: item.dateEdited ?? false, descriptionEdited: item.descriptionEdited ?? false,
+      originalCurrency: item.originalCurrency, originalAmount: item.originalAmount })) }
+    expect(inputSignature(serialized)).toBe(inputSignature(saved.input))
+    const newer = structuredClone(source)
+    newer.ocrResult.date = '2026-09-03'
+    store.hydrateFromDraft({ ...saved, input: serialized }, [newer])
+    expect(expenseReviewWarnings(store.items[0]!, [newer])).toEqual(['INVOICE_DATE_USED_AS_OCCURRENCE'])
+    store.upsertManualItem({ ...store.items[0]!, date: '2026-09-02', displayDate: '2026-09-02' })
+    const corrected = durableDraft(store.buildDraftExpenseItems())
+    store.hydrateFromDraft(corrected, [newer])
+    expect(expenseReviewWarnings(store.items[0]!, [newer])).toEqual([])
+    expect(store.buildDraftExpenseItems()).toEqual(corrected.input.items)
+    expect(store.hasEmployeeEditsForOcrFile(newer)).toBe(true)
+  })
+
+  it('keeps CNY confirmation stable across a foreign re-recognition and hydration without requiring original currency', () => {
+    const store = useExpenseStore()
+    const source = durableFile('review-foreign')
+    store.upsertDraftOcrItem(source)
+    store.items[0]!.description = '人工补充用途'
+    expect(store.hasEmployeeEditsForOcrFile(source)).toBe(true)
+    const saved = durableDraft(store.buildDraftExpenseItems())
+    const newer = structuredClone(source)
+    Object.assign(newer.ocrResult, { type: 'foreign_receipt', originalCurrency: 'USD', warnings: ['FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT'] })
+    const before = expenseReviewWarnings(store.items[0]!, [newer])
+    expect(before).toContain('FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT')
+    store.hydrateFromDraft(saved, [newer])
+    expect(expenseReviewWarnings(store.items[0]!, [newer])).toEqual(before)
+    store.items[0]!.originalCurrency = undefined
+    store.items[0]!.originalDetailsEdited = true
+    store.items[0]!.cnyAmountConfirmed = true
+    expect(expenseReviewWarnings(store.items[0]!, [newer])).not.toContain('FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT')
+    const confirmed = durableDraft(store.buildDraftExpenseItems())
+    store.hydrateFromDraft(confirmed, [newer])
+    expect(expenseReviewWarnings(store.items[0]!, [newer])).not.toContain('FOREIGN_CURRENCY_REQUIRES_CNY_AMOUNT')
+    expect(store.items[0]!.originalCurrency).toBeUndefined()
+  })
+
+  it('does not count a normalized display-date range as an explicit occurrence-date edit', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('review-range')
+    source.ocrResult.warnings = ['INVOICE_DATE_USED_AS_OCCURRENCE']
+    store.upsertDraftOcrItem(source)
+    const previous = store.items[0]!
+    previous.displayDate = '2026-09-01 至 2026-09-02'
+    store.upsertManualItem({ ...previous, displayDate: previous.date!, description: '只修正说明' })
+    expect(store.items[0]!.dateEdited).toBe(false)
+    expect(expenseReviewWarnings(store.items[0]!, [source])).toContain('INVOICE_DATE_USED_AS_OCCURRENCE')
   })
 
   it('keeps id and source for totals and draft persistence', async () => {

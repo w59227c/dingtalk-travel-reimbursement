@@ -89,6 +89,10 @@ def failed_form(client, *, recognized_materials=False):
                     ),
                 )
             )
+            draft = database.get(ReimbursementDraft, identifier)
+            data = json.loads(draft.input_json)
+            data["items"][0]["itineraryFileIds"] = [itinerary.id]
+            draft.input_json = json.dumps(data)
             database.commit()
     submitted = client.post(
         f"/api/oa/reimbursements/{identifier}/submit",
@@ -193,6 +197,10 @@ def test_recovery_rebinds_receipt_and_itinerary_ocr_without_changing_source(
     target_id = result.json()["data"]["id"]
     restored = client.get(f"/api/reimbursements/drafts/{target_id}/files").json()["data"]["items"]
     assert len(restored) == 2
+    restored_itinerary = next(file for file in restored if file["attachmentKind"] == "itinerary")
+    assert result.json()["data"]["input"]["items"][0]["itineraryFileIds"] == [
+        restored_itinerary["id"]
+    ]
     for file in restored:
         expected = json.loads(original_results[file["name"]][1])
         expected["fileId"] = file["id"]

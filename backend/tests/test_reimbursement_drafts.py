@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import timedelta
 from threading import Barrier
 from types import SimpleNamespace
@@ -511,6 +512,29 @@ def test_open_current_draft_skips_records_outside_current_scope(
 
 
 def _add_history_submission(database, draft, *, status="QUEUED", resume_status=None):
+    from app.models.reimbursement import new_uuid
+    draft.id = draft.id or new_uuid()
+    frozen = None
+    if status == "SUBMITTED":
+        from test_oa_reimbursement_payload import _source
+
+        from app.services.oa_reimbursement_payload import build_snapshot
+
+        source = _source()
+        catalog = replace(source.catalog, config_version=draft.template_config_version)
+        frozen = build_snapshot(replace(
+            source,
+            draft_id=draft.id,
+            catalog=catalog,
+            identity=source.identity.model_copy(update={
+                "corp_id": draft.corp_id, "user_id": draft.owner_user_id,
+                "department_id": draft.department_id, "department_name": draft.department_name,
+            }),
+            related_approvals=tuple(replace(row, catalog_config_version=catalog.config_version)
+                                    for row in source.related_approvals),
+        ))
+        draft.revision = frozen.draft_revision + 1
+        draft.template_process_code = frozen.template.process_code
     database.add(draft)
     database.flush()
     completed = status == "SUBMITTED"
@@ -549,6 +573,11 @@ def _add_history_submission(database, draft, *, status="QUEUED", resume_status=N
         orphan_confirmed_at=observed_at if status == "ORPHAN_CLEANUP" else None,
         orphan_confirmation_code="synthetic-not-created" if status == "ORPHAN_CLEANUP" else None,
     )
+    if frozen is not None:
+        from app.services.oa_reimbursement_payload import serialize_snapshot, snapshot_sha256
+        submission.snapshot_version = frozen.snapshot_version
+        submission.form_snapshot_json = serialize_snapshot(frozen)
+        submission.snapshot_sha256 = snapshot_sha256(frozen)
     database.add(submission)
     database.flush()
     if completed:
@@ -654,7 +683,11 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
     assert [record["id"] for record in records] == [
         f"synthetic-submission-{index:02d}" for index in range(11, 1, -1)
     ]
-    assert all(set(record) == {"id", "lockedAt", "relatedApprovalCount"} for record in records)
+    assert all(set(record) == {
+        "id", "lockedAt", "relatedApprovalCount", "totalAmount", "budgetLabel",
+    } for record in records)
+    assert all(record["budgetLabel"] == "26007 项目" for record in records)
+    assert all(record["totalAmount"] != "0.00" for record in records)
     with client.app.state.database_session_factory() as database:
         assert database.get(ReimbursementDraft, "synthetic-submission-00") is not None
 
@@ -802,6 +835,45 @@ def test_employee_original_currency_edit_intent_is_persisted(
     loaded = client.get(f"/api/reimbursements/drafts/{draft['id']}")
     assert loaded.status_code == 200, loaded.text
     assert loaded.json()["data"]["input"]["items"][0]["originalDetailsEdited"] is True
+
+
+def test_explicit_review_field_edits_survive_save_and_reload(client_factory, monkeypatch):
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    value = _input()
+    value["items"][0].update(dateEdited=True, descriptionEdited=True)
+    created = client.post(
+        "/api/reimbursements/drafts",
+        json={"expectedRevision": 0, "input": value},
+        headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    saved = created.json()["data"]
+    loaded = client.get(f"/api/reimbursements/drafts/{saved['id']}")
+    assert loaded.status_code == 200, loaded.text
+    assert loaded.json()["data"]["input"] == saved["input"]
+    assert loaded.json()["data"]["input"]["items"][0]["dateEdited"] is True
+    assert loaded.json()["data"]["input"]["items"][0]["descriptionEdited"] is True
+    assert loaded.json()["data"]["totals"] == saved["totals"]
+
+
+@pytest.mark.parametrize("field", ["dateEdited", "descriptionEdited"])
+def test_review_edit_markers_are_strict_optional_display_metadata(field):
+    from pydantic import ValidationError
+
+    raw = _input()
+    original = reimbursement_drafts._canonical_input_data(
+        ReimbursementDraftInput.model_validate(raw)
+    )
+    raw["items"][0][field] = False
+    canonical_false = reimbursement_drafts._canonical_input_data(
+        ReimbursementDraftInput.model_validate(raw)
+    )
+    assert canonical_false == original
+    raw["items"][0][field] = "true"
+    with pytest.raises(ValidationError):
+        ReimbursementDraftInput.model_validate(raw)
 
 
 def test_canonical_draft_input_preserves_multiple_subsidy_trips() -> None:

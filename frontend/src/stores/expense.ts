@@ -77,6 +77,8 @@ function employeeEditableRecognitionSignature(item: ExpenseItem): string {
     originalDetailsEdited: item.originalDetailsEdited ?? false,
     cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
     requiresCnyConfirmation: item.requiresCnyConfirmation ?? false,
+    dateEdited: item.dateEdited ?? false,
+    descriptionEdited: item.descriptionEdited ?? false,
   })
 }
 
@@ -380,6 +382,10 @@ export const useExpenseStore = defineStore('expense', () => {
       amount: centsToMoney(amountCents),
       displayDate: input.displayDate.trim(),
       description: input.description.trim(),
+      dateEdited: existing?.dateEdited || Boolean(existing?.sourceFileId
+        && (existing.date ?? '') !== (input.date ?? '')),
+      descriptionEdited: existing?.descriptionEdited || Boolean(existing?.sourceFileId
+        && existing.description !== input.description.trim()),
       confidence: existing?.confidence,
       warnings: input.warnings,
     }
@@ -585,6 +591,8 @@ export const useExpenseStore = defineStore('expense', () => {
           ? persisted.displayDate.trim()
           : '',
         description: persistedDescription || candidate?.description || '',
+        dateEdited: persisted.dateEdited ?? false,
+        descriptionEdited: persisted.descriptionEdited ?? false,
         amount: amountCents === null ? '' : centsToMoney(amountCents),
         receiptCount: !(sourceFileId && ['DRAFT', 'REVIEW_READY'].includes(draft.status))
           && Number.isSafeInteger(persisted.receiptCount)
@@ -750,6 +758,8 @@ export const useExpenseStore = defineStore('expense', () => {
       date: item.date || null,
       displayDate: item.displayDate,
       description: item.description,
+      ...(item.dateEdited ? { dateEdited: true } : {}),
+      ...(item.descriptionEdited ? { descriptionEdited: true } : {}),
       amount: item.amount || null,
       receiptCount: item.receiptCount,
     }))

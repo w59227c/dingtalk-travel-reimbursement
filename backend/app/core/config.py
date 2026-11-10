@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlencode, urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     ocr_mode: Literal["local"] = "local"
 
     upload_ttl_minutes: int = 30
+    upload_receive_timeout_seconds: float = Field(default=90.0, gt=0, le=300, allow_inf_nan=False)
     temp_cleanup_interval_seconds: int = 600
     upload_max_file_bytes: int = 20 * 1024 * 1024
     upload_max_request_bytes: int = 25 * 1024 * 1024

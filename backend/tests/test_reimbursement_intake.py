@@ -130,7 +130,7 @@ def test_budget_option_ignores_client_project_and_full_label_reaches_excel(
         workbook.close()
 
 
-def _proof_setup(client_factory, monkeypatch):
+def _proof_setup(client_factory, monkeypatch, *, support_kind="other"):
     _install_catalog(monkeypatch)
     client = client_factory(auth_mock_enabled=True)
     headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
@@ -144,7 +144,7 @@ def _proof_setup(client_factory, monkeypatch):
         record_disposition=False,
     )
     with client.app.state.database_session_factory() as database:
-        database.get(ReimbursementDraftFile, support).attachment_kind = "itinerary"
+        database.get(ReimbursementDraftFile, support).attachment_kind = support_kind
         database.commit()
     return client, headers, draft_id, source, support
 
@@ -188,7 +188,9 @@ def test_employee_can_correct_ride_hailing_ocr_evidence(
 def test_employee_selected_ride_hailing_still_requires_an_itinerary(
     client_factory, monkeypatch
 ):
-    client, headers, draft_id, source, support = _proof_setup(client_factory, monkeypatch)
+    client, headers, draft_id, source, support = _proof_setup(
+        client_factory, monkeypatch, support_kind="itinerary",
+    )
     with client.app.state.database_session_factory() as database:
         value = ReimbursementDraftInput.model_validate(
             {

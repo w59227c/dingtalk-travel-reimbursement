@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import and_, delete, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.core.errors import ApiError
 from app.models.reimbursement import (
@@ -171,6 +171,27 @@ def admin_resume_manual_review_with_instance(
     ):
         raise ApiError("OA_ADMIN_RECOVERY_NOT_ALLOWED", "当前提交状态不能绑定审批编号", 409)
     if (
+        database.scalar(
+            select(ReimbursementUpload.id)
+            .where(
+                ReimbursementUpload.submission_id == current.id,
+                ReimbursementUpload.upload_status.in_(
+                    {
+                        ReimbursementUploadStatus.CLEANUP_PENDING.value,
+                        ReimbursementUploadStatus.CLEANED.value,
+                    }
+                ),
+            )
+            .limit(1)
+        )
+        is not None
+    ):
+        raise ApiError(
+            "OA_ADMIN_RECOVERY_NOT_ALLOWED",
+            "附件已进入清理，不能绑定审批；请核实 OA 未创建后继续清理",
+            409,
+        )
+    if (
         not current.oa_request_json
         or not current.oa_request_hash
         or not current.oa_create_started_at
@@ -184,8 +205,7 @@ def admin_resume_manual_review_with_instance(
             .where(
                 ReimbursementSubmission.id == current.id,
                 ReimbursementSubmission.corp_id == normalized_corp,
-                ReimbursementSubmission.status
-                == ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
+                ReimbursementSubmission.status == ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
                 ReimbursementSubmission.status_version == current.status_version,
                 ReimbursementSubmission.process_instance_id.is_(None),
                 ReimbursementSubmission.lease_token.is_(None),
@@ -293,8 +313,7 @@ def admin_confirm_manual_review_not_created(
             .where(
                 ReimbursementSubmission.id == current.id,
                 ReimbursementSubmission.corp_id == normalized_corp,
-                ReimbursementSubmission.status
-                == ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
+                ReimbursementSubmission.status == ReimbursementSubmissionStatus.MANUAL_REVIEW.value,
                 ReimbursementSubmission.status_version == current.status_version,
                 ReimbursementSubmission.process_instance_id.is_(None),
                 ReimbursementSubmission.lease_token.is_(None),
@@ -363,7 +382,7 @@ def _record_admin_recovery_audit(
     status_after: str,
     created_at: datetime,
 ) -> None:
-    """Stage one immutable audit row in the same transaction as the recovery CAS."""
+    """Stage an immutable decision for this status version with the recovery CAS."""
 
     database.add(
         ReimbursementSubmissionRecoveryAudit(
@@ -447,7 +466,8 @@ def _require_bundle_manifest(
         from app.services.oa_reimbursement_payload import generated_upload_manifest, parse_snapshot
 
         snapshot = parse_snapshot(
-            submission.form_snapshot_json, expected_sha256=submission.snapshot_sha256,
+            submission.form_snapshot_json,
+            expected_sha256=submission.snapshot_sha256,
         )
         if snapshot.snapshot_version != submission.snapshot_version:
             raise ReimbursementSubmissionConflict("submission snapshot version mismatch")
@@ -537,17 +557,20 @@ def create_submission(
         from app.services.oa_reimbursement_payload import parse_snapshot
 
         snapshot = parse_snapshot(canonical_snapshot, expected_sha256=snapshot_sha256)
-        if (snapshot.snapshot_version != snapshot_version or snapshot.draft_id != draft.id
-                or snapshot.draft_revision != expected_revision):
+        if (
+            snapshot.snapshot_version != snapshot_version
+            or snapshot.draft_id != draft.id
+            or snapshot.draft_revision != expected_revision
+        ):
             raise ReimbursementSubmissionConflict("submission snapshot identity mismatch")
         if snapshot_version >= 11:
             from app.schemas.expenses import TripInput
             from app.services.subsidy_calculation import require_attendance_calendars
 
             trips = snapshot.input.trips or ((snapshot.input.trip,) if snapshot.input.trip else ())
-            require_attendance_calendars(database, [
-                TripInput.model_validate(item.model_dump(mode="json")) for item in trips
-            ])
+            require_attendance_calendars(
+                database, [TripInput.model_validate(item.model_dump(mode="json")) for item in trips]
+            )
         excel_only = snapshot.attachment_mode == "excel_only"
         if excel_only and source_files:
             raise ReimbursementSubmissionConflict("Excel-only snapshot cannot omit source files")
@@ -2123,53 +2146,112 @@ def finalize_local_upload_release(
     return expected_status_version + 1
 
 
-def _bundled_source_release_query():
-    # A source is not a remote upload. Delete it only after the complete immutable
-    # two-file manifest has been read back, linked and marked SUBMITTED.
+def _bundled_source_release_query(release_at: datetime):
+    recovery = aliased(ReimbursementDraft)
+    pre_commit = _FAILED_FINAL_LOCAL_DISCARD_STATUSES | {ReimbursementUploadStatus.DISCARDED.value}
+    safe_pre_create = and_(
+        ReimbursementSubmission.oa_create_started_at.is_(None),
+        ~exists(
+            select(ReimbursementUpload.id).where(
+                ReimbursementUpload.submission_id == ReimbursementSubmission.id,
+                or_(
+                    ReimbursementUpload.upload_status.not_in(pre_commit),
+                    ReimbursementUpload.commit_started_at.is_not(None),
+                    ReimbursementUpload.space_id.is_not(None),
+                    ReimbursementUpload.file_id.is_not(None),
+                ),
+            )
+        ),
+    )
+    confirmed_cleanup = and_(
+        ReimbursementSubmission.orphan_confirmed_at.is_not(None),
+        ReimbursementSubmission.orphan_confirmation_code.is_not(None),
+        ~exists(
+            select(ReimbursementUpload.id).where(
+                ReimbursementUpload.submission_id == ReimbursementSubmission.id,
+                ReimbursementUpload.upload_status.not_in(
+                    {
+                        ReimbursementUploadStatus.CLEANED.value,
+                        ReimbursementUploadStatus.DISCARDED.value,
+                    }
+                ),
+            )
+        ),
+    )
+    expired_safe_failure = and_(
+        ReimbursementSubmission.status == ReimbursementSubmissionStatus.FAILED_FINAL.value,
+        ReimbursementSubmission.process_instance_id.is_(None),
+        ReimbursementSubmission.lease_token.is_(None),
+        ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
+        ReimbursementDraft.locked_at.is_not(None),
+        ReimbursementDraft.expires_at <= release_at,
+        or_(safe_pre_create, confirmed_cleanup),
+    )
+    # Original files are local sources, not remote uploads. Success requires the
+    # complete linked bundle; a definitive failure retains sources through TTL
+    # and releases them only with durable evidence that no remote uncertainty remains.
     return (
         select(ReimbursementDraftFile, ReimbursementSubmission)
         .join(
             ReimbursementSubmission,
             ReimbursementSubmission.draft_id == ReimbursementDraftFile.draft_id,
         )
+        .join(ReimbursementDraft, ReimbursementDraft.id == ReimbursementSubmission.draft_id)
         .where(
-            ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
-            ReimbursementSubmission.process_instance_id.is_not(None),
+            ~exists(
+                select(recovery.id).where(
+                    recovery.recovery_source_draft_id == ReimbursementDraft.id,
+                    recovery.recovery_pending.is_(True),
+                )
+            ),
             ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,
             ReimbursementDraftFile.size_bytes.is_not(None),
             ReimbursementDraftFile.sha256.is_not(None),
-            ~exists(
-                select(ReimbursementUpload.id).where(
-                    ReimbursementUpload.submission_id == ReimbursementSubmission.id,
-                    ReimbursementUpload.upload_status != ReimbursementUploadStatus.LINKED.value,
-                )
-            ),
-            exists(
-                select(ReimbursementUpload.id).where(
-                    ReimbursementUpload.submission_id == ReimbursementSubmission.id,
-                    ReimbursementUpload.role == ReimbursementUploadRole.GENERATED_PDF.value,
-                    ReimbursementUpload.upload_status == ReimbursementUploadStatus.LINKED.value,
-                )
-            ),
-            exists(
-                select(ReimbursementUpload.id).where(
-                    ReimbursementUpload.submission_id == ReimbursementSubmission.id,
-                    ReimbursementUpload.role == ReimbursementUploadRole.GENERATED_EXCEL.value,
-                    ReimbursementUpload.upload_status == ReimbursementUploadStatus.LINKED.value,
-                )
+            or_(
+                expired_safe_failure,
+                and_(
+                    ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
+                    ReimbursementSubmission.process_instance_id.is_not(None),
+                    ~exists(
+                        select(ReimbursementUpload.id).where(
+                            ReimbursementUpload.submission_id == ReimbursementSubmission.id,
+                            ReimbursementUpload.upload_status
+                            != ReimbursementUploadStatus.LINKED.value,
+                        )
+                    ),
+                    exists(
+                        select(ReimbursementUpload.id).where(
+                            ReimbursementUpload.submission_id == ReimbursementSubmission.id,
+                            ReimbursementUpload.role == ReimbursementUploadRole.GENERATED_PDF.value,
+                            ReimbursementUpload.upload_status
+                            == ReimbursementUploadStatus.LINKED.value,
+                        )
+                    ),
+                    exists(
+                        select(ReimbursementUpload.id).where(
+                            ReimbursementUpload.submission_id == ReimbursementSubmission.id,
+                            ReimbursementUpload.role
+                            == ReimbursementUploadRole.GENERATED_EXCEL.value,
+                            ReimbursementUpload.upload_status
+                            == ReimbursementUploadStatus.LINKED.value,
+                        )
+                    ),
+                ),
             ),
         )
     )
 
 
 def list_due_bundled_source_release_candidates(
-    database: Session, *, limit: int = 100
+    database: Session, *, limit: int = 100, now: datetime | None = None
 ) -> tuple[BundledSourceReleaseCandidate, ...]:
     _require_positive_integer(limit, name="limit")
     if limit > 1000:
         raise ValueError("limit must not exceed 1000")
     rows = database.execute(
-        _bundled_source_release_query().order_by(ReimbursementDraftFile.id).limit(limit)
+        _bundled_source_release_query(_naive_utc(now) if now is not None else utc_now())
+        .order_by(ReimbursementDraftFile.id)
+        .limit(limit)
     ).all()
     candidates = []
     for source, submission in rows:
@@ -2201,7 +2283,7 @@ def finalize_bundled_source_release(
 ) -> None:
     changed_at = _naive_utc(now) if now is not None else utc_now()
     row = database.execute(
-        _bundled_source_release_query().where(
+        _bundled_source_release_query(changed_at).where(
             ReimbursementSubmission.id == candidate.submission_id,
             ReimbursementDraftFile.id == candidate.file_id,
             ReimbursementDraftFile.storage_key == candidate.storage_key,

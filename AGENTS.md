@@ -4,9 +4,9 @@
 
 ## 权威资料
 
-- 修改业务行为前先阅读 `README.md`，它是当前产品范围和业务契约。
+- 修改业务行为前先阅读 `README.md` 和 `docs/PRODUCT_CONTRACT.md`；前者是项目入口，后者是当前产品范围和业务契约。
 - 修改草稿、文件、OCR、Excel、OA 提交、异常恢复或清理流程前，先阅读 `docs/DINGTALK_OA_INTEGRATION_DESIGN.md`，它是当前状态机和集成设计。
-- `docs/V1_IMPLEMENTATION_PLAN.md` 只作为历史规划背景。如果它与当前 README、设计文档、迁移或测试冲突，不得把它当作当前契约。
+- `docs/V1_IMPLEMENTATION_PLAN.md` 只作为历史规划背景。如果它与当前产品契约、设计文档、迁移或测试冲突，不得把它当作当前契约。
 - 不要仅凭截图推断业务规则。截图用于说明界面问题，用户的文字要求和当前业务契约决定实际行为。
 
 ## 架构与不变量
@@ -36,7 +36,7 @@
 
 ## 文件、OCR 与提交流程
 
-- 保持 README 和 OA 设计文档规定的文件类型、大小与页数限制、哈希、生命周期、用途规则及来源/证明材料关系。
+- 保持产品契约和 OA 设计文档规定的文件类型、大小与页数限制、哈希、生命周期、用途规则及来源/证明材料关系。
 - 批量材料按单个文件独立处理：一个文件失败、超时、重复、取消或繁忙，不得重放或丢弃已经成功的文件。失败文件在影响预览或提交前，必须可以恢复、移除或明确解决。
 - 除非同时重新设计资源模型和并发测试，否则保留单个 OCR 执行槽及有界 FIFO 准入队列。队列在不同用户之间保持公平；队列容量不等于系统支持的用户数量。
 - 清空、重试、预览、锁定、提交和异常恢复等破坏性或状态敏感操作前，要重新读取服务器当前状态。revision 冲突应通过最新状态进行协调，不要显示误导性的通用“其他页面已更新”错误。
@@ -53,8 +53,8 @@
 
 ## 数据库迁移
 
-- 始终保持唯一 Alembic head。当前记录的 head 为 `20261108_0025`；实际值应执行 `cd backend && uv run --frozen --extra dev alembic heads` 获取，不得只信任本句。
-- 数据库结构变更通常需要同步更新 SQLAlchemy model、必要的 model export、Alembic revision、迁移测试、readiness 的 revision/table/column 预期、测试数据库 revision 初始化，以及 `README.md` 和 `docs/DINGTALK_OA_INTEGRATION_DESIGN.md` 中的当前迁移说明。
+- 始终保持唯一 Alembic head。当前记录的 head 为 `20261109_0026`；实际值应执行 `cd backend && uv run --frozen --extra dev alembic heads` 获取，不得只信任本句。
+- 数据库结构变更通常需要同步更新 SQLAlchemy model、必要的 model export、Alembic revision、迁移测试、readiness 的 revision/table/column 预期、测试数据库 revision 初始化，以及产品契约和 OA 集成设计中的当前迁移说明。
 - 同时测试受支持旧数据的升级路径和空数据库升级路径。若降级会静默丢失业务记录、审计证据、锁定快照或文件关系，必须拒绝降级。
 - 生产迁移前必须对同一时点的 SQLite 和 staging 一致性备份。
 
@@ -83,6 +83,6 @@ make nginx-policy-check
 
 ## 文档维护
 
-- 产品契约、支持行为、限制、部署基线或 migration head 变化时更新 README。
+- 业务规则、支持行为、限制或 migration head 变化时更新产品契约；运行和部署变化更新对应专题文档。README 只保留概览与启动入口，不追加逐次改动或边界案例。
 - 状态转换、持久化、异常恢复、安全边界、外部 API 行为或清理流程变化时更新 OA 集成设计。
 - 只记录已经实现的行为。未实际执行时，不得声称已经完成浏览器自动化、生产验证、模型可用性检查或外部钉钉/OA 验证。

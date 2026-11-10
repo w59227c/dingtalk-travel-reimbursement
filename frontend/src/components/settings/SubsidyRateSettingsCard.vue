@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
-import { onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, onMounted, reactive, ref } from 'vue'
 
-import { apiErrorMessage } from '@/api/errors'
+import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import {
   getAdminExpenseSettings,
   normalizeSubsidyRate,
   updateExpenseSettings,
+  type AdminExpenseSettings,
 } from '@/api/settings'
 import { useAuthStore } from '@/stores/auth'
 import type { SubsidyRateType } from '@/types/expenses'
@@ -15,7 +16,11 @@ const auth = useAuthStore()
 const loading = ref(false)
 const saving = ref(false)
 const loadError = ref('')
+const saveError = ref('')
+const conflict = ref(false)
+const unsavedAfterSave = ref(false)
 const form = reactive({
+  revision: '',
   appTitle: '智能差旅费报销申请',
   adminUserIds: [] as string[],
   environmentAdminUserIds: [] as string[],
@@ -31,6 +36,7 @@ const form = reactive({
   },
   calculationMode: 'half_day_12' as const,
 })
+const formDisabled = computed(() => loading.value || saving.value || !!loadError.value || !form.revision)
 const rateFields: Array<{ id: SubsidyRateType; label: string }> = [
   { id: 'business', label: '境内商务出差' },
   { id: 'long_term_project', label: '境内市外项目出差（长期）' },
@@ -45,10 +51,14 @@ const rateFields: Array<{ id: SubsidyRateType; label: string }> = [
 onMounted(load)
 
 async function load(): Promise<void> {
+  if (loading.value || saving.value) return
   loading.value = true
   loadError.value = ''
   try {
     Object.assign(form, await getAdminExpenseSettings())
+    saveError.value = ''
+    conflict.value = false
+    unsavedAfterSave.value = false
   } catch (error) {
     loadError.value = apiErrorMessage(error, '系统设置加载失败，请重试')
   } finally {
@@ -56,7 +66,50 @@ async function load(): Promise<void> {
   }
 }
 
+async function reloadSettings(): Promise<void> {
+  if (loading.value || saving.value) return
+  try {
+    await ElMessageBox.confirm('重新加载会替换本页尚未保存的设置，是否继续？', '重新加载设置', {
+      confirmButtonText: '重新加载',
+      cancelButtonText: '取消',
+      type: 'warning',
+      closeOnClickModal: false,
+      showClose: false,
+    })
+  } catch {
+    return
+  }
+  await load()
+}
+
+function writableSignature(value: AdminExpenseSettings): string {
+  return JSON.stringify({
+    appTitle: value.appTitle,
+    adminUserIds: [...value.adminUserIds].sort(),
+    subsidyRates: rateFields.map(({ id }) => normalizeSubsidyRate(value.subsidyRates[id])
+      ?? value.subsidyRates[id]),
+    calculationMode: value.calculationMode,
+  })
+}
+
+function acceptSaved(updated: AdminExpenseSettings, sent: AdminExpenseSettings): void {
+  const newerInput = writableSignature(form) !== writableSignature(sent)
+  if (newerInput) {
+    form.revision = updated.revision
+    form.environmentAdminUserIds = updated.environmentAdminUserIds
+  } else {
+    Object.assign(form, updated)
+  }
+  unsavedAfterSave.value = newerInput
+  saveError.value = ''
+  conflict.value = false
+  auth.appTitle = updated.appTitle
+  document.title = updated.appTitle
+  if (!newerInput) ElMessage.success('系统设置已保存')
+}
+
 async function save(): Promise<void> {
+  if (formDisabled.value || conflict.value) return
   form.appTitle = form.appTitle.trim()
   if (!form.appTitle || form.appTitle.length > 40) {
     ElMessage.error('页面标题需要填写，最多 40 个字符')
@@ -80,14 +133,24 @@ async function save(): Promise<void> {
     form.subsidyRates[field.id] = normalized
   }
   saving.value = true
+  const sent = JSON.parse(JSON.stringify(form)) as AdminExpenseSettings
   try {
-    const updated = await updateExpenseSettings(form)
-    Object.assign(form, updated)
-    auth.appTitle = updated.appTitle
-    document.title = updated.appTitle
-    ElMessage.success('系统设置已保存')
+    acceptSaved(await updateExpenseSettings(sent), sent)
   } catch (error) {
-    ElMessage.error(apiErrorMessage(error, '系统设置保存失败，请重试'))
+    conflict.value = apiErrorCode(error) === 'SETTINGS_REVISION_CONFLICT'
+    if (!conflict.value && apiErrorCode(error) === null) {
+      try {
+        const readback = await getAdminExpenseSettings()
+        if (writableSignature(readback) === writableSignature(sent)) {
+          acceptSaved(readback, sent)
+          return
+        }
+      } catch {
+        // Keep local input when the server cannot be checked.
+      }
+    }
+    saveError.value = apiErrorMessage(error, '系统设置保存失败，请重试')
+    ElMessage.error(saveError.value)
   } finally {
     saving.value = false
   }
@@ -118,7 +181,33 @@ async function save(): Promise<void> {
         </el-button>
       </template>
     </el-alert>
-    <el-form label-position="top">
+    <el-alert
+      v-if="saveError"
+      :title="saveError"
+      type="error"
+      :closable="false"
+      data-testid="settings-save-error"
+      class="admin-load-error"
+    >
+      <el-button
+        link
+        type="primary"
+        :disabled="loading || saving"
+        @click="reloadSettings"
+      >
+        重新加载设置
+      </el-button>
+    </el-alert>
+    <p
+      v-if="unsavedAfterSave"
+      role="status"
+    >
+      本页还有修改未保存，请再次保存。
+    </p>
+    <el-form
+      label-position="top"
+      :disabled="formDisabled"
+    >
       <div class="settings-form-heading">
         <strong>应用显示</strong>
       </div>
@@ -163,7 +252,7 @@ async function save(): Promise<void> {
             </el-button>
           </div>
           <el-button
-            :disabled="form.adminUserIds.length >= 50"
+            :disabled="formDisabled || form.adminUserIds.length >= 50"
             @click="form.adminUserIds.push('')"
           >
             添加管理员
@@ -220,7 +309,7 @@ async function save(): Promise<void> {
       <el-button
         type="primary"
         :loading="saving"
-        :disabled="Boolean(loadError) || saving"
+        :disabled="formDisabled || conflict"
         :title="loadError ? '请先重新加载系统设置' : ''"
         @click="save"
       >

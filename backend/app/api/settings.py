@@ -14,7 +14,7 @@ from app.schemas.primitives import DecimalString
 from app.services.application_settings import (
     MAX_ADDITIONAL_ADMINS,
     MAX_APP_TITLE_LENGTH,
-    get_additional_admin_ids,
+    get_admin_settings_snapshot,
     get_expense_settings,
     update_expense_settings,
 )
@@ -72,6 +72,8 @@ class SubsidyRatesWrite(BaseModel):
 class SettingsWrite(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    expected_revision: str = Field(alias="expectedRevision", pattern=r"^[a-f0-9]{64}$")
+
     subsidy_rates: SubsidyRatesWrite = Field(alias="subsidyRates")
     calculation_mode: Literal["half_day_12"] = Field(alias="calculationMode")
     app_title: str = Field(alias="appTitle", min_length=1, max_length=MAX_APP_TITLE_LENGTH)
@@ -111,11 +113,10 @@ def get_admin_application_settings(
     database: Annotated[Session, Depends(get_db)],
     _current: Annotated[CurrentSession, Depends(require_admin)],
 ) -> dict[str, object]:
-    settings = get_expense_settings(database).as_api_dict()
+    settings = get_admin_settings_snapshot(database).as_api_dict()
     return success(
         settings
         | {
-            "adminUserIds": sorted(get_additional_admin_ids(database)),
             "environmentAdminUserIds": sorted(request.app.state.settings.admin_ids),
         }
     )
@@ -134,11 +135,11 @@ def update_application_settings(
         calculation_mode=body.calculation_mode,
         app_title=body.app_title,
         additional_admin_ids=tuple(body.admin_user_ids),
+        expected_revision=body.expected_revision,
     )
     return success(
         settings.as_api_dict()
         | {
-            "adminUserIds": sorted(get_additional_admin_ids(database)),
             "environmentAdminUserIds": sorted(request.app.state.settings.admin_ids),
         }
     )

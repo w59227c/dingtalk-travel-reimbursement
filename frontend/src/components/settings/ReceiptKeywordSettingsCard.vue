@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 
 import { apiErrorMessage } from '@/api/errors'
 import { getExpenseCategories } from '@/api/expenses'
@@ -22,6 +22,10 @@ const dialogOpen = ref(false)
 const editingKeywordId = ref<number | null>(null)
 const validationError = ref('')
 const form = reactive({ keyword: '', categoryId: '', transportType: 'other' as ReceiptKeywordTransportType })
+let disposed = false
+let editorVersion = 0
+let loadVersion = 0
+onBeforeUnmount(() => { disposed = true; editorVersion++; loadVersion++ })
 const transportGroups: Array<{ id: ReceiptKeywordTransportType; label: string }> = [
   { id: 'other', label: '通用' },
   { id: 'ride_hailing', label: '网约车' },
@@ -55,6 +59,7 @@ const dialogTitle = computed(() => {
 onMounted(load)
 
 async function load(): Promise<void> {
+  const version = ++loadVersion
   loading.value = true
   loadError.value = ''
   try {
@@ -62,18 +67,22 @@ async function load(): Promise<void> {
       listReceiptKeywords(),
       getExpenseCategories(),
     ])
+    if (disposed || version !== loadVersion) return
     keywordMappings.value = mappings
     keywordCategories.value = categories.filter((category) => category.manualSelectable)
   } catch (error) {
+    if (disposed || version !== loadVersion) return
     keywordMappings.value = []
     keywordCategories.value = []
     loadError.value = apiErrorMessage(error, '分类关键词加载失败，请重试')
   } finally {
-    loading.value = false
+    if (!disposed && version === loadVersion) loading.value = false
   }
 }
 
 function openCreate(categoryId: string, transportType: ReceiptKeywordTransportType = 'other'): void {
+  if (saving.value || loading.value || disposed) return
+  editorVersion++
   editingKeywordId.value = null
   validationError.value = ''
   Object.assign(form, { keyword: '', categoryId, transportType })
@@ -81,6 +90,8 @@ function openCreate(categoryId: string, transportType: ReceiptKeywordTransportTy
 }
 
 function openEdit(mapping: ReceiptKeywordMapping): void {
+  if (saving.value || loading.value || disposed) return
+  editorVersion++
   editingKeywordId.value = mapping.id
   validationError.value = ''
   Object.assign(form, {
@@ -91,7 +102,19 @@ function openEdit(mapping: ReceiptKeywordMapping): void {
   dialogOpen.value = true
 }
 
+function closeEditor(done?: () => void): void {
+  if (saving.value) return
+  editorVersion++
+  dialogOpen.value = false
+  done?.()
+}
+
+function editorSignature(): string {
+  return JSON.stringify([editingKeywordId.value, form.keyword, form.categoryId, form.transportType])
+}
+
 async function save(): Promise<void> {
+  if (saving.value || disposed || !dialogOpen.value) return
   const keyword = form.keyword.trim().replace(/\s+/g, ' ')
   if (keyword.length < 2) {
     validationError.value = /^\d$/.test(keyword)
@@ -105,23 +128,35 @@ async function save(): Promise<void> {
     return
   }
   saving.value = true
+  const version = editorVersion, signature = editorSignature()
   try {
     const input = { keyword, categoryId: form.categoryId,
       ...(form.categoryId === 'local_transport' ? { transportType: form.transportType } : {}),
     }
-    if (editingKeywordId.value === null) await createReceiptKeyword(input)
-    else await updateReceiptKeyword(editingKeywordId.value, input)
-    dialogOpen.value = false
-    ElMessage.success('分类关键词已保存')
+    const saved = editingKeywordId.value === null
+      ? await createReceiptKeyword(input)
+      : await updateReceiptKeyword(editingKeywordId.value, input)
+    if (disposed || version !== editorVersion) return
+    if (editorSignature() === signature) {
+      dialogOpen.value = false
+      ElMessage.success('分类关键词已保存')
+    } else {
+      // A model update queued before disabling remains editable, on this same
+      // saved row rather than creating a second keyword on the next save.
+      editingKeywordId.value = saved.id
+      ElMessage.warning('先前关键词已保存，当前输入还有修改，请再次保存')
+    }
     await load()
   } catch (error) {
-    ElMessage.error(apiErrorMessage(error, '分类关键词保存失败，请重试'))
+    if (!disposed && version === editorVersion) ElMessage.error(apiErrorMessage(error, '分类关键词保存失败，请重试'))
   } finally {
-    saving.value = false
+    if (!disposed) saving.value = false
   }
 }
 
 async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
+  if (saving.value || loading.value || disposed) return
+  saving.value = true
   try {
     await ElMessageBox.confirm(`确定删除关键词“${mapping.keyword}”吗？`, '删除分类关键词', {
       type: 'warning',
@@ -130,12 +165,16 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
       showClose: false,
       closeOnClickModal: false,
     })
+    if (disposed) return
     await deleteReceiptKeyword(mapping.id)
+    if (disposed) return
     ElMessage.success('分类关键词已删除')
     await load()
   } catch (error) {
-    if (error === 'cancel' || error === 'close') return
+    if (disposed || error === 'cancel' || error === 'close') return
     ElMessage.error(apiErrorMessage(error, '分类关键词删除失败，请重试'))
+  } finally {
+    if (!disposed) saving.value = false
   }
 }
 </script>
@@ -207,7 +246,8 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
               <el-tag
                 v-for="mapping in subgroup.mappings"
                 :key="mapping.id"
-                closable
+                :closable="!saving"
+                :aria-disabled="saving"
                 disable-transitions
                 class="settings-keyword-tag"
                 title="点击修改关键词"
@@ -224,6 +264,7 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
             <el-button
               link
               type="primary"
+              :disabled="saving"
               @click="openCreate(group.category.id, subgroup.id)"
             >
               添加
@@ -237,9 +278,16 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
   <el-dialog
     v-model="dialogOpen"
     :title="dialogTitle"
+    :before-close="closeEditor"
+    :show-close="!saving"
+    :close-on-click-modal="!saving"
+    :close-on-press-escape="!saving"
     width="min(520px, calc(100vw - 32px))"
   >
-    <el-form label-position="top">
+    <el-form
+      label-position="top"
+      :disabled="saving"
+    >
       <el-form-item label="关键词">
         <el-input
           v-model="form.keyword"
@@ -300,7 +348,10 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
       </el-form-item>
     </el-form>
     <template #footer>
-      <el-button @click="dialogOpen = false">
+      <el-button
+        :disabled="saving"
+        @click="closeEditor()"
+      >
         取消
       </el-button>
       <el-button

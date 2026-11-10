@@ -47,6 +47,10 @@ let loadRequestId = 0
 const loading = ref(false)
 const inspecting = ref(false)
 const saving = ref(false)
+const confirming = ref(false)
+const catalogConflict = ref(false)
+const unsavedAfterSave = ref(false)
+const busy = computed(() => loading.value || inspecting.value || saving.value || confirming.value)
 const loadError = ref('')
 const inspectError = ref('')
 const catalogWarning = ref('')
@@ -131,6 +135,7 @@ const relatedApprovalPolicyError = computed(() => {
 
 const saveDisabledReason = computed(() => {
   if (loadError.value) return '请先重新加载 OA 模板目录'
+  if (catalogConflict.value) return '目录已被其他管理员更新，请重新加载后核对'
   if (!inspected.value) return '请先读取并检查当前钉钉模板'
   if (!mappingComplete(
     reimbursement.schema,
@@ -180,7 +185,25 @@ function resetForm(): void {
   travelProfiles.value = [blankTravelProfile()]
 }
 
-async function load(): Promise<void> {
+function inputSignature(): string {
+  return JSON.stringify({
+    processCode: reimbursement.processCode,
+    mappings: reimbursement.mappings,
+    travelProfiles: travelProfiles.value.map((profile) => ({
+      profileKey: profile.profileKey,
+      displayName: profile.displayName,
+      processCode: profile.processCode,
+      mappings: profile.mappings,
+      travelTypeOptionIdentity: profile.travelTypeOptionIdentity,
+      dynamicTravelType: profile.dynamicTravelType,
+      travelTypeMappings: profile.travelTypeMappings,
+    })),
+  })
+}
+
+async function load(preserveOnError = false): Promise<void> {
+  if (busy.value) return
+  const previousInput = inputSignature()
   const requestId = ++loadRequestId
   inspectionRequestId += 1
   inspecting.value = false
@@ -192,6 +215,11 @@ async function load(): Promise<void> {
   try {
     const state = await getOaTemplateCatalog()
     if (requestId !== loadRequestId) return
+    if (inputSignature() !== previousInput) {
+      catalogConflict.value = true
+      inspectError.value = '本页内容已变化，未替换当前输入，请重新加载后核对。'
+      return
+    }
     compatibilityStatus.value = state.compatibilityStatus
     submissionReady.value = state.isSubmissionReady
     currentCatalogVersion.value = state.configVersion
@@ -204,12 +232,32 @@ async function load(): Promise<void> {
         catalogWarning.value = '已保存的目录当前无法读取，请按钉钉现有模板重新配置并确认。'
       }
     }
+    catalogConflict.value = false
+    unsavedAfterSave.value = false
   } catch (error) {
     if (requestId !== loadRequestId) return
-    loadError.value = apiErrorMessage(error, 'OA 模板目录加载失败，请重试')
+    const message = apiErrorMessage(error, 'OA 模板目录加载失败，请重试')
+    if (preserveOnError) inspectError.value = message
+    else loadError.value = message
   } finally {
     if (requestId === loadRequestId) loading.value = false
   }
+}
+
+async function reloadCatalog(): Promise<void> {
+  if (busy.value) return
+  confirming.value = true
+  try {
+    await ElMessageBox.confirm('重新加载会替换本页尚未保存的模板配置，是否继续？', '重新加载目录', {
+      type: 'warning', confirmButtonText: '重新加载', cancelButtonText: '取消',
+      showClose: false, closeOnClickModal: false,
+    })
+  } catch {
+    return
+  } finally {
+    confirming.value = false
+  }
+  await load(true)
 }
 
 function applyCatalog(catalog: OaTemplateCatalog): void {
@@ -340,6 +388,7 @@ function validateHeaders(): string | null {
 }
 
 async function inspectCatalog(): Promise<void> {
+  if (busy.value || catalogConflict.value) return
   const validationError = validateHeaders()
   if (validationError !== null) {
     ElMessage.warning(validationError)
@@ -534,6 +583,7 @@ function displayFingerprint(value: string | null): string {
 }
 
 async function saveCatalog(): Promise<void> {
+  if (busy.value) return
   if (saveDisabledReason.value) {
     ElMessage.warning(saveDisabledReason.value)
     return
@@ -563,7 +613,9 @@ async function saveCatalog(): Promise<void> {
     },
     travelProfiles: profiles as ConfirmOaTemplateCatalogInput['travelProfiles'],
   }
+  const sentInput = inputSignature()
 
+  confirming.value = true
   try {
     await ElMessageBox.confirm(
       '将一次性保存报销模板、全部出差模板、字段映射和出差类别。保存后会作为员工创建 OA 审批的正式目录。',
@@ -579,29 +631,45 @@ async function saveCatalog(): Promise<void> {
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     throw error
+  } finally {
+    confirming.value = false
+  }
+  if (inputSignature() !== sentInput || saveDisabledReason.value) {
+    ElMessage.warning('本页配置已变化，请重新检查后再保存')
+    return
   }
 
+  let recheckSchema = false
   saving.value = true
   try {
     const saved = await confirmOaTemplateCatalog(payload)
-    applyCatalog(saved)
-    applyInspection(inspectionFromCatalog(saved))
-    ElMessage.success('OA 模板目录已保存')
+    if (inputSignature() !== sentInput) {
+      currentCatalogVersion.value = saved.configVersion
+      expectedConfigVersion.value = saved.configVersion
+      invalidateContractProof()
+      unsavedAfterSave.value = true
+    } else {
+      applyCatalog(saved)
+      applyInspection(inspectionFromCatalog(saved))
+      unsavedAfterSave.value = false
+      ElMessage.success('OA 模板目录已保存')
+    }
   } catch (error) {
     const code = apiErrorCode(error)
     if (code === 'OA_TEMPLATE_CONFIGURATION_CHANGED') {
-      ElMessage.warning('目录已被其他管理员更新，正在加载最新版本；本次保存没有覆盖对方的修改')
-      await load()
+      catalogConflict.value = true
+      invalidateContractProof()
     } else if (code === 'OA_TEMPLATE_SCHEMA_CHANGED') {
       ElMessage.warning('钉钉模板在保存前发生变化，请重新检查字段后再保存')
       invalidateContractProof()
-      await inspectCatalog()
+      recheckSchema = true
     } else {
       ElMessage.error(apiErrorMessage(error, 'OA 模板目录保存失败，请重试'))
     }
   } finally {
     saving.value = false
   }
+  if (recheckSchema) await inspectCatalog()
 }
 
 function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogInspection {
@@ -654,7 +722,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
         <el-button
           link
           type="primary"
-          @click="load"
+          @click="load()"
         >
           重新加载
         </el-button>
@@ -686,7 +754,38 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
         class="oa-template-alert"
       />
 
-      <el-form label-position="top">
+      <el-alert
+        v-if="catalogConflict"
+        title="目录已被其他管理员更新，本页修改已保留。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="oa-template-alert"
+      >
+        <template #default>
+          <el-button
+            link
+            type="primary"
+            :disabled="busy"
+            @click="reloadCatalog"
+          >
+            重新加载目录
+          </el-button>
+        </template>
+      </el-alert>
+      <el-alert
+        v-if="unsavedAfterSave"
+        title="已保存提交的配置；本页还有后续修改，请重新检查后保存。"
+        type="warning"
+        show-icon
+        :closable="false"
+        class="oa-template-alert"
+      />
+
+      <el-form
+        label-position="top"
+        :disabled="busy"
+      >
         <section
           class="oa-template-section"
           aria-labelledby="reimbursement-template-heading"
@@ -955,7 +1054,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
           >{{ saveDisabledReason }}</span>
           <el-button
             :loading="inspecting"
-            :disabled="loading || saving || inspecting"
+            :disabled="busy || catalogConflict"
             @click="inspectCatalog"
           >
             读取并检查模板
@@ -963,7 +1062,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
           <el-button
             type="primary"
             :loading="saving"
-            :disabled="Boolean(saveDisabledReason) || saving || inspecting"
+            :disabled="Boolean(saveDisabledReason) || busy"
             :title="saveDisabledReason"
             @click="saveCatalog"
           >

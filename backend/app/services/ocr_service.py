@@ -6,7 +6,7 @@ from datetime import date
 from app.core.config import Settings
 from app.core.errors import ApiError
 from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
-from app.domain.money import money_string
+from app.domain.money import money_string, original_amount_string
 from app.ocr.extractors import normalized_lines
 from app.ocr.itinerary_worker import recognize_itinerary_worker
 from app.ocr.parsers import ReceiptParserRegistry
@@ -102,7 +102,9 @@ def parsed_expense_payload(file_id: str, parsed: ParsedExpense) -> dict[str, obj
         "orderNumbers": list(parsed.order_numbers),
         "originalCurrency": parsed.original_currency,
         "originalAmount": (
-            money_string(parsed.original_amount) if parsed.original_amount is not None else None
+            original_amount_string(parsed.original_amount)
+            if parsed.original_amount is not None
+            else None
         ),
         "source": "ocr",
         "confidence": f"{max(0.0, min(1.0, parsed.confidence)):.2f}",

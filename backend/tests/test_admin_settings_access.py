@@ -60,6 +60,7 @@ def test_added_admin_gains_all_admin_access_in_existing_session_and_revocation_i
         key: settings[key]
         for key in ("subsidyRates", "calculationMode", "appTitle", "adminUserIds")
     }
+    body["expectedRevision"] = settings["revision"]
     body["appTitle"] = "合成管理员设置"
     assert client.put("/api/admin/settings", json=body, headers=headers).status_code == 200
     assert (
@@ -70,6 +71,7 @@ def test_added_admin_gains_all_admin_access_in_existing_session_and_revocation_i
         ).status_code
         == 201
     )
+    body["expectedRevision"] = client.get("/api/admin/settings").json()["data"]["revision"]
     body["adminUserIds"] = []
     assert client.put("/api/admin/settings", json=body, headers=headers).status_code == 200
     assert not client.get("/api/me").json()["data"]["isAdmin"]
@@ -90,4 +92,5 @@ def test_every_configured_admin_can_edit_settings_without_being_the_first_id(cli
             key: settings[key]
             for key in ("subsidyRates", "calculationMode", "appTitle", "adminUserIds")
         }
+        body["expectedRevision"] = settings["revision"]
         assert client.put("/api/admin/settings", json=body, headers=headers).status_code == 200

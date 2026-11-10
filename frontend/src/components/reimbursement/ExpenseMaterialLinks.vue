@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import ExpenseMaterialGroup from './ExpenseMaterialGroup.vue'
+import ExpenseMaterialFile from './ExpenseMaterialFile.vue'
 import type { ExpenseItem } from '@/types/expenses'
 import type { ReimbursementDraftFile } from '@/types/reimbursements'
 import { isActiveProof, isRecordedProof, missingExpenseMaterials } from '@/utils/expenseProofs'
@@ -40,7 +42,7 @@ const hasReusableHotel = computed(() => props.files.some((file) => isActiveProof
 
 function hotelSummary(file: ReimbursementDraftFile): string {
   const details = file.hotelBillDetails
-  if (!details) return props.allowPreview ? '未提取住宿信息，请预览原件核对；已确认的材料用途不受影响。' : ''
+  if (!details) return props.allowPreview ? '请预览核对住宿信息。' : ''
   return [details.guest, details.checkIn && `${details.checkIn} 入住`, details.checkOut && `${details.checkOut} 离店`,
     details.nights && `${details.nights} 晚`, details.nightlyRate && `单价 ${details.nightlyRate}`,
     details.total && `合计 ${details.total}`, details.currency].filter(Boolean).join(' · ')
@@ -53,35 +55,31 @@ function hotelSummary(file: ReimbursementDraftFile): string {
     :data-expense-material-id="item.id"
     tabindex="-1"
   >
-    <div
-      v-for="file in receiptFiles"
-      :key="file.id"
-      class="attached-material"
-      data-testid="manual-receipt-attached"
+    <ExpenseMaterialGroup
+      v-if="receiptFiles.length"
+      label="票据材料"
+      :count="receiptFiles.length"
     >
-      <span class="attached-label">票据材料</span>
-      <button
-        v-if="allowPreview && file.status !== 'PURGED'"
-        class="material-preview"
-        type="button"
-        :disabled="previewLoading"
-        @click="emit('preview', file)"
+      <ExpenseMaterialFile
+        v-for="file in receiptFiles"
+        :key="file.id"
+        :name="file.name"
+        :preview-available="allowPreview && file.status !== 'PURGED'"
+        :preview-loading="previewLoading"
+        data-testid="manual-receipt-attached"
+        @preview="emit('preview', file)"
+      />
+    </ExpenseMaterialGroup>
+    <ExpenseMaterialGroup
+      v-if="item.category === 'lodging' || hotelFiles.length"
+      label="住宿明细"
+      :count="hotelFiles.length || undefined"
+      data-testid="hotel-bill-group"
+    >
+      <template
+        v-if="allowPreview && item.category === 'lodging'"
+        #actions
       >
-        {{ file.name }} · 预览
-      </button>
-      <span
-        v-else
-        class="attached-label"
-      >{{ file.name }}</span>
-    </div>
-    <div
-      v-if="item.category === 'lodging'"
-      class="material-needed"
-      :class="{ 'material-complete': !missing.includes('住宿明细') }"
-      data-testid="hotel-bill-needed"
-    >
-      <span>{{ missing.includes('住宿明细') ? '待补住宿明细· 每笔住宿必需' : '住宿明细· 可关联多份' }}</span>
-      <div class="material-actions">
         <el-button
           type="primary"
           plain
@@ -102,29 +100,29 @@ function hotelSummary(file: ReimbursementDraftFile): string {
         >
           从已上传材料选择
         </el-button>
-      </div>
-    </div>
-    <div
-      v-for="file in hotelFiles"
-      :key="file.id"
-      data-testid="hotel-bill-attached"
-    >
-      <div class="attached-material">
-        <span class="attached-label">已附住宿明细</span>
-        <button
-          v-if="allowPreview && file.status !== 'PURGED'"
-          class="material-preview"
-          type="button"
-          :disabled="previewLoading"
-          @click="emit('preview', file)"
+      </template>
+      <p
+        v-if="missing.includes('住宿明细')"
+        class="material-needed"
+        data-testid="hotel-bill-needed"
+      >
+        待补住宿明细 · 每笔住宿必需
+      </p>
+      <ExpenseMaterialFile
+        v-for="file in hotelFiles"
+        :key="file.id"
+        :name="file.name"
+        :preview-available="allowPreview && file.status !== 'PURGED'"
+        :preview-loading="previewLoading"
+        :summary="hotelSummary(file)"
+        class="attached-material"
+        data-testid="hotel-bill-attached"
+        @preview="emit('preview', file)"
+      >
+        <template
+          v-if="allowPreview"
+          #actions
         >
-          {{ file.name }} · 预览
-        </button>
-        <span
-          v-else
-          class="attached-label"
-        >{{ file.name }}</span>
-        <div class="material-actions">
           <el-button
             type="primary"
             plain
@@ -152,37 +150,41 @@ function hotelSummary(file: ReimbursementDraftFile): string {
           >
             修改用途
           </el-button>
-        </div>
-      </div>
-      <p
-        v-if="hotelSummary(file)"
-        class="attached-label"
-      >
-        {{ hotelSummary(file) }}
-      </p>
-    </div>
-    <div
+        </template>
+      </ExpenseMaterialFile>
+    </ExpenseMaterialGroup>
+    <ExpenseMaterialGroup
       v-if="missing.includes('行程单') && !hasItinerarySuggestion"
-      class="material-needed"
+      label="行程单"
     >
-      <span>待补行程单 · 网约车费用</span>
-      <el-button
-        type="primary"
-        plain
-        size="small"
-        :disabled="disabled"
-        @click="emit('itinerary')"
+      <template
+        v-if="allowPreview"
+        #actions
       >
-        选择行程单
-      </el-button>
-    </div>
-    <div
-      v-if="missing.includes('付款凭证')"
-      class="material-needed"
-      data-testid="payment-proof-needed"
+        <el-button
+          type="primary"
+          plain
+          size="small"
+          :disabled="disabled"
+          @click="emit('itinerary')"
+        >
+          选择行程单
+        </el-button>
+      </template>
+      <p class="material-needed">
+        待补行程单 · 网约车费用
+      </p>
+    </ExpenseMaterialGroup>
+    <ExpenseMaterialGroup
+      v-if="missing.includes('付款凭证') || paymentFiles.length"
+      label="付款凭证"
+      :count="paymentFiles.length || undefined"
+      data-testid="payment-proof-group"
     >
-      <span>待补付款凭证 · 本笔超过 500 元</span>
-      <div class="material-actions">
+      <template
+        v-if="allowPreview && missing.includes('付款凭证')"
+        #actions
+      >
         <el-button
           type="primary"
           plain
@@ -203,58 +205,58 @@ function hotelSummary(file: ReimbursementDraftFile): string {
         >
           从已上传材料选择
         </el-button>
-      </div>
-    </div>
-    <div
-      v-for="file in paymentFiles"
-      :key="file.id"
-      class="attached-material"
-      data-testid="payment-proof-attached"
-    >
-      <span class="attached-label">已附凭证</span>
-      <button
-        v-if="allowPreview && file.status !== 'PURGED'"
-        class="material-preview"
-        type="button"
-        :disabled="previewLoading"
-        @click="emit('preview', file)"
+      </template>
+      <p
+        v-if="missing.includes('付款凭证')"
+        class="material-needed"
+        data-testid="payment-proof-needed"
       >
-        {{ file.name }} · 预览
-      </button>
-      <span
-        v-else
-        class="attached-label"
-      >{{ file.name }}</span>
-      <div class="material-actions">
-        <el-button
-          type="primary"
-          plain
-          size="small"
-          :disabled="disabled"
-          @click="emit('upload', file.id)"
+        待补付款凭证 · 本笔超过 500 元
+      </p>
+      <ExpenseMaterialFile
+        v-for="file in paymentFiles"
+        :key="file.id"
+        :name="file.name"
+        :preview-available="allowPreview && file.status !== 'PURGED'"
+        :preview-loading="previewLoading"
+        class="attached-material"
+        data-testid="payment-proof-attached"
+        @preview="emit('preview', file)"
+      >
+        <template
+          v-if="allowPreview"
+          #actions
         >
-          更换
-        </el-button>
-        <el-button
-          type="danger"
-          plain
-          size="small"
-          :disabled="disabled"
-          @click="emit('unlink', file.id)"
-        >
-          移除关联
-        </el-button>
-        <el-button
-          type="primary"
-          plain
-          size="small"
-          :disabled="disabled"
-          @click="emit('purpose', file)"
-        >
-          修改用途
-        </el-button>
-      </div>
-    </div>
+          <el-button
+            type="primary"
+            plain
+            size="small"
+            :disabled="disabled"
+            @click="emit('upload', file.id)"
+          >
+            更换
+          </el-button>
+          <el-button
+            type="danger"
+            plain
+            size="small"
+            :disabled="disabled"
+            @click="emit('unlink', file.id)"
+          >
+            移除关联
+          </el-button>
+          <el-button
+            type="primary"
+            plain
+            size="small"
+            :disabled="disabled"
+            @click="emit('purpose', file)"
+          >
+            修改用途
+          </el-button>
+        </template>
+      </ExpenseMaterialFile>
+    </ExpenseMaterialGroup>
     <p
       v-if="error"
       class="material-error"
@@ -266,14 +268,8 @@ function hotelSummary(file: ReimbursementDraftFile): string {
 </template>
 
 <style scoped>
-.expense-materials { margin-top: 8px; outline-offset: 4px; }
+.expense-materials { display: grid; gap: 12px; margin-top: 4px; padding-top: 12px; border-top: 1px solid #e4e7ed; outline-offset: 4px; }
 .expense-materials:empty { display: none; }
-.material-needed { display: grid; gap: 8px; padding: 10px 12px; margin-top: 6px; border-radius: 8px; background: #fff8ed; color: #8b5a16; font-size: 12px; line-height: 1.6; }
-.material-complete { background: transparent; color: #667085; }
-.material-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; }
-.material-actions .el-button + .el-button { margin-left: 0; }
-.attached-material { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; line-height: 1.6; }
-.attached-label { color: #667085; }
-.material-preview { padding: 0; border: 0; background: none; color: var(--el-color-primary); cursor: pointer; overflow-wrap: anywhere; text-align: left; font: inherit; }
-.material-error { color: var(--el-color-danger); font-size: 12px; }
+.material-needed { margin: 0; padding: 8px 10px; border-radius: 8px; background: #fff8ed; color: #8b5a16; font-size: 12px; line-height: 1.6; }
+.material-error { margin: 0; color: var(--el-color-danger); font-size: 12px; }
 </style>

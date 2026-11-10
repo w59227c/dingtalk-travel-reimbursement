@@ -193,6 +193,7 @@ def test_eight_settings_preserve_legacy_rate_and_allow_independent_zero_and_over
         key: settings[key]
         for key in ("subsidyRates", "calculationMode", "appTitle", "adminUserIds")
     }
+    body["expectedRevision"] = settings["revision"]
     assert client.put("/api/admin/settings", json=body).status_code == 403
     response = client.put("/api/admin/settings", headers=headers, json=body)
     assert response.status_code == 200, response.text

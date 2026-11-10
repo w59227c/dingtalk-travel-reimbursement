@@ -168,6 +168,12 @@ def recover_failed_reimbursement(
             target.revision += 1
             target.updated_at = now
         else:
+            if source.expires_at <= now:
+                raise ApiError(
+                    "REIMBURSEMENT_DRAFT_EXPIRED",
+                    "保留的材料已过期，请新开报销并重新上传材料",
+                    409,
+                )
             current_id = database.scalar(
                 _department_drafts(actor)
                 .where(

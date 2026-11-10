@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { adjustmentPayload } from '@/utils/subsidyAdjustments'
+import { inputSignature } from '@/utils/reimbursementInput'
 import { ArrowLeft, CircleCloseFilled, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -7,6 +7,7 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
 import ApprovalAccountingLine from '@/components/reimbursement/ApprovalAccountingLine.vue'
+import ReimbursementReviewOverview from '@/components/reimbursement/ReimbursementReviewOverview.vue'
 import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vue'
 import ReimbursementAttentionNotice from '@/components/reimbursement/ReimbursementAttentionNotice.vue'
 import TravelApprovalSelector from '@/components/reimbursement/TravelApprovalSelector.vue'
@@ -18,7 +19,7 @@ import { useExpenseStore } from '@/stores/expense'
 import { useHealthStore } from '@/stores/health'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { useReimbursementSubmissionStore } from '@/stores/reimbursementSubmission'
-import { isForeignExpense, type TripInput, type TripType } from '@/types/expenses'
+import { isForeignExpense, type TripType } from '@/types/expenses'
 import type {
   ReimbursementDraft,
   ReimbursementDraftInput,
@@ -435,7 +436,7 @@ const previewDisabledReason = computed(() => (initializationError.value ? '请�
   || subsidyInputError.value
   || (!formReadOnly.value && drafts.pendingUploads.length ? '请等待材料上传完成后再预览 Excel' : '')
   || (!formReadOnly.value && materialSubmissionIssues.value.length
-    ? '请先处理全部待确认或未完成的材料，再预览 Excel' : '')
+    ? '请先处理全部待确认或未完成的材料（含待关联材料），再预览 Excel' : '')
   || (!budgetCodeValue.value ? '请先选择预算代码' : '')
   || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
   || (props.mobile && !formReadOnly.value && saveError.value ? '保存失败，请重试保存后再打开 Excel' : '')
@@ -604,72 +605,6 @@ function sessionScope(): string {
   const identity = sessionIdentity()
   return identity ? `${sessionGeneration.value}:${identity}` : ''
 }
-function tripSignature(trip: TripInput | null | undefined): object | null {
-  if (!trip) return null
-  return {
-    // The API writes an absent editingState approval ID as null.
-    relatedApprovalId: trip.relatedApprovalId ?? undefined,
-    tripType: trip.tripType,
-    startDate: trip.startDate,
-    startTime: trip.startTime,
-    endDate: trip.endDate,
-    endTime: trip.endTime,
-    policyConfirmed: trip.policyConfirmed ?? false,
-    attendanceDates: trip.attendanceDates,
-    confirmedEffectiveDays: trip.confirmedEffectiveDays ?? '',
-    noSubsidyException: trip.noSubsidyException ?? false,
-    excludedPeriods: (trip.excludedPeriods ?? []).map(adjustmentPayload),
-  }
-}
-function amountSignature(value: string | null | undefined): string | null | undefined {
-  if (typeof value !== 'string') return value
-  const match = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/.exec(value)
-  if (!match) return value
-  // Compare decimal strings without losing precision on large original amounts.
-  const whole = match[1]!
-  const fraction = (match[2] ?? '').replace(/0+$/, '')
-  return fraction ? `${whole}.${fraction}` : whole
-}
-function inputSignature(input: ReimbursementDraftInput): string {
-  // Project is server-derived from budget, never a second employee input.
-  return JSON.stringify({
-    ocrDispositionVersion: input.ocrDispositionVersion,
-    companyValue: input.companyValue,
-    budgetCodeValue: input.budgetCodeValue,
-    trip: tripSignature(input.trip),
-    trips: (input.trips ?? []).map(tripSignature),
-    editingState: input.editingState
-      ? {
-          includeSubsidy: input.editingState.includeSubsidy,
-          trip: tripSignature(input.editingState.trip),
-          trips: (input.editingState.trips ?? []).map(tripSignature),
-        }
-      : undefined,
-    items: input.items.map((item) => ({
-      sourceFileId: item.sourceFileId,
-      transportType: item.transportType,
-      itineraryFileIds: item.itineraryFileIds ?? [],
-      itineraryAutoMatchDisabled: item.itineraryAutoMatchDisabled ?? false,
-      paymentProofFileIds: item.paymentProofFileIds ?? [],
-      hotelBillFileIds: item.hotelBillFileIds ?? [],
-      receiptAttachmentFileIds: item.receiptAttachmentFileIds ?? [],
-      railType: item.railType ?? 'unknown',
-      requiresItinerary: item.requiresItinerary ?? false,
-      originalCurrency: item.originalCurrency,
-      originalAmount: amountSignature(item.originalAmount),
-      originalDetailsEdited: item.originalDetailsEdited ?? false,
-      cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
-      requiresCnyConfirmation: item.requiresCnyConfirmation ?? false,
-      category: item.category,
-      date: item.date,
-      displayDate: item.displayDate,
-      description: item.description,
-      amount: amountSignature(item.amount),
-      receiptCount: item.receiptCount,
-    })),
-    dismissedOcrFileIds: input.dismissedOcrFileIds,
-  })
-}
 function relatedSignature(selections: ReimbursementRelatedApprovalSelection[]): string { return JSON.stringify(selections) }
 function acceptDerivedAccounting(): void {
   const input = drafts.currentDraft?.input
@@ -835,6 +770,7 @@ function hydrate(draft: ReimbursementDraft): void {
   companyValue.value = draft.input.companyValue
   budgetCodeValue.value = draft.input.budgetCodeValue
   expense.hydrateFromDraft(draft, drafts.files)
+  drafts.acknowledgeDraftInput(draft.id, draft.revision)
   selectedRelatedApprovals.value = draft.relatedApprovals.map(approvalSelection)
   savedInputSignature.value = inputSignature(draft.input)
   savedRelatedSignature.value = relatedSignature(selectedRelatedApprovals.value)
@@ -1197,6 +1133,11 @@ async function revealValidationIssue(issue: SubmissionValidationIssue): Promise<
   const target = panel?.querySelector<HTMLElement>('.mobile-step-heading') ?? panel
   target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
   if (issue.itemId || issue.fileId) expenseItemsCard.value?.focusMaterial?.(issue.itemId, issue.fileId)
+}
+async function focusReviewApprovals(): Promise<void> {
+  if (props.mobile) selectMobileStep(0)
+  await nextTick()
+  document.getElementById('travel-approval-heading')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
 }
 async function confirmAndSubmit(): Promise<void> {
   if (submissionButtonReason.value) return
@@ -2853,6 +2794,15 @@ onBeforeUnmount(() => {
               <h2>核对并提交</h2>
               <p>确认金额、票据张数、材料完整性和即将生成的 OA 附件。</p>
             </header>
+            <ReimbursementReviewOverview
+              :mobile="props.mobile"
+              :company="displayedCompanyLabel"
+              :budget="displayedBudgetLabel"
+              :department="auth.session?.selectedDepartment?.name ?? ''"
+              :periods="selectedTravelPeriods"
+              :approval-count="selectedRelatedApprovals.length"
+              @approvals="focusReviewApprovals"
+            />
             <ExpenseSummaryCard
               :mobile="props.mobile"
               :readonly="formReadOnly"
@@ -3053,21 +3003,28 @@ onBeforeUnmount(() => {
           class="record-row"
         >
           <div class="record-description">
-            <strong><time :datetime="draft.lockedAt">{{ formatRecordTime(draft.lockedAt) }}</time></strong>
-            <small v-if="draft.relatedApprovalCount">关联 {{ draft.relatedApprovalCount }} 张出差审批</small>
+            <div class="record-mainline">
+              <strong
+                v-if="draft.totalAmount !== undefined"
+                class="record-amount"
+              >¥{{ draft.totalAmount }}</strong>
+              <strong class="record-budget">{{ draft.budgetLabel || '报销明细' }}</strong>
+            </div>
+            <small><time :datetime="draft.lockedAt">{{ formatRecordTime(draft.lockedAt) }}</time><template v-if="draft.relatedApprovalCount"> · {{ draft.relatedApprovalCount }} 张审批</template></small>
           </div>
           <span
             v-if="draft.id === drafts.currentDraft?.id"
-            class="record-current"
+            class="record-action record-current"
           >当前记录</span>
           <el-button
             v-else
+            class="record-action"
             link
             type="primary"
             :disabled="drafts.busy || saving"
             @click="chooseHistoryRecord(draft.id)"
           >
-            查看提交
+            查看明细
           </el-button>
         </li>
       </ul>
@@ -3174,6 +3131,9 @@ onBeforeUnmount(() => {
 .reimbursement-page > .hero,
 .reimbursement-page :is(.reimbursement-card, .summary-card) { margin-block: 0; }
 .save-recovery-detail { margin: 4px 0; }
+.record-mainline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.record-budget { overflow-wrap: anywhere; }
+.record-mainline .record-amount { color: var(--expense-amount-color); white-space: nowrap; }
 .history-caption { margin: 0 0 12px; color: var(--el-text-color-secondary); font-size: 13px; }
 .history-state { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0; color: var(--el-text-color-secondary); }
 .record-list {
@@ -3190,8 +3150,21 @@ onBeforeUnmount(() => {
 .record-description { display: grid; gap: 5px; }
 .record-description strong { color: var(--el-text-color-primary); }
 .record-description small { color: var(--el-text-color-secondary); }
-.record-row .el-button { flex: none; min-height: 32px; }
-.record-current { flex: none; color: var(--el-text-color-secondary); font-size: 13px; }
+.record-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 64px;
+  box-sizing: border-box;
+  height: 32px;
+  min-height: 32px;
+  padding: 2px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.record-current { color: var(--el-text-color-secondary); }
 .submitted-receipt {
   padding: 24px;
   border: 1px solid var(--el-border-color-lighter);
@@ -3486,7 +3459,7 @@ onBeforeUnmount(() => {
   font-size: 11px;
   font-weight: 700;
 }
-.mobile-step-nav button small { display: block; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.mobile-step-nav button small { display: block; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-step-nav button.is-active { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 .mobile-step-nav button.is-active span { border-color: var(--el-color-primary); color: #fff; background: var(--el-color-primary); }
 .mobile-step-nav button.is-done { color: var(--el-color-success); }
@@ -3525,6 +3498,6 @@ onBeforeUnmount(() => {
 .mobile-footer-actions .el-button:only-child { grid-column: 1 / -1; }
 @media (max-width: 420px) {
   .page-shell--mobile { width: 100%; padding-inline: 8px; }
-  .mobile-step-nav button small { font-size: 9px; }
+  .mobile-step-nav button small { font-size: 12px; }
 }
 </style>

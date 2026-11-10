@@ -67,6 +67,27 @@ function restoredDraft(): ReimbursementDraft {
 }
 
 describe.each([false, true])('approval query bounds, mobile=%s', (mobile) => {
+  it('keeps recent approvals ahead of the optional mobile filters without losing input', async () => {
+    const drafts = useReimbursementDraftStore()
+    vi.spyOn(drafts, 'loadTravelApprovals').mockResolvedValue(undefined)
+    drafts.travelApprovals = [candidate]
+    const wrapper = mount(TravelApprovalSelector, { props: { modelValue: [], mobile }, global: { plugins: [ElementPlus] } })
+    const filters = wrapper.get('#approval-query-filters')
+    expect(filters.isVisible()).toBe(!mobile)
+    expect(wrapper.get('.travel-approval-list').isVisible()).toBe(true)
+    if (mobile) await wrapper.get('button[aria-label="筛选审批"]').trigger('click')
+    expect(filters.isVisible()).toBe(true)
+    await wrapper.get('input[aria-label="搜索出差审批"]').setValue('合肥')
+    if (mobile) {
+      await wrapper.get('button[aria-label="筛选审批"]').trigger('click')
+      expect(wrapper.get('button[aria-label="筛选审批"]').attributes('aria-expanded')).toBe('false')
+      expect(wrapper.get('#approval-query-filters').attributes('style')).toContain('display: none')
+      expect(wrapper.text()).toContain('筛选审批 · 已设置')
+      await wrapper.get('button[aria-label="筛选审批"]').trigger('click')
+    }
+    expect(wrapper.get<HTMLInputElement>('input[aria-label="搜索出差审批"]').element.value).toBe('合肥')
+    wrapper.unmount()
+  })
   beforeEach(() => { setActivePinia(createPinia()); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-29T06:00:00Z')) })
   afterEach(() => vi.useRealTimers())
   it.each([

@@ -63,6 +63,51 @@ describe('downloadAndOpenDingTalkDocument', () => {
     for (const key of Object.keys(bridge)) delete bridge[key]
   })
 
+  afterEach(() => vi.useRealTimers())
+
+  it.each(['abort', 'stale', 'timeout'] as const)('does not open a late download after %s', async (reason) => {
+    vi.useFakeTimers()
+    const controller = new AbortController()
+    let current = true
+    let downloaded!: (value: { filePath: string }) => void
+    let started!: () => void
+    const ready = new Promise<void>((resolve) => { started = resolve })
+    bridge.ready = (callback: () => void) => callback()
+    bridge.downloadFile = vi.fn((input: { success: typeof downloaded }) => {
+      downloaded = input.success
+      started()
+    })
+    bridge.openDocument = vi.fn()
+    const result = downloadAndOpenDingTalkDocument({
+      url: 'https://expense.example/synthetic.xlsx', headers: {}, fileType: 'xlsx',
+      signal: controller.signal, isCurrent: () => current,
+    })
+    const rejected = expect(result).rejects.toThrow(reason === 'timeout' ? '超时' : '已取消')
+    await ready
+    if (reason === 'abort') controller.abort()
+    else if (reason === 'stale') current = false
+    else await vi.advanceTimersByTimeAsync(75_000)
+    downloaded({ filePath: 'file:///synthetic.xlsx' })
+    await rejected
+    expect(bridge.openDocument).not.toHaveBeenCalled()
+  })
+
+  it('ignores bridge readiness arriving after the preview timed out', async () => {
+    vi.useFakeTimers()
+    let ready!: () => void
+    bridge.ready = (callback: () => void) => { ready = callback }
+    bridge.downloadFile = vi.fn()
+    bridge.openDocument = vi.fn()
+    const rejected = expect(downloadAndOpenDingTalkDocument({
+      url: 'https://expense.example/synthetic.xlsx', headers: {}, fileType: 'xlsx',
+    })).rejects.toThrow('超时')
+    await vi.advanceTimersByTimeAsync(75_000)
+    await rejected
+    ready()
+    expect(bridge.downloadFile).not.toHaveBeenCalled()
+    expect(bridge.openDocument).not.toHaveBeenCalled()
+  })
+
   it('downloads with the native API and opens the returned local document', async () => {
     bridge.ready = (callback: () => void) => callback()
     bridge.downloadFile = vi.fn((input: {

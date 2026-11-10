@@ -19,13 +19,14 @@ describe('settings API', () => {
       long_term_project: '150',
       same_city_project: '50',
       short_term_internal: '100',
-        long_term_internal: '100',
-        short_term_overseas: '0.00',
-        long_term_overseas: '0.00',
+      long_term_internal: '100',
+      short_term_overseas: '0.00',
+      long_term_overseas: '0.00',
     } as const
     vi.mocked(http.put).mockResolvedValue({
       data: {
         data: {
+          revision: 'a'.repeat(64),
           appTitle: '智能差旅费报销申请',
           adminUserIds: ['admin-2'],
           environmentAdminUserIds: ['admin-1'],
@@ -36,6 +37,7 @@ describe('settings API', () => {
     })
 
     await updateExpenseSettings({
+      revision: 'a'.repeat(64),
       appTitle: '智能差旅费报销申请',
       adminUserIds: ['admin-2'],
       environmentAdminUserIds: ['admin-1'],
@@ -44,6 +46,7 @@ describe('settings API', () => {
     })
 
     expect(http.put).toHaveBeenCalledWith('/admin/settings', {
+      expectedRevision: 'a'.repeat(64),
       appTitle: '智能差旅费报销申请',
       adminUserIds: ['admin-2'],
       subsidyRates: {
@@ -65,6 +68,7 @@ describe('settings API', () => {
       expect(normalizeSubsidyRate(value)).toBeNull()
       await expect(
         updateExpenseSettings({
+          revision: 'a'.repeat(64),
           appTitle: '智能差旅费报销申请',
           adminUserIds: [],
           environmentAdminUserIds: ['admin-1'],
@@ -74,9 +78,9 @@ describe('settings API', () => {
             long_term_project: '150.00',
             same_city_project: '50.00',
             short_term_internal: '100.00',
-        long_term_internal: '100.00',
-        short_term_overseas: '0.00',
-        long_term_overseas: '0.00',
+            long_term_internal: '100.00',
+            short_term_overseas: '0.00',
+            long_term_overseas: '0.00',
           },
           calculationMode: 'half_day_12',
         }),

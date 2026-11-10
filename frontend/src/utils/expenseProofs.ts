@@ -42,7 +42,7 @@ export function isUnresolvedExpenseSourceFile(
 
 export function materialSubmissionBlockReason(
   file: ReimbursementDraftFile,
-  items: ReadonlyArray<Pick<ExpenseItem, 'sourceFileId'>>,
+  items: ReadonlyArray<Pick<ExpenseItem, 'sourceFileId' | 'itineraryFileIds' | 'paymentProofFileIds' | 'hotelBillFileIds'>>,
   dismissedOcrFileIds: readonly string[],
 ): string {
   if (file.status === 'RESERVED') return '文件等待上传'
@@ -55,6 +55,24 @@ export function materialSubmissionBlockReason(
   }
   if (file.role === 'EXPENSE_SOURCE' && file.ocrStatus === 'NOT_REQUESTED') return '票据尚未识别'
   if (isUnresolvedExpenseSourceFile(file, items, dismissedOcrFileIds)) return '票据尚未加入费用明细'
+  const proof = unlinkedProofLabel(file, items)
+  if (proof) return `${proof}尚未关联费用`
+  return ''
+}
+
+export function unlinkedProofLabel(
+  file: ReimbursementDraftFile,
+  items: ReadonlyArray<Pick<ExpenseItem, 'itineraryFileIds' | 'paymentProofFileIds' | 'hotelBillFileIds'>>,
+): string {
+  if (file.status !== 'ACTIVE' || file.role !== 'ATTACHMENT_ONLY'
+    || file.ocrStatus === 'RUNNING' || needsMaterialConfirmation(file)) return ''
+  for (const [kind, field, label] of [
+    ['itinerary', 'itineraryFileIds', '行程单'],
+    ['payment_proof', 'paymentProofFileIds', '付款凭证'],
+    ['hotel_bill', 'hotelBillFileIds', '住宿明细'],
+  ] as const) {
+    if (file.attachmentKind === kind && !items.some(item => item[field]?.includes(file.id))) return label
+  }
   return ''
 }
 

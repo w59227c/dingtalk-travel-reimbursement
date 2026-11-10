@@ -1,7 +1,8 @@
-import ElementPlus, { ElSelect } from 'element-plus'
+import ElementPlus, { ElInput, ElSelect } from 'element-plus'
 import { ElMessageBox } from 'element-plus'
+import { createPinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   confirmOaTemplateCatalog,
@@ -16,6 +17,8 @@ import type {
   OaTemplateCatalogInspection,
 } from '@/types/oa'
 import OaTemplateSettingsCard from './OaTemplateSettingsCard.vue'
+import SettingsAdminView from '@/views/SettingsAdminView.vue'
+import { useAuthStore } from '@/stores/auth'
 
 vi.mock('@/api/oaTemplates', () => ({
   confirmOaTemplateCatalog: vi.fn(),
@@ -196,12 +199,31 @@ function inspection(
   }
 }
 
-function findButton(wrapper: ReturnType<typeof mount>, text: string) {
+function findButton(wrapper: Pick<ReturnType<typeof mount>, 'findAll'>, text: string) {
   return wrapper.findAll('button').find((button) => button.text().trim() === text)
 }
 
+function mountSettingsPage(mobile: boolean) {
+  const pinia = createPinia()
+  useAuthStore(pinia).session = {
+    user: { userId: 'synthetic-admin', name: '合成管理员' },
+    departments: [], selectedDepartment: null, csrfToken: 'synthetic-csrf', isAdmin: true,
+  }
+  return mount(SettingsAdminView, {
+    props: { mobile },
+    global: {
+      plugins: [pinia, ElementPlus],
+      stubs: {
+        RouterLink: true, ReceiptKeywordSettingsCard: true, SubsidyRateSettingsCard: true,
+        AttendanceCalendarSettingsCard: true, SubmissionRecoveryCard: true,
+        ApprovalDiagnosticsCard: true, ReceiptDiagnosticsCard: true,
+      },
+    },
+  })
+}
+
 async function changeSelect(
-  wrapper: ReturnType<typeof mount>,
+  wrapper: Pick<ReturnType<typeof mount>, 'findAllComponents'>,
   selectIndex: number,
   value: string,
 ): Promise<void> {
@@ -213,8 +235,10 @@ async function changeSelect(
 }
 
 describe('OaTemplateSettingsCard', () => {
+  afterEach(() => vi.restoreAllMocks())
+
   beforeEach(() => {
-    vi.clearAllMocks()
+    vi.resetAllMocks()
     window.ResizeObserver = class ResizeObserver {
       observe(): void {}
       unobserve(): void {}
@@ -511,7 +535,7 @@ describe('OaTemplateSettingsCard', () => {
     wrapper.unmount()
   })
 
-  it('does not retry a non-idempotent save after a CAS conflict', async () => {
+  it.each([false, true])('preserves conflicting mappings until an explicit successful reload, mobile=%s', async (mobile) => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     vi.mocked(confirmOaTemplateCatalog).mockRejectedValue({
       isAxiosError: true,
@@ -534,6 +558,7 @@ describe('OaTemplateSettingsCard', () => {
         requiresConfirmation: false,
         catalog: catalog(),
       })
+      .mockRejectedValueOnce(new Error('synthetic reload failure'))
       .mockResolvedValueOnce({
         configured: true,
         configVersion: 4,
@@ -542,19 +567,115 @@ describe('OaTemplateSettingsCard', () => {
         requiresConfirmation: false,
         catalog: catalog(4),
       })
-    const wrapper = mount(OaTemplateSettingsCard, {
-      global: { plugins: [ElementPlus] },
-    })
+    const page = mountSettingsPage(mobile)
+    const wrapper = page.getComponent(OaTemplateSettingsCard)
     await flushPromises()
+    await changeSelect(wrapper, reimbursementFields.length, 'travel-startDate-alternative-id')
     await findButton(wrapper, '读取并检查模板')!.trigger('click')
     await flushPromises()
     await findButton(wrapper, '保存整个目录')!.trigger('click')
     await flushPromises()
 
     expect(confirmOaTemplateCatalog).toHaveBeenCalledOnce()
-    expect(getOaTemplateCatalog).toHaveBeenCalledTimes(2)
+    expect(getOaTemplateCatalog).toHaveBeenCalledOnce()
+    expect(wrapper.findAllComponents(ElSelect)[reimbursementFields.length]!.props('modelValue'))
+      .toBe('travel-startDate-alternative-id')
+    expect(wrapper.text()).toContain('本页修改已保留')
+    expect(findButton(wrapper, '保存整个目录')!.element.disabled).toBe(true)
+
+    confirm.mockRejectedValueOnce('cancel')
+    await findButton(wrapper, '重新加载目录')!.trigger('click')
+    await flushPromises()
+    expect(getOaTemplateCatalog).toHaveBeenCalledOnce()
+
+    await findButton(wrapper, '重新加载目录')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('本页修改已保留')
+    expect(wrapper.findAllComponents(ElSelect)[reimbursementFields.length]!.props('modelValue'))
+      .toBe('travel-startDate-alternative-id')
+
+    await findButton(wrapper, '重新加载目录')!.trigger('click')
+    await flushPromises()
+    expect(getOaTemplateCatalog).toHaveBeenCalledTimes(3)
     expect(wrapper.text()).toContain('目录版本 4')
+    expect(wrapper.findAllComponents(ElSelect)[reimbursementFields.length]!.props('modelValue'))
+      .toBe('travel-startDate-id')
+    expect(wrapper.text()).not.toContain('本页修改已保留')
+    vi.mocked(inspectOaTemplateCatalog).mockResolvedValue(inspection('COMPATIBLE', 4))
+    await findButton(wrapper, '读取并检查模板')!.trigger('click')
+    await flushPromises()
+    expect(findButton(wrapper, '保存整个目录')!.element.disabled).toBe(false)
     confirm.mockRestore()
-    wrapper.unmount()
+    page.unmount()
+  })
+
+  it.each([false, true])('allows saving again after a cancelled confirmation or schema recheck, mobile=%s', async (mobile) => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel').mockResolvedValue({} as never)
+    const page = mountSettingsPage(mobile)
+    const card = page.getComponent(OaTemplateSettingsCard)
+    try {
+      await flushPromises()
+      await findButton(card, '读取并检查模板')!.trigger('click')
+      await flushPromises()
+      await findButton(card, '保存整个目录')!.trigger('click')
+      await flushPromises()
+      expect(confirmOaTemplateCatalog).not.toHaveBeenCalled()
+      expect(card.get<HTMLInputElement>('input[aria-label="报销 processCode"]').element.disabled).toBe(false)
+      expect(findButton(card, '保存整个目录')!.element.disabled).toBe(false)
+
+      vi.mocked(confirmOaTemplateCatalog).mockRejectedValueOnce({
+        isAxiosError: true,
+        response: { status: 409, data: { error: { code: 'OA_TEMPLATE_SCHEMA_CHANGED' } } },
+      })
+      await findButton(card, '保存整个目录')!.trigger('click')
+      await flushPromises()
+      expect(inspectOaTemplateCatalog).toHaveBeenCalledTimes(2)
+      expect(card.get<HTMLInputElement>('input[aria-label="报销 processCode"]').element.disabled).toBe(false)
+      expect(findButton(card, '保存整个目录')!.element.disabled).toBe(false)
+      await findButton(card, '保存整个目录')!.trigger('click')
+      await flushPromises()
+      expect(confirmOaTemplateCatalog).toHaveBeenCalledTimes(2)
+      expect(card.text()).toContain('目录版本 4')
+    } finally {
+      confirm.mockRestore()
+      page.unmount()
+    }
+  })
+
+  it.each([false, true])('disables editing during inspection and save but preserves a queued input event, mobile=%s', async (mobile) => {
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
+    let finishInspection!: (value: OaTemplateCatalogInspection) => void
+    let finishSave!: (value: OaTemplateCatalog) => void
+    vi.mocked(inspectOaTemplateCatalog).mockReturnValueOnce(new Promise(resolve => { finishInspection = resolve }))
+    vi.mocked(confirmOaTemplateCatalog).mockReturnValueOnce(new Promise(resolve => { finishSave = resolve }))
+    const page = mountSettingsPage(mobile)
+    const card = page.getComponent(OaTemplateSettingsCard)
+    try {
+      await flushPromises()
+      await findButton(card, '读取并检查模板')!.trigger('click')
+      await flushPromises()
+      expect(card.get<HTMLInputElement>('input[aria-label="报销 processCode"]').element.disabled).toBe(true)
+      finishInspection(inspection())
+      await flushPromises()
+      expect(card.get<HTMLInputElement>('input[aria-label="报销 processCode"]').element.disabled).toBe(false)
+      await findButton(card, '保存整个目录')!.trigger('click')
+      await flushPromises()
+      expect(card.findAll('input').every(input => input.element.disabled)).toBe(true)
+      // An input event queued before the controls were disabled must survive.
+      card.findAllComponents(ElInput)[0]!.vm.$emit('update:modelValue', 'PROC-NEW-UNSAVED')
+      card.findAllComponents(ElInput)[0]!.vm.$emit('input', 'PROC-NEW-UNSAVED')
+      await flushPromises()
+      finishSave(catalog(4))
+      await flushPromises()
+      expect(card.get<HTMLInputElement>('input[aria-label="报销 processCode"]').element.value).toBe('PROC-NEW-UNSAVED')
+      expect(card.get<HTMLInputElement>('input[aria-label="报销 processCode"]').element.disabled).toBe(false)
+      expect(card.text()).toContain('目录版本 4')
+      expect(card.text()).toContain('本页还有后续修改')
+      expect(findButton(card, '保存整个目录')!.element.disabled).toBe(true)
+      expect(confirmOaTemplateCatalog).toHaveBeenCalledOnce()
+    } finally {
+      confirm.mockRestore()
+      page.unmount()
+    }
   })
 })

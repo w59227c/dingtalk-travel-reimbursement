@@ -72,6 +72,9 @@ export interface ExpenseItem {
   date?: string
   displayDate: string
   description: string
+  /** Explicit field edits, never inferred by comparing against a later OCR run. */
+  dateEdited?: boolean
+  descriptionEdited?: boolean
   amount: string
   receiptCount: number
   source: 'ocr' | 'manual' | 'system'

@@ -13,9 +13,10 @@ import {
   listReceiptKeywords,
   updateReceiptKeyword,
 } from '@/api/receiptKeywords'
-import { getAdminExpenseSettings, updateExpenseSettings } from '@/api/settings'
+import { getAdminExpenseSettings, updateExpenseSettings, type AdminExpenseSettings } from '@/api/settings'
 import SettingsAdminView from './SettingsAdminView.vue'
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
+import ReceiptKeywordSettingsCard from '@/components/settings/ReceiptKeywordSettingsCard.vue'
 import { useAuthStore } from '@/stores/auth'
 
 function adminPinia() {
@@ -47,6 +48,63 @@ vi.mock('@/api/settings', async (importOriginal) => {
 })
 
 describe('SettingsAdminView receipt keywords', () => {
+  it.each([false, true])('locks the keyword editor and preserves queued edits during save, mobile=%s', async (mobile) => {
+    vi.mocked(listReceiptKeywords).mockResolvedValue([])
+    vi.mocked(updateReceiptKeyword).mockResolvedValue({ id: 1, keyword: '合成较新关键词', categoryId: 'office', categoryName: '办公费' })
+    let finish!: (value: never) => void
+    vi.mocked(createReceiptKeyword).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mount(SettingsAdminView, { props: { mobile }, global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } } })
+    try {
+      await flushPromises()
+      const card = wrapper.getComponent(ReceiptKeywordSettingsCard)
+      const add = card.get('[aria-label="办公费分类关键词"]').findAll('button').find(b => b.text().trim() === '添加')!
+      await add.trigger('click')
+      await card.get('.el-dialog input').setValue('合成原关键词')
+      await card.findAll('button').find(b => b.text().trim() === '保存')!.trigger('click')
+      await flushPromises()
+      expect(card.get<HTMLInputElement>('.el-dialog input').element.disabled).toBe(true)
+      expect(card.findAll('button').find(b => b.text().trim() === '取消')!.element.disabled).toBe(true)
+      expect(add.element.disabled).toBe(true)
+      const dialog = card.getComponent({ name: 'ElDialog' })
+      expect(dialog.props('closeOnClickModal')).toBe(false)
+      expect(dialog.props('closeOnPressEscape')).toBe(false)
+      // A model event queued just before disabling must survive the response.
+      card.getComponent({ name: 'ElInput' }).vm.$emit('update:modelValue', '合成较新关键词')
+      await flushPromises()
+      finish({ id: 1, keyword: '合成原关键词', categoryId: 'office', categoryName: '办公费' } as never)
+      await flushPromises()
+      expect(card.get('.el-dialog').isVisible()).toBe(true)
+      expect(card.get<HTMLInputElement>('.el-dialog input').element.value).toBe('合成较新关键词')
+      expect(card.get<HTMLInputElement>('.el-dialog input').element.disabled).toBe(false)
+      expect(createReceiptKeyword).toHaveBeenCalledOnce()
+      await card.findAll('button').find(b => b.text().trim() === '保存')!.trigger('click')
+      await flushPromises()
+      expect(createReceiptKeyword).toHaveBeenCalledOnce()
+      expect(updateReceiptKeyword).toHaveBeenLastCalledWith(1, { keyword: '合成较新关键词', categoryId: 'office' })
+      expect(card.get('.el-dialog').isVisible()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('keeps keyword input after save failure and allows retry, mobile=%s', async (mobile) => {
+    vi.mocked(createReceiptKeyword).mockRejectedValueOnce(new Error('合成网络失败'))
+    const wrapper = mount(SettingsAdminView, { props: { mobile }, global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } } })
+    try {
+      await flushPromises()
+      const card = wrapper.getComponent(ReceiptKeywordSettingsCard)
+      await card.get('[aria-label="办公费分类关键词"]').findAll('button').find(b => b.text().trim() === '添加')!.trigger('click')
+      await card.get('.el-dialog input').setValue('合成待重试关键词')
+      await card.findAll('button').find(b => b.text().trim() === '保存')!.trigger('click')
+      await flushPromises()
+      expect(card.get('.el-dialog').isVisible()).toBe(true)
+      expect(card.get<HTMLInputElement>('.el-dialog input').element.value).toBe('合成待重试关键词')
+      expect(card.get<HTMLInputElement>('.el-dialog input').element.disabled).toBe(false)
+      await card.findAll('button').find(b => b.text().trim() === '保存')!.trigger('click')
+      await flushPromises()
+      expect(createReceiptKeyword).toHaveBeenCalledTimes(2)
+      expect(card.get('.el-dialog').isVisible()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
   it.each([false, true])('links to the template, calendar and submission recovery controls, mobile=%s', async (mobile) => {
     const wrapper = mount(SettingsAdminView, {
       props: { mobile }, global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } },
@@ -69,6 +127,84 @@ describe('SettingsAdminView receipt keywords', () => {
     expect(listAttendanceCalendars).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+  it.each([false, true])('locks settings during save and preserves any queued newer input, mobile=%s', async (mobile) => {
+    let finish!: (value: AdminExpenseSettings) => void
+    vi.mocked(updateExpenseSettings).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const wrapper = mount(SettingsAdminView, { props: { mobile }, global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } } })
+    try {
+      await flushPromises()
+      const rate = wrapper.get<HTMLInputElement>('input[aria-label="境内商务出差每日补助标准"]')
+      await rate.setValue('110.00')
+      await wrapper.findAll('button').find(x => x.text() === '保存设置')!.trigger('click')
+      const sent = JSON.parse(JSON.stringify(vi.mocked(updateExpenseSettings).mock.calls[0]![0])) as AdminExpenseSettings
+      expect(rate.element.disabled).toBe(true)
+      // A model event already queued before disabling must also be preserved.
+      wrapper.findAllComponents({ name: 'ElInput' }).find(input =>
+        input.find('input').attributes('aria-label') === '境内商务出差每日补助标准',
+      )!.vm.$emit('update:modelValue', '120.00')
+      await flushPromises()
+      finish({ ...sent, revision: 'b'.repeat(64) })
+      await flushPromises()
+      expect(rate.element.value).toBe('120.00')
+      expect(wrapper.text()).toContain('还有修改未保存')
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('keeps a stale settings form until the administrator confirms reloading, mobile=%s', async (mobile) => {
+    const wrapper = mount(SettingsAdminView, { props: { mobile }, global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } } })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+    try {
+      await flushPromises()
+      const rate = wrapper.get<HTMLInputElement>('input[aria-label="境内商务出差每日补助标准"]')
+      await rate.setValue('115.00')
+      vi.mocked(updateExpenseSettings).mockRejectedValueOnce({ isAxiosError: true, response: { status: 409,
+        data: { error: { code: 'SETTINGS_REVISION_CONFLICT', message: '其他页面已更新设置' } } } })
+      await wrapper.findAll('button').find(x => x.text() === '保存设置')!.trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="settings-save-error"]').text()).toContain('其他页面已更新设置')
+      const reload = wrapper.findAll('button').find(x => x.text() === '重新加载设置')!
+      await reload.trigger('click'); await flushPromises()
+      expect(rate.element.value).toBe('115.00')
+      expect(getAdminExpenseSettings).toHaveBeenCalledTimes(1)
+      confirm.mockResolvedValueOnce('confirm' as never)
+      const current = await vi.mocked(getAdminExpenseSettings).mock.results[0]!.value
+      vi.mocked(getAdminExpenseSettings).mockResolvedValueOnce({ ...current, revision: 'b'.repeat(64),
+        subsidyRates: { ...current.subsidyRates, business: '130.00' } })
+      await reload.trigger('click'); await flushPromises()
+      expect(rate.element.value).toBe('130.00')
+      expect(wrapper.find('[data-testid="settings-save-error"]').exists()).toBe(false)
+    } finally { confirm.mockRestore(); wrapper.unmount() }
+  })
+
+  it.each([false, true])('confirms its saved settings after losing the save response, mobile=%s', async (mobile) => {
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile },
+      global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } },
+    })
+    try {
+      await flushPromises()
+      const rate = wrapper.get<HTMLInputElement>('input[aria-label="境内商务出差每日补助标准"]')
+      await rate.setValue('115')
+      vi.mocked(updateExpenseSettings).mockImplementationOnce(async (sent) => {
+        const readback = structuredClone(sent)
+        readback.revision = 'b'.repeat(64)
+        readback.subsidyRates.business = '115.00'
+        // Server serialization need not preserve property insertion order.
+        readback.subsidyRates = Object.fromEntries(Object.entries(readback.subsidyRates).reverse()) as AdminExpenseSettings['subsidyRates']
+        vi.mocked(getAdminExpenseSettings).mockResolvedValueOnce(readback)
+        throw new Error('Synthetic settings response lost')
+      })
+      await wrapper.findAll('button').find((button) => button.text() === '保存设置')!.trigger('click')
+      await flushPromises()
+      expect(rate.element.value).toBe('115.00')
+      expect(wrapper.find('[data-testid="settings-save-error"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('还有修改未保存')
+      expect(getAdminExpenseSettings).toHaveBeenCalledTimes(2)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     vi.mocked(listAttendanceCalendars).mockResolvedValue([])
@@ -78,6 +214,7 @@ describe('SettingsAdminView receipt keywords', () => {
       disconnect(): void {}
     }
     vi.mocked(getAdminExpenseSettings).mockResolvedValue({
+      revision: 'a'.repeat(64),
       appTitle: '智能差旅费报销申请',
       adminUserIds: [],
       environmentAdminUserIds: ['admin-1'],

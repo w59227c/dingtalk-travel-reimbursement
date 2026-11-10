@@ -191,4 +191,20 @@ with urllib.request.urlopen("http://web:8080/api/ready", timeout=5) as response:
   sleep 1
 done
 [[ "$web_ready" == true ]] || { echo 'Web integration check failed' >&2; exit 1; }
+
+# Error logs normally append the original request and upstream URL. Exercise an
+# actual proxy failure, rather than checking only a successful request's logs.
+docker stop "$backend_container" >/dev/null
+privacy_marker='synthetic-query-never-log-6d3f09'
+proxy_failure=$(docker exec "$web_container" wget -S -T 15 -O /dev/null \
+  "http://127.0.0.1:8080/api/oa/travel-approvals?q=$privacy_marker" 2>&1 || true)
+if ! printf '%s' "$proxy_failure" | grep -Eq 'HTTP/1\.[01] 50[24]'; then
+  echo 'Expected an upstream failure for the Nginx log privacy check' >&2
+  exit 1
+fi
+if docker logs "$web_container" 2>&1 | grep -F "$privacy_marker" >/dev/null; then
+  echo 'Nginx persisted sensitive request query values' >&2
+  exit 1
+fi
+echo 'Nginx proxy failures preserve HTTP errors without logging request query values'
 echo 'Final images passed offline OCR, migrations, production readiness and Web/API checks'

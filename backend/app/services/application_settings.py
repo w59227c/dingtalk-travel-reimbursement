@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Mapping
@@ -63,6 +64,40 @@ class ExpenseSettings:
             "calculationMode": self.calculation_mode,
             "appTitle": self.app_title,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class AdminSettingsSnapshot:
+    settings: ExpenseSettings
+    admin_user_ids: tuple[str, ...]
+
+    def as_api_dict(self) -> dict[str, object]:
+        values = self.settings.as_api_dict() | {"adminUserIds": list(self.admin_user_ids)}
+        revision = hashlib.sha256(
+            json.dumps(
+                values,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return values | {"revision": revision}
+
+
+def get_admin_settings_snapshot(database: Session) -> AdminSettingsSnapshot:
+    ensure_expense_setting_rows(database)
+    database.rollback()
+    # SQLite's legacy SELECT mode does not itself start a read transaction.
+    # Keep the values and their revision in one database snapshot.
+    database.connection().exec_driver_sql("BEGIN")
+    return _admin_settings_snapshot(database)
+
+
+def _admin_settings_snapshot(database: Session) -> AdminSettingsSnapshot:
+    return AdminSettingsSnapshot(
+        get_expense_settings(database),
+        tuple(sorted(get_additional_admin_ids(database))),
+    )
 
 
 def ensure_expense_setting_rows(database: Session) -> dict[str, Setting]:
@@ -187,7 +222,29 @@ def update_expense_settings(
     calculation_mode: str,
     app_title: str,
     additional_admin_ids: tuple[str, ...],
-) -> ExpenseSettings:
+    expected_revision: str,
+) -> AdminSettingsSnapshot:
+    ensure_expense_setting_rows(database)
+    database.rollback()
+    database.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    current = _admin_settings_snapshot(database)
+    proposed = AdminSettingsSnapshot(
+        ExpenseSettings(daily_rates, calculation_mode, app_title),
+        tuple(sorted(set(additional_admin_ids))),
+    )
+    current_revision = current.as_api_dict()["revision"]
+    # A response may have been lost after commit. Repeating identical values
+    # is safe, but an old page must never replace unrelated newer settings.
+    if current_revision == proposed.as_api_dict()["revision"]:
+        database.rollback()
+        return current
+    if current_revision != expected_revision:
+        database.rollback()
+        raise ApiError(
+            "SETTINGS_REVISION_CONFLICT",
+            "系统设置已被其他页面更新，请重新加载核对后再保存",
+            409,
+        )
     rows = ensure_expense_setting_rows(database)
     for trip_type, key in RATE_KEYS.items():
         rows[key].value = format(daily_rates[trip_type], ".2f")
@@ -197,4 +254,4 @@ def update_expense_settings(
         sorted(set(additional_admin_ids)), ensure_ascii=False, separators=(",", ":")
     )
     database.commit()
-    return get_expense_settings(database)
+    return proposed

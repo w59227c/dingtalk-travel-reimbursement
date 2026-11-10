@@ -130,6 +130,31 @@ function responseError(code: string, message: string, status = 422): Error {
 }
 
 describe('persistent reimbursement draft store', () => {
+  it('keeps an unresolved write until its current server input is adopted', async () => {
+    const store = useReimbursementDraftStore()
+    store.currentDraft = structuredClone(draft())
+    const sent = structuredClone(input)
+    sent.items[0]!.description = 'Synthetic disconnected edit'
+    vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic connection lost'))
+    vi.mocked(getReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic readback lost'))
+    await expect(store.saveDraft(sent)).rejects.toThrow('Synthetic connection lost')
+    const latest = structuredClone(draft('draft-1', 3))
+    latest.input.items[0]!.description = 'Synthetic concurrent server edit'
+    vi.mocked(getReimbursementDraft).mockResolvedValue(latest)
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({ draftId: latest.id, revision: 3, items: [] })
+    expect(await store.loadDraft(latest.id, true)).toBe(true)
+    // Reading a new revision alone, or acknowledging an old one, cannot drop protection.
+    store.acknowledgeDraftInput(latest.id, 1)
+    await expect(store.saveDraft(sent)).rejects.toThrow('报销内容已发生变化')
+    expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    store.acknowledgeDraftInput(latest.id, 3)
+    vi.mocked(updateReimbursementDraft).mockResolvedValue({ ...latest, revision: 4, input: sent })
+    await store.saveDraft(sent)
+    expect(updateReimbursementDraft).toHaveBeenCalledTimes(2)
+    expect(store.revisionConflict).toBe(false)
+    expect(store.currentDraft?.revision).toBe(4)
+  })
+
   it.each(['save', 'file', 'preview', 'native', 'pipeline'].flatMap((operation) => [
     ['REIMBURSEMENT_DRAFT_REPLACED', { workspaceRetired: true }],
     ['REIMBURSEMENT_RECOVERY_PENDING', { recoveryPending: true }],
@@ -1487,6 +1512,8 @@ describe('persistent reimbursement draft store', () => {
       url: 'http://localhost/api/reimbursements/drafts/draft-1/excel-preview/native',
       headers: { 'X-Reimbursement-Download-Token': 'signed-ticket' },
       fileType: 'xlsx',
+      signal: expect.any(AbortSignal),
+      isCurrent: expect.any(Function),
     })
   })
 

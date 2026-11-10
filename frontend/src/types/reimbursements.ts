@@ -32,6 +32,8 @@ export interface ReimbursementDraftExpenseItemInput extends Omit<ExcelExpenseIte
   originalDetailsEdited?: boolean
   cnyAmountConfirmed?: boolean
   requiresCnyConfirmation?: boolean
+  dateEdited?: boolean
+  descriptionEdited?: boolean
 }
 
 export interface ReimbursementDraftInput extends Omit<ExcelGeneratePayload, 'items' | 'project'> {
@@ -115,6 +117,8 @@ export interface ReimbursementDraftList {
 }
 
 export interface ReimbursementSubmissionHistoryEntry {
+  totalAmount?: string
+  budgetLabel?: string
   id: string
   lockedAt: string
   relatedApprovalCount: number

@@ -1135,8 +1135,9 @@ async def generate_draft_excel_preview(
     # Do not serve a workbook calculated from a draft that changed during the
     # CPU-bound generation step.
     with session_factory() as database:
-        current = require_previewable_draft(database, draft_id=draft_id, actor=actor)
-        _require_revision(current, expected_revision)
+        current = require_previewable_draft(
+            database, draft_id=draft_id, actor=actor, expected_revision=expected_revision,
+        )
         if current.input_json != snapshot.canonical_input_json:
             raise _revision_conflict_error()
     return result
@@ -1151,8 +1152,9 @@ def _workbook_preview_snapshot(
     expected_revision: int,
     settings: Settings,
 ) -> WorkbookPreviewSnapshot:
-    draft = require_previewable_draft(database, draft_id=draft_id, actor=actor)
-    _require_revision(draft, expected_revision)
+    draft = require_previewable_draft(
+        database, draft_id=draft_id, actor=actor, expected_revision=expected_revision,
+    )
     recover_stale_running_ocr(
         database,
         draft_id=draft.id,
@@ -1426,16 +1428,14 @@ def _finish_ocr(
             actor=actor,
             mutable=True,
         )
-        if pipeline_input_json is None:
-            _require_revision(draft, operation_revision)
-        else:
-            _guard_pipeline_draft(
-                database,
-                draft=draft,
-                actor=actor,
-                input_json=pipeline_input_json,
-                session_id_hash=session_id_hash,
-            )
+        _guard_ocr_draft(
+            database,
+            draft=draft,
+            actor=actor,
+            expected_revision=operation_revision,
+            pipeline_input_json=pipeline_input_json,
+            session_id_hash=session_id_hash,
+        )
         file = database.scalar(
             select(ReimbursementDraftFile).where(
                 ReimbursementDraftFile.id == file_id,
@@ -1689,27 +1689,30 @@ def _admit_pipeline_ocr(
         _PIPELINE_INPUT_HASH_KEY
     ) != _pipeline_input_hash(draft.input_json):
         raise _revision_conflict_error()
-    _guard_pipeline_draft(
+    _guard_ocr_draft(
         database,
         draft=draft,
         actor=actor,
-        input_json=draft.input_json,
+        expected_revision=expected_revision,
+        pipeline_input_json=draft.input_json,
         session_id_hash=session_id_hash,
     )
     return draft.input_json
 
 
-def _guard_pipeline_draft(
+def _guard_ocr_draft(
     database: Session,
     *,
     draft: ReimbursementDraft,
     actor: DraftActor,
-    input_json: str,
+    expected_revision: int,
+    pipeline_input_json: str | None,
     session_id_hash: str | None,
 ) -> None:
-    # A conditional no-op write serializes this short metadata transaction
-    # against upload reservation, edits and submit, without spending a revision
-    # or holding a transaction during OCR. File marker CAS is checked separately.
+    # Claim a write lock before reading the file marker or changing classification.
+    # Ordinary retries require the exact revision; only initial pipeline OCR may
+    # accept upload-only revision changes while the saved input is unchanged.
+    # No transaction is held during OCR and completion spends no extra revision.
     now = utc_now()
     guarded = database.execute(
         update(ReimbursementDraft)
@@ -1719,11 +1722,15 @@ def _guard_pipeline_draft(
             ReimbursementDraft.owner_user_id == actor.user_id,
             ReimbursementDraft.department_id == actor.department_id,
             ReimbursementDraft.department_name == actor.department_name,
-            ReimbursementDraft.input_json == input_json,
+            ReimbursementDraft.revision == expected_revision
+            if pipeline_input_json is None
+            else ReimbursementDraft.input_json == pipeline_input_json,
             ReimbursementDraft.status.in_(
                 (ReimbursementDraftStatus.DRAFT.value, ReimbursementDraftStatus.REVIEW_READY.value)
             ),
             ReimbursementDraft.locked_at.is_(None),
+            ReimbursementDraft.recovery_pending.is_(False),
+            ReimbursementDraft.workspace_retired.is_(False),
             ReimbursementDraft.expires_at > now,
         )
         .values(revision=ReimbursementDraft.revision)
@@ -1731,7 +1738,7 @@ def _guard_pipeline_draft(
     )
     if guarded.rowcount != 1:
         raise _revision_conflict_error()
-    # The guarded file-only operation deliberately allows a concurrently
+    # The guarded pipeline operation deliberately allows a concurrently
     # reserved upload to advance the global revision. Read the locked row's
     # latest value instead of returning the pre-UPDATE ORM snapshot.
     database.refresh(draft)

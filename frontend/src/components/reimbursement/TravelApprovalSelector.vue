@@ -52,6 +52,8 @@ const keyword = ref('')
 const startCalendarMonth = computed(() => toDate.value ? new Date(`${toDate.value}T00:00:00`) : undefined)
 const endCalendarMonth = computed(() => fromDate.value ? new Date(`${fromDate.value}T00:00:00`) : undefined)
 const localError = ref('')
+const filtersOpen = ref(false)
+const hasFilters = computed(() => Boolean(fromDate.value || toDate.value || keyword.value.trim()))
 const queryNeedsAdjustment = computed(() => !!approvalQueryDateError(fromDate.value, toDate.value) || [
   'TRAVEL_APPROVAL_QUERY_HISTORY_UNAVAILABLE', 'TRAVEL_APPROVAL_QUERY_FUTURE',
   'TRAVEL_APPROVAL_QUERY_WINDOW_INVALID', 'DINGTALK_QUERY_TIME_INVALID',
@@ -59,6 +61,7 @@ const queryNeedsAdjustment = computed(() => !!approvalQueryDateError(fromDate.va
 const optionsNeedRefresh = computed(() => [
   'OA_TEMPLATE_CONFIGURATION_CHANGED', 'OA_TEMPLATE_SCHEMA_CHANGED', 'OA_TEMPLATE_CONFIRMATION_REQUIRED',
 ].includes(drafts.travelApprovalsErrorCode))
+watch(queryNeedsAdjustment, (value) => { if (value) filtersOpen.value = true }, { immediate: true })
 const candidateCache = new Map<string, OaTravelApproval>()
 
 const selectedIds = computed(() => new Set(
@@ -283,7 +286,7 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
           系统会优先匹配审批的发起部门；无法匹配当前部门时再请你确认。
         </p>
         <p v-else>
-          先选本人已通过的审批；可继续关联同一发起部门、公司、预算和出差类别的多张审批，日期不连续也可以。
+          可关联同一部门、公司、预算和出差类别的多张审批，日期可不连续。
         </p>
       </div>
       <el-tag
@@ -295,7 +298,25 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
       </el-tag>
     </div>
 
+    <div
+      v-if="props.mobile && !readonly"
+      class="approval-filter-heading"
+    >
+      <span>近期已通过的审批</span>
+      <el-button
+        link
+        type="primary"
+        aria-label="筛选审批"
+        :aria-expanded="filtersOpen"
+        aria-controls="approval-query-filters"
+        @click="filtersOpen = !filtersOpen"
+      >
+        {{ filtersOpen ? '收起筛选' : hasFilters ? '筛选审批 · 已设置' : '筛选审批' }}
+      </el-button>
+    </div>
     <fieldset
+      v-show="!props.mobile || filtersOpen"
+      id="approval-query-filters"
       class="plain-fieldset"
       :disabled="readonly"
     >
@@ -431,12 +452,13 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
     </div>
 
     <p class="field-help">
-      默认查询近期审批；需要更早记录时设置日期范围。选中的审批会自动保存。
+      选中的审批会自动保存。找不到时可筛选日期或标题。
     </p>
   </section>
 </template>
 
 <style scoped>
+.approval-filter-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; color: var(--el-text-color-secondary); font-size: 13px; }
 .travel-query-help { margin: 8px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
 .plain-fieldset {
   min-width: 0;

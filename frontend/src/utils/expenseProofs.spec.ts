@@ -85,4 +85,18 @@ describe('material submission readiness', () => {
     expect(materialSubmissionBlockReason(source, [{ sourceFileId: source.id }], [])).toBe('')
     expect(materialSubmissionBlockReason(source, [], [source.id])).toBe('')
   })
+
+  it.each([
+    ['itinerary', 'itineraryFileIds', '行程单'],
+    ['payment_proof', 'paymentProofFileIds', '付款凭证'],
+    ['hotel_bill', 'hotelBillFileIds', '住宿明细'],
+  ] as const)('requires %s to have an explicit expense association', (kind, field, label) => {
+    const proof = file({ attachmentKind: kind })
+    expect(materialSubmissionBlockReason(proof, [], [])).toBe(`${label}尚未关联费用`)
+    expect(materialSubmissionBlockReason(proof, [], [proof.id])).toBe(`${label}尚未关联费用`)
+    expect(materialSubmissionBlockReason(proof, [{ [field]: [proof.id] }], [])).toBe('')
+    expect(materialSubmissionBlockReason({ ...proof, attachmentKind: 'other' }, [], [])).toBe('')
+    expect(materialSubmissionBlockReason({ ...proof, status: 'PURGED' }, [], [])).toBe('')
+    expect(materialSubmissionBlockReason({ ...proof, ocrStatus: 'RUNNING' }, [], [])).toBe('材料仍在识别')
+  })
 })

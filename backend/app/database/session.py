@@ -9,7 +9,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 def create_database_engine(database_url: str) -> Engine:
     connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    engine = create_engine(database_url, connect_args=connect_args, pool_pre_ping=True)
+    engine = create_engine(
+        database_url, connect_args=connect_args, pool_pre_ping=True, hide_parameters=True
+    )
     if database_url.startswith("sqlite"):
         database_name = str(engine.url.database or "")
         use_wal = database_name not in {"", ":memory:"} and "mode=memory" not in database_url

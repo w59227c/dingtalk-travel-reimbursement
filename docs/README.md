@@ -2,13 +2,16 @@
 
 ## 当前业务与技术契约
 
-- 仓库根目录 [`README.md`](../README.md)：当前产品范围、业务规则，以及开发、配置、运行和部署入口。
+- 仓库根目录 [`README.md`](../README.md)：项目概览、本地启动、部署和检查入口。
+- [`PRODUCT_CONTRACT.md`](PRODUCT_CONTRACT.md)：当前业务范围、补助规则、Excel 契约、自动保存与材料限制。
 - [`DINGTALK_OA_INTEGRATION_DESIGN.md`](DINGTALK_OA_INTEGRATION_DESIGN.md)：草稿、材料、OCR、Excel、OA 提交、状态机、恢复和清理设计。
 
-上述两份文档是当前实现的权威说明。代码、迁移和测试发生变化时应同步维护。
+产品契约和 OA 集成设计是当前实现的权威说明。业务、迁移和状态机变化时同步维护对应章节，README 保持精简。
 
 ## 部署、构建与发布
 
+- [`DEVELOPMENT.md`](DEVELOPMENT.md)：依赖、本地启动、模型准备和真实钉钉联调。
+- [`OPERATIONS.md`](OPERATIONS.md)：就绪检查、隐私、备份、模型挂载与源码部署。
 - [`deployment/README.md`](deployment/README.md)：服务器部署、升级、回滚和运行检查；同目录保存部署用 `compose.yaml`。
 - [`GITHUB_ACTIONS_SETUP.md`](GITHUB_ACTIONS_SETUP.md)：镜像自动构建、验证与 GHCR 发布操作。
 - [`GITHUB_ACTIONS_DOCKER_DESIGN.md`](GITHUB_ACTIONS_DOCKER_DESIGN.md)：GitHub Actions 镜像发布、构建时下载 OCR 模型及 `.env` 边界设计。
@@ -27,6 +30,7 @@
 - [`research/DINGTALK_PERMISSION_CODES.md`](research/DINGTALK_PERMISSION_CODES.md)：生产所需钉钉权限编码。
 - [`research/DINGTALK_RELATED_APPROVAL_RESEARCH.md`](research/DINGTALK_RELATED_APPROVAL_RESEARCH.md)：查询并关联出差审批的接口依据。
 - [`research/FREE_LOCAL_OCR_RESEARCH.md`](research/FREE_LOCAL_OCR_RESEARCH.md)：免费本地 OCR 方案。
+- [`research/OXR_PROJECT_EVALUATION.md`](research/OXR_PROJECT_EVALUATION.md)：OXR 与当前票据流程的合成样本实测、部署条件及取舍；[官方资料核验](research/OXR_OFFICIAL_RESEARCH.md)保存固定版本的一手依据。
 - [`research/github-actions-docker-sources.md`](research/github-actions-docker-sources.md)：GitHub Actions、GHCR、Buildx 和运行配置的官方资料核对。
 - [`research/OPENCV5_UPGRADE_ASSESSMENT.md`](research/OPENCV5_UPGRADE_ASSESSMENT.md)：保持 PaddleOCR 所需 OpenCV 版本约束的依据。
 - [`research/PASSENGER_INVOICE_FIELDS_AND_MULTI_TRIP_RESEARCH.md`](research/PASSENGER_INVOICE_FIELDS_AND_MULTI_TRIP_RESEARCH.md)：旅客运输字段与多行程材料判断依据。

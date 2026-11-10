@@ -3,6 +3,7 @@ import { isItineraryOcrResult, type ItineraryOcrResult } from '@/types/receipts'
 import { receiptOcrResult, type ReimbursementDraftFile } from '@/types/reimbursements'
 import { isActiveProof, needsMaterialConfirmation } from '@/utils/expenseProofs'
 import { moneyToCents } from '@/utils/money'
+import { expenseReviewWarnings } from './expenseReview'
 
 interface NumberedEvidence { invoiceNumbers?: string[]; orderNumbers?: string[] }
 interface SourceInvoice { item: ExpenseItem; tokens: Set<string> }
@@ -211,12 +212,12 @@ function suggestAmountItineraries(items: readonly ExpenseItem[], files: readonly
     const fill: NonNullable<ItinerarySuggestion['fill']> = {}
     // Preserve edits: replace only an untouched invoice-date fallback or an
     // empty date, and only an empty description or the original category label.
-    if ((!item.date && !item.displayDate) || (issueDate && item.date === evidence.date
-      && (!item.displayDate || item.displayDate === evidence.date))) {
+    if (!item.dateEdited && ((!item.date && !item.displayDate) || (issueDate && item.date === evidence.date
+      && (!item.displayDate || item.displayDate === evidence.date)))) {
       fill.date = trip.date!
       fill.displayDate = trip.date!
     }
-    if (!item.description.trim() || (!evidence.description?.trim() && item.description.trim() === evidence.categoryName.trim())) {
+    if (!item.descriptionEdited && (!item.description.trim() || (!evidence.description?.trim() && item.description.trim() === evidence.categoryName.trim()))) {
       fill.description = `${trip.origin} → ${trip.destination}`
     }
     return [{ sourceFileId: file.id, itineraryFileId: proof.id, basis: 'amount_only', transportType: 'ride_hailing', fill,
@@ -230,21 +231,7 @@ export function suggestItineraries(items: readonly ExpenseItem[], files: readonl
     .filter((suggestion) => !exact.some((stronger) => stronger.sourceFileId === suggestion.sourceFileId))]
 }
 
-/** Derive resolved field hints from the persisted link, not from mutable OCR. */
+/** Kept for the hydration/confirmation call sites; OCR evidence stays immutable. */
 export function itineraryConfirmationWarnings(item: ExpenseItem, files: readonly ReimbursementDraftFile[]): string[] {
-  const warnings = item.warnings ?? []
-  if (!item.itineraryAutoMatchDisabled || item.itineraryFileIds?.length !== 1) return warnings
-  const proof = files.find((file) => file.id === item.itineraryFileIds![0] && isActiveProof(file, 'itinerary'))
-  const result = proof?.ocrResult
-  if (!proof || proof.ocrStatus !== 'COMPLETE' || !isItineraryOcrResult(result) || result.fileId !== proof.id
-    || result.status !== 'recognized' || !result.complete || result.error || result.warnings.length
-    || result.processedPageCount !== result.pageCount || result.trips.length !== 1) return warnings
-  const trip = result.trips[0]!
-  return warnings.filter((warning) => {
-    if (trip.date && item.date === trip.date && item.displayDate === trip.date
-      && ['MISSING_DATE', ...ISSUE_DATE_WARNINGS].includes(warning)) return false
-    if (trip.origin && trip.destination && item.description === `${trip.origin} → ${trip.destination}`
-      && ['MISSING_DESCRIPTION', 'MISSING_ROUTE'].includes(warning)) return false
-    return true
-  })
+  return expenseReviewWarnings(item, files)
 }

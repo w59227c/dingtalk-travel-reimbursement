@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import stat
@@ -219,7 +220,10 @@ async def parse_upload_files(
 ) -> list[UploadFile]:
     parser = BoundedUploadParser(headers, stream, settings=settings, budget=budget)
     try:
-        form = await parser.parse()
+        async with asyncio.timeout(settings.upload_receive_timeout_seconds):
+            form = await parser.parse()
+    except TimeoutError:
+        raise ApiError("UPLOAD_RECEIVE_TIMEOUT", "材料上传超时，请检查网络后重试", 408) from None
     except UploadMultipartError as exc:
         raise ApiError(exc.code, exc.message, exc.status_code) from exc
     except MultiPartException as exc:

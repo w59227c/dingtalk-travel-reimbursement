@@ -454,9 +454,7 @@ class SnapshotSubmissionMaterializer:
             heartbeat,
             lambda: self._workflow.get_form_schema(snapshot.template.process_code),
         )
-        stored_schema = form_schema_from_dict(
-            json.loads(snapshot.template.schema_canonical_json)
-        )
+        stored_schema = form_schema_from_dict(json.loads(snapshot.template.schema_canonical_json))
         fields = {field.logical_key: field.component_id for field in snapshot.template.fields}
         if (
             classify_schema_change(
@@ -522,10 +520,13 @@ class SnapshotSubmissionMaterializer:
             }
             try:
                 if profile.schema_contract_fingerprint is not None:
-                    if schema_contract_fingerprint(
-                        travel_schema,
-                        mapped_component_ids=set(travel_mapping.values()),
-                    ) != profile.schema_contract_fingerprint:
+                    if (
+                        schema_contract_fingerprint(
+                            travel_schema,
+                            mapped_component_ids=set(travel_mapping.values()),
+                        )
+                        != profile.schema_contract_fingerprint
+                    ):
                         raise ValueError
                 elif travel_schema.fingerprint != profile.schema_fingerprint:
                     # Snapshots created before structural compatibility metadata
@@ -612,8 +613,7 @@ class SnapshotSubmissionMaterializer:
                 )
             if (
                 related.originator_department_id is not None
-                and instance.originator_department_id
-                != related.originator_department_id
+                and instance.originator_department_id != related.originator_department_id
             ):
                 raise ApiError(
                     "TRAVEL_APPROVAL_DEPARTMENT_CHANGED",
@@ -1090,10 +1090,15 @@ class DatabaseSubmissionState:
         _validate_original_manifest(snapshot, job.uploads)
         for role, sort_order in generated_upload_manifest(snapshot):
             self._ensure_generated_file(
-                lease, job, role=role, sort_order=sort_order,
-                generate=(self._materializer.generate_bundle
-                          if role == ReimbursementUploadRole.GENERATED_PDF
-                          else self._materializer.generate_excel),
+                lease,
+                job,
+                role=role,
+                sort_order=sort_order,
+                generate=(
+                    self._materializer.generate_bundle
+                    if role == ReimbursementUploadRole.GENERATED_PDF
+                    else self._materializer.generate_excel
+                ),
             )
         return lease
 
@@ -1358,6 +1363,9 @@ class DatabaseSubmissionState:
                 draft_input=draft_input_from_snapshot(snapshot),
                 require_terminal_disposition=True,
                 require_submission_proofs=True,
+                # Existing immutable submissions retain their frozen manifest.
+                # New association policy is checked before preview/review/lock.
+                require_linked_support_files=False,
             )
             sources = database.scalars(
                 select(ReimbursementDraftFile).where(
@@ -1518,7 +1526,11 @@ class LinkedLocalFileMaintenance:
                     },
                 )
         with self._session_factory() as database:
-            source_candidates = list_due_bundled_source_release_candidates(database, limit=limit)
+            source_candidates = list_due_bundled_source_release_candidates(
+                database,
+                limit=limit,
+                now=release_at,
+            )
         for candidate in source_candidates:
             try:
                 await asyncio.to_thread(

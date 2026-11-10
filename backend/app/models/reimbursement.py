@@ -552,7 +552,8 @@ class ReimbursementSubmissionRecoveryAudit(Base):
     __table_args__ = (
         UniqueConstraint(
             "submission_id",
-            name="uq_reimbursement_submission_recovery_audits_submission",
+            "status_version_before",
+            name="uq_reimbursement_submission_recovery_audits_decision",
         ),
         CheckConstraint(
             "action IN ('ATTACH_INSTANCE', 'CONFIRM_NOT_CREATED')",
@@ -1146,29 +1147,26 @@ _SQLITE_REIMBURSEMENT_SAFETY_TRIGGERS = (
     CREATE TRIGGER trg_reimbursement_submissions_cleanup_guard_update
     BEFORE UPDATE ON reimbursement_submissions
     WHEN EXISTS (
-             SELECT 1
-             FROM reimbursement_uploads AS upload
-             WHERE upload.submission_id = OLD.id
-               AND upload.upload_status IN ('CLEANUP_PENDING', 'CLEANED')
-         )
-         AND (
-             NEW.id IS NOT OLD.id
-             OR NEW.process_instance_id IS NOT NULL
-             OR (
-                 NEW.status IS NOT 'ORPHAN_CLEANUP'
-                 AND (
-                     NEW.status IS NOT 'FAILED_FINAL'
-                     OR EXISTS (
-                         SELECT 1
-                         FROM reimbursement_uploads AS unfinished
-                         WHERE unfinished.submission_id = OLD.id
-                           AND unfinished.upload_status NOT IN (
-                               'PENDING', 'PUTTING', 'PUT_DONE', 'CLEANED', 'DISCARDED'
-                           )
-                     )
-                 )
-             )
-         )
+        SELECT 1 FROM reimbursement_uploads AS upload
+        WHERE upload.submission_id = OLD.id
+          AND upload.upload_status IN ('CLEANUP_PENDING', 'CLEANED')
+    ) AND (
+        NEW.id IS NOT OLD.id
+        OR NEW.process_instance_id IS NOT NULL
+        OR NEW.orphan_confirmed_at IS NULL
+        OR NEW.orphan_confirmation_code IS NULL
+        OR NOT (
+            NEW.status IN ('ORPHAN_CLEANUP', 'MANUAL_REVIEW')
+            OR (NEW.status = 'FAILED_RETRYABLE' AND NEW.resume_status IS 'ORPHAN_CLEANUP')
+            OR (NEW.status = 'FAILED_FINAL' AND NOT EXISTS (
+                SELECT 1 FROM reimbursement_uploads AS unfinished
+                WHERE unfinished.submission_id = OLD.id
+                  AND unfinished.upload_status NOT IN (
+                      'PENDING', 'PUTTING', 'PUT_DONE', 'CLEANED', 'DISCARDED'
+                  )
+            ))
+        )
+    )
     BEGIN
         SELECT RAISE(ABORT, 'OA instance and remote cleanup cannot coexist');
     END

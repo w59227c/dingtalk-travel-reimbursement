@@ -37,16 +37,16 @@ docker compose up -d --wait --wait-timeout 300
 docker compose ps
 ```
 
-访问端口由 `.env` 中的 `APP_BIND_ADDRESS` 和 `APP_PORT` 决定。当前项目 `.env` 使用 `0.0.0.0:5173`，对应 `http://服务器IP:5173`。检查服务：
+访问地址由 `.env` 中的 `APP_BIND_ADDRESS` 和 `APP_PORT` 决定。16C/32 GiB 示例默认监听 `127.0.0.1:8080`，供本机反向代理访问；需要其他设备直接访问时，按实际网络配置绑定地址和端口。以下检查示例使用默认端口，修改后需同步替换：
 
 ```bash
-curl -fsS http://127.0.0.1:5173/api/ready
+curl -fsS http://127.0.0.1:8080/api/ready
 docker compose logs --tail=100 backend web
 ```
 
 ## 更新
 
-确认 GitHub Actions 构建成功后，在服务器执行：
+确认 GitHub Actions 构建成功后，先停止接单与后台处理（停止 `web`、`backend`），备份同一时点的 `sqlite_data` 和 `reimbursement_staging`，并保存当前私密配置及镜像 SHA/digest。备份完成后在服务器执行下面的命令；容器启动会自动迁移数据库。
 
 ```bash
 cd /opt/dingtalk-travel-reimbursement
@@ -60,13 +60,11 @@ OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX R
 
 ## 回滚
 
-把 `.env` 中的标签改为需要回滚的完整 commit，例如：
+先停止接单及 worker，记录当前数据库 revision，并核对目标后端镜像的 `alembic heads`、数据库约束和快照格式兼容性。**不能仅改镜像标签就跨数据库版本回滚**：旧镜像无法识别新 revision，启动时的 `alembic upgrade head` 会失败；部分降级还会因业务记录或审计证据而被明确拒绝。
 
-```dotenv
-IMAGE_TAG=sha-38bc78ab5419d29611040b72728d6e483ac27740
-```
+只有确认目标镜像支持当前数据库和已保存快照时，才把 `.env` 的 `IMAGE_TAG` 改为 Actions 已成功发布的目标 `sha-<完整 commit>`，再执行 `docker compose pull` 和 `docker compose up -d --wait --wait-timeout 300`。恢复跟随主线时改回 `IMAGE_TAG=main`。
 
-然后重新执行 `docker compose pull` 和 `docker compose up -d --wait --wait-timeout 300`。恢复自动跟随主线时改回 `IMAGE_TAG=main`。
+存在数据库版本或快照不兼容时，优先发布修复版本。确需恢复旧版本，应在停机状态下同时恢复升级前同一时点的 SQLite、staging 与匹配镜像，保留当前数据副本供审计；恢复后先保持 `DINGTALK_OA_WORKER_ENABLED=false`，核对备份之后已经发生的钉钉提交、附件与检查点，再决定恢复接单。不要强改 `alembic_version`、强行丢弃证据或只恢复一个持久卷。
 
 回滚至旧 Paddle 镜像时，从 `.env` 移除 `OCR_ENGINE=onnxruntime` 或改为 `paddle_static`，让旧镜像按原配置启动。
 

@@ -78,6 +78,17 @@ def test_global_temp_quota_must_reserve_tmpfs_headroom() -> None:
         Settings(temp_storage_max_bytes=1024 * 1024 * 1024)
 
 
+def test_upload_receive_deadline_is_finite_bounded_and_wired_for_deployment() -> None:
+    assert Settings().upload_receive_timeout_seconds == 90
+    for invalid in (0, -1, 301, float("inf"), float("nan")):
+        with pytest.raises(ValidationError, match="upload_receive_timeout_seconds"):
+            Settings(upload_receive_timeout_seconds=invalid)
+    for env_name in (".env.example", ".env.production.example", ".env.production.16c32g.example"):
+        assert "UPLOAD_RECEIVE_TIMEOUT_SECONDS=90" in (REPOSITORY_ROOT / env_name).read_text()
+    compose = (REPOSITORY_ROOT / "docker-compose.yml").read_text()
+    assert "UPLOAD_RECEIVE_TIMEOUT_SECONDS: ${UPLOAD_RECEIVE_TIMEOUT_SECONDS:-90}" in compose
+
+
 def test_reimbursement_staging_quota_covers_one_complete_submission() -> None:
     with pytest.raises(ValidationError, match="REIMBURSEMENT_STAGING_MAX_BYTES"):
         Settings(

@@ -6,6 +6,7 @@ proxy="nginx/expense-proxy.conf"
 
 for required in \
     "server_tokens off" \
+    "access_log off" \
     "Content-Security-Policy" \
     "frame-src 'self' blob:" \
     "worker-src 'self' blob:" \
@@ -19,6 +20,13 @@ for required in \
 do
     grep -F "$required" "$config" >/dev/null
 done
+
+if ! grep -Eq '^[[:space:]]*error_log[[:space:]]+/dev/null[[:space:]]*;' "$config" || \
+    grep -E '^[[:space:]]*error_log[[:space:]]+' "$config" "$proxy" | \
+        grep -Ev 'error_log[[:space:]]+/dev/null[[:space:]]*;' >/dev/null; then
+    echo "Nginx HTTP errors must not persist request URLs or query values." >&2
+    exit 1
+fi
 
 for location in \
     'location ~ ^/api/reimbursements/drafts/[^/]+/files$ {' \

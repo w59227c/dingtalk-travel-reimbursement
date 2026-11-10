@@ -99,6 +99,42 @@ async def test_body_read_cancellation_closes_spool_and_releases_upload_admission
 
 
 @pytest.mark.asyncio
+async def test_slow_body_has_a_total_deadline_and_releases_other_users(settings_factory):
+    settings = settings_factory(upload_spool_memory_bytes=32, upload_receive_timeout_seconds=0.05)
+    coordinator = SessionFileCoordinator(upload_wait_seconds=0.01)
+    started = asyncio.Event()
+
+    async def slow_body():
+        yield (
+            b'--slow\r\nContent-Disposition: form-data; name="files[]"; '
+            b'filename="synthetic.png"\r\nContent-Type: image/png\r\n\r\n' + b"x" * 256
+        )
+        started.set()
+        while True:
+            await asyncio.sleep(0.005)
+            yield b"x"
+
+    async def upload():
+        async with coordinator.async_upload_lease("a" * 64):
+            await parse_upload_files(
+                Headers({"content-type": "multipart/form-data; boundary=slow"}),
+                slow_body(),
+                settings,
+                new_upload_budget(settings, "a" * 64, 0),
+            )
+
+    task = asyncio.create_task(upload())
+    await started.wait()
+    with pytest.raises(ApiError) as error:
+        await asyncio.wait_for(task, timeout=0.5)
+    assert error.value.code == "UPLOAD_RECEIVE_TIMEOUT"
+    assert error.value.status_code == 408
+    assert_no_spool_files(settings)
+    async with coordinator.async_upload_lease("b" * 64):
+        pass
+
+
+@pytest.mark.asyncio
 async def test_chunked_file_over_20_mib_is_rejected_during_parse(settings_factory) -> None:
     settings = settings_factory(upload_spool_memory_bytes=1024)
     with pytest.raises(ApiError) as error:

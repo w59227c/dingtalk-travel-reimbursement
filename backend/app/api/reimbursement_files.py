@@ -522,13 +522,9 @@ def create_excel_preview_ticket(
     current: Annotated[CurrentSession, Depends(require_csrf)],
 ) -> dict[str, object]:
     actor = draft_actor(current)
-    draft = require_previewable_draft(database, draft_id=draft_id, actor=actor)
-    if draft.revision != body.expected_revision:
-        raise ApiError(
-            "REIMBURSEMENT_DRAFT_REVISION_CONFLICT",
-            "报销内容版本已更新，请刷新后重试",
-            409,
-        )
+    require_previewable_draft(
+        database, draft_id=draft_id, actor=actor, expected_revision=body.expected_revision,
+    )
     token = issue_excel_preview_ticket(
         draft_id=draft_id,
         expected_revision=body.expected_revision,

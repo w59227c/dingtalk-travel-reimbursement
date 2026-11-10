@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ExpenseItem } from '@/types/expenses'
 import type { ItineraryOcrResult, OcrReceiptCandidate } from '@/types/receipts'
 import type { ReimbursementDraftFile } from '@/types/reimbursements'
-import { matchItineraries, suggestItineraries } from './itineraryMatching'
+import { itineraryConfirmationWarnings, matchItineraries, suggestItineraries } from './itineraryMatching'
 
 function invoice(id: string, changes: Partial<OcrReceiptCandidate> = {}): ReimbursementDraftFile {
   return {
@@ -39,6 +39,17 @@ function itinerary(id: string, changes: Partial<ItineraryOcrResult> = {}): Reimb
 }
 
 describe('conservative itinerary matching', () => {
+  it('clears a derived review flag when an explicitly confirmed itinerary resolves its only date warning', () => {
+    const source = invoice('invoice', { warnings: ['INVOICE_DATE_USED_AS_OCCURRENCE'] })
+    const expense = item('invoice', {
+      itineraryFileIds: ['proof'], itineraryAutoMatchDisabled: true,
+      description: '合肥机场 → 滨湖酒店',
+      warnings: ['INVOICE_DATE_USED_AS_OCCURRENCE', 'MANUAL_REVIEW_REQUIRED'],
+    })
+    expect(itineraryConfirmationWarnings(expense, [source, itinerary('proof')])).toEqual([])
+    expect(source.ocrResult?.warnings).toEqual(['INVOICE_DATE_USED_AS_OCCURRENCE'])
+  })
+
   it('never matches or recommends an itinerary for a confirmed taxi', () => {
     const source = invoice('invoice', { transportType: 'taxi', invoiceNumbers: ['INV-001'] })
     const taxi = item('invoice', { transportType: 'taxi' })

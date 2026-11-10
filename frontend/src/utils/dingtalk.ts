@@ -48,10 +48,12 @@ export interface DingTalkDocumentInput {
   url: string
   headers: Record<string, string>
   fileType: string
+  signal?: AbortSignal
+  isCurrent?: () => boolean
 }
 
 function readableError(error: unknown, fallback = '无法从钉钉获取免登授权码'): Error {
-  if (error instanceof Error) return error
+  if (error instanceof Error || error instanceof DOMException) return error
   if (error && typeof error === 'object') {
     const message = 'errorMessage' in error ? error.errorMessage : undefined
     if (typeof message === 'string' && message.trim()) return new Error(message)
@@ -62,10 +64,9 @@ function readableError(error: unknown, fallback = '无法从钉钉获取免登�
 export async function requestDingTalkAuthCode(corpId: string, clientId: string): Promise<string> {
   // Existing sessions and development Mock do not need the large DingTalk SDK.
   // Load it only when a real免登 handshake is actually required.
-  const { default: dd } = await import('dingtalk-jsapi')
-  const bridge = dd as unknown as DingTalkBridge
   return new Promise((resolve, reject) => {
     let settled = false
+    let invoked = false
     const succeed = (result: AuthCodeResult) => {
       if (!settled && result?.code) {
         settled = true
@@ -80,7 +81,9 @@ export async function requestDingTalkAuthCode(corpId: string, clientId: string):
         reject(readableError(error))
       }
     }
-    const invoke = () => {
+    const invoke = (bridge: DingTalkBridge) => {
+      if (settled || invoked) return
+      invoked = true
       const request = bridge.requestAuthCode
       if (!request) {
         fail(new Error('当前钉钉客户端不支持 dd.requestAuthCode，请升级客户端后重试'))
@@ -102,32 +105,52 @@ export async function requestDingTalkAuthCode(corpId: string, clientId: string):
       () => fail(new Error('钉钉免登响应超时，请从公司钉钉工作台重新打开本应用')),
       AUTH_CODE_TIMEOUT_MS,
     )
-    bridge.error?.(fail)
-    if (typeof bridge.ready === 'function') bridge.ready(invoke)
-    else invoke()
+    // The same deadline includes loading the SDK, its readiness and the call.
+    void import('dingtalk-jsapi').then(({ default: dd }) => {
+      if (settled) return
+      const bridge = dd as unknown as DingTalkBridge
+      bridge.error?.(fail)
+      if (settled) return
+      if (typeof bridge.ready === 'function') bridge.ready(() => invoke(bridge))
+      else invoke(bridge)
+    }).catch(fail)
   })
 }
 
 export async function downloadAndOpenDingTalkDocument(
   input: DingTalkDocumentInput,
 ): Promise<void> {
-  const { default: dd } = await import('dingtalk-jsapi')
-  const bridge = dd as unknown as DingTalkBridge
+  const isCancelled = () => input.signal?.aborted || input.isCurrent?.() === false
+  const cancellation = () => new DOMException('已取消原报销文件预览', 'AbortError')
+  if (isCancelled()) throw cancellation()
   return new Promise((resolve, reject) => {
     let settled = false
+    let invoked = false
+    const cleanup = () => {
+      clearTimeout(timeout)
+      input.signal?.removeEventListener('abort', abort)
+    }
     const succeed = () => {
       if (settled) return
       settled = true
-      clearTimeout(timeout)
+      cleanup()
       resolve()
     }
     const fail = (error: unknown) => {
       if (settled) return
       settled = true
-      clearTimeout(timeout)
+      cleanup()
       reject(readableError(error, '钉钉文件预览失败，请升级钉钉后重试'))
     }
-    const invoke = async () => {
+    const abort = () => fail(cancellation())
+    const inactive = () => {
+      if (settled) return true
+      if (isCancelled()) { abort(); return true }
+      return false
+    }
+    const invoke = async (bridge: DingTalkBridge) => {
+      if (inactive() || invoked) return
+      invoked = true
       if (!bridge.downloadFile || !bridge.openDocument) {
         fail(new Error('当前钉钉客户端不支持文件预览，请升级钉钉后重试'))
         return
@@ -137,6 +160,7 @@ export async function downloadAndOpenDingTalkDocument(
           url: input.url,
           header: input.headers,
         })
+        if (inactive()) return
         if (!downloaded.filePath) {
           throw new Error('钉钉未返回已下载文件，请升级钉钉后重试')
         }
@@ -144,7 +168,7 @@ export async function downloadAndOpenDingTalkDocument(
           filePath: downloaded.filePath,
           fileType: input.fileType,
         })
-        succeed()
+        if (!inactive()) succeed()
       } catch (error) {
         fail(error)
       }
@@ -153,9 +177,16 @@ export async function downloadAndOpenDingTalkDocument(
       () => fail(new Error('钉钉文件下载超时，请检查网络后重试')),
       DOCUMENT_OPEN_TIMEOUT_MS,
     )
-    bridge.error?.(fail)
-    if (typeof bridge.ready === 'function') bridge.ready(() => void invoke())
-    else void invoke()
+    input.signal?.addEventListener('abort', abort, { once: true })
+    if (inactive()) return
+    void import('dingtalk-jsapi').then(({ default: dd }) => {
+      if (inactive()) return
+      const bridge = dd as unknown as DingTalkBridge
+      bridge.error?.(fail)
+      if (inactive()) return
+      if (typeof bridge.ready === 'function') bridge.ready(() => void invoke(bridge))
+      else void invoke(bridge)
+    }).catch(fail)
   })
 }
 
