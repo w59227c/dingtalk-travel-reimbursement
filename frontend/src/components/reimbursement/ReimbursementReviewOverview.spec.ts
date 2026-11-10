@@ -19,8 +19,8 @@ describe('reimbursement review overview', () => {
     expect(wrapper.text()).toContain('合成公司')
     expect(wrapper.text()).toContain('合成部门')
     const dates = wrapper.get('.review-overview__dates')
-    expect(dates.get('dt').text()).toContain('已关联 3 张审批')
-    expect(dates.get('dd').text()).not.toContain('已关联')
+    expect(dates.get('dt').text()).toBe('出差日期')
+    expect(dates.get('dd small').text()).toBe('已关联 3 张审批')
     expect(dates.findAll('.review-overview__period').map(period => period.text())).toEqual([
       '2026-12-30 至 2027-01-02', '2027-01-06',
     ])

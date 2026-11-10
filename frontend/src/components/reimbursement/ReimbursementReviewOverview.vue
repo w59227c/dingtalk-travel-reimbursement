@@ -34,19 +34,17 @@ const emit = defineEmits<{ approvals: [] }>()
         <dt>预算项目</dt><dd>{{ budget || '尚未关联审批' }}</dd>
       </div>
       <div class="review-overview__dates">
-        <dt>
-          出差日期
-          <small v-if="approvalCount">已关联 {{ approvalCount }} 张审批</small>
-        </dt>
+        <dt>出差日期</dt>
         <dd>
           <span
             v-for="period in periods"
             :key="`${period.startDate}-${period.endDate}`"
             class="review-overview__period"
           >
-            {{ period.startDate }}<template v-if="period.startDate !== period.endDate"> 至 {{ period.endDate }}</template>
+            <span class="review-overview__date">{{ period.startDate }}</span><template v-if="period.startDate !== period.endDate">{{ ' ' }}<span class="review-overview__date">至 {{ period.endDate }}</span></template>
           </span>
           <span v-if="!periods.length">尚未关联审批</span>
+          <small v-if="approvalCount">已关联 {{ approvalCount }} 张审批</small>
         </dd>
       </div>
     </dl>
@@ -59,13 +57,14 @@ header { display: flex; align-items: center; justify-content: space-between; gap
 h3 { margin: 0; font-size: 16px; }
 dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 32px; margin: 12px 0 0; }
 dl > div { min-width: 0; }
-dt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-bottom: 4px; color: var(--el-text-color-secondary); }
+dt { margin-bottom: 4px; color: var(--el-text-color-secondary); line-height: 1.6; }
 dd { margin: 0; min-width: 0; overflow-wrap: anywhere; line-height: 1.6; }
 .review-overview__period { display: block; }
-small { font-size: 12px; }
+.review-overview__period + .review-overview__period { margin-top: 4px; }
+.review-overview__date { white-space: nowrap; }
+small { display: block; margin-top: 4px; color: var(--el-text-color-secondary); font-size: 12px; }
 .review-overview--mobile dl { grid-template-columns: minmax(0, 1fr); gap: 10px; }
 .review-overview--mobile dl > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; }
 .review-overview--mobile dt { margin-bottom: 0; }
-.review-overview--mobile dl > .review-overview__dates { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 @media (max-width: 600px) { .review-overview:not(.review-overview--mobile) dl { grid-template-columns: minmax(0, 1fr); } }
 </style>
