@@ -4,12 +4,14 @@ import logging
 import math
 import re
 import unicodedata
+from collections.abc import Sequence
 from copy import copy
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from openpyxl import load_workbook
@@ -19,7 +21,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.core.errors import ApiError
 from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
-from app.domain.expenses import ExpenseTotals
+from app.domain.expenses import ExpenseTotals, expense_output_sort_key
 from app.domain.money import quantize_money
 from app.domain.subsidy import SubsidyCalculation
 from app.excel.template_contract import (
@@ -49,6 +51,9 @@ _INVALID_FILENAME_CHARACTERS = re.compile(r"[\\/:*?\"<>|\x00-\x1f\x7f]")
 _DANGEROUS_FORMULA_PREFIXES = ("=", "+", "-", "@")
 _MAX_ROW_HEIGHT = 409.5
 _MAX_CELL_TEXT_LENGTH = 32_767
+
+# A tuple gives the frozen indices of ordinary rows. None selects historical Excel order.
+ExcelDetailOrder = tuple[int, ...] | Literal["current"] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +164,7 @@ def _subsidy_description(trip: TripInput, subsidy: SubsidyCalculation) -> str:
 
 
 def _ordered_lines(
-    items: list[ExcelExpenseItemInput],
+    items: Sequence[ExcelExpenseItemInput],
     trip: TripInput | None,
     subsidy: SubsidyCalculation | None,
     trips: list[TripInput] | tuple[TripInput, ...] = (),
@@ -167,21 +172,22 @@ def _ordered_lines(
     detailed_subsidies: bool = True,
     attendance_format: AttendanceDescriptionFormat = CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
     compact_subsidies: bool = True,
+    detail_order: ExcelDetailOrder = "current",
 ) -> list[OutputLine]:
-    indexed_lines = [
-        (
-            item.date,
-            index,
-            OutputLine(
-                category=item.category,
-                sort_date=item.date,
-                display_date=_display_date(item.date, item.display_date),
-                description=item.description,
-                amount=item.amount,
-                receipt_count=item.receipt_count,
-            ),
+    if detail_order == "current":
+        items = sorted(items, key=lambda item: expense_output_sort_key(item.date, item.category))
+    elif detail_order is not None:
+        items = [items[index] for index in detail_order]
+    lines = [
+        OutputLine(
+            category=item.category,
+            sort_date=item.date,
+            display_date=_display_date(item.date, item.display_date),
+            description=item.description,
+            amount=item.amount,
+            receipt_count=item.receipt_count,
         )
-        for index, item in enumerate(items)
+        for item in items
     ]
     if trips and subsidies:
         subsidy_pairs = list(zip(trips, subsidies, strict=True))
@@ -196,8 +202,8 @@ def _ordered_lines(
             [pair[0] for pair in subsidy_pairs], [pair[1] for pair in subsidy_pairs]
         )
         if summary is not None:
-            indexed_lines.append((
-                summary.last_date, len(items), OutputLine(
+            lines.append(
+                OutputLine(
                     category=ExpenseCategory.SUBSIDY,
                     sort_date=summary.last_date,
                     display_date=f"{summary.last_date.year}/{summary.last_date.month}/{summary.last_date.day}",
@@ -207,19 +213,16 @@ def _ordered_lines(
                     receipt_count=0,
                     subsidy=True,
                 ),
-            ))
-        return [line for _, _, line in sorted(indexed_lines, key=lambda item: (item[0], item[1]))]
-    for index, (subsidy_trip, subsidy_item) in enumerate(subsidy_pairs):
-        explanation = (
-            subsidy_explanation(subsidy_trip, subsidy_item, attendance_format=attendance_format)
-            if detailed_subsidies
-            and (subsidy_trip.excluded_periods or subsidy_trip.attendance_dates is not None)
-            else ()
-        )
-        indexed_lines.append(
-            (
-                subsidy_trip.end_date,
-                len(items) + index,
+            )
+    else:
+        for subsidy_trip, subsidy_item in subsidy_pairs:
+            explanation = (
+                subsidy_explanation(subsidy_trip, subsidy_item, attendance_format=attendance_format)
+                if detailed_subsidies
+                and (subsidy_trip.excluded_periods or subsidy_trip.attendance_dates is not None)
+                else ()
+            )
+            lines.append(
                 OutputLine(
                     category=ExpenseCategory.SUBSIDY,
                     sort_date=subsidy_trip.end_date,
@@ -233,8 +236,9 @@ def _ordered_lines(
                     detail_lines=explanation[1:],
                 ),
             )
-        )
-    return [line for _, _, line in sorted(indexed_lines, key=lambda item: (item[0], item[1]))]
+    if detail_order is None:
+        lines.sort(key=lambda line: line.sort_date)
+    return lines
 
 
 def _description_height(text: str, width: float) -> float:
@@ -360,7 +364,7 @@ def generate_expense_workbook(
     department_name: str,
     project: ResolvedProject,
     trip: TripInput | None,
-    items: list[ExcelExpenseItemInput],
+    items: Sequence[ExcelExpenseItemInput],
     subsidy: SubsidyCalculation | None,
     totals: ExpenseTotals,
     trips: list[TripInput] | tuple[TripInput, ...] = (),
@@ -370,6 +374,7 @@ def generate_expense_workbook(
         CURRENT_ATTENDANCE_DESCRIPTION_FORMAT
     ),
     compact_subsidies: bool = True,
+    detail_order: ExcelDetailOrder = "current",
 ) -> WorkbookResult:
     workbook, worksheet = load_validated_template(template_path)
     try:
@@ -409,6 +414,7 @@ def generate_expense_workbook(
                 items, trip, subsidy, trips, subsidies, detailed_subsidies,
                 attendance_description_format,
                 compact_subsidies,
+                detail_order,
             ),
             description_width,
         )

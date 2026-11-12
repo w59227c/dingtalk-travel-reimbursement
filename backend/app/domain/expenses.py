@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 from app.core.errors import ApiError
+from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
 from app.domain.money import (
     MAX_REIMBURSEMENT_AMOUNT,
     amount_to_chinese_uppercase,
@@ -12,6 +14,13 @@ from app.domain.money import (
 )
 from app.domain.subsidy import SubsidyCalculation
 from app.schemas.expenses import ExpenseLineBase
+
+
+def expense_output_sort_key(
+    occurrence_date: date, category: ExpenseCategory,
+) -> tuple[date, int]:
+    # The stable sort preserves saved order within each date and category.
+    return occurrence_date, CATEGORY_BY_ID[category].order
 
 
 @dataclass(frozen=True, slots=True)

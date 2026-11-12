@@ -331,6 +331,16 @@ def test_snapshot_serializer_rejects_an_oversized_aggregate(monkeypatch) -> None
         serialize_snapshot(snapshot)
 
 
+@pytest.mark.parametrize("detail_order", [[], [0, 0], [0, 2], [False, 1]])
+def test_snapshot_rejects_invalid_frozen_expense_indices(detail_order) -> None:
+    value = json.loads(serialize_snapshot(build_snapshot(_source())))
+    value["detailOrder"] = detail_order
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+    with pytest.raises(ApiError, match="快照"):
+        parse_snapshot(raw)
+
+
 def test_snapshot_parser_rejects_noncanonical_unknown_version_and_wrong_hash() -> None:
     snapshot = build_snapshot(_source())
     serialized = serialize_snapshot(snapshot)

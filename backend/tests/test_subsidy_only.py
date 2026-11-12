@@ -119,6 +119,7 @@ def test_v9_canonical_snapshot_keeps_two_attachments_and_no_new_fields():
     raw["snapshotVersion"] = 9
     raw.pop("attachmentMode")
     raw.pop("subsidyDescriptionFormat")
+    raw.pop("detailOrder")
     next(item for item in raw["formValues"] if item["logicalKey"] == "description")[
         "value"
     ] = _description_v1(snapshot.input.items, snapshot.subsidy, snapshot.totals)

@@ -179,6 +179,7 @@ def test_locked_city_snapshot_preview_idempotency_and_worker_ignore_later_calend
         value = build_snapshot(source).model_dump(mode="json", by_alias=True)
         value.pop("subsidyDescriptionFormat", None)
         value.pop("attendanceDescriptionFormat", None)
+        value.pop("detailOrder", None)
         if frozen_format is not None:
             value["attendanceDescriptionFormat"] = frozen_format
         for field in value["formValues"]:

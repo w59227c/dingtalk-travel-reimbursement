@@ -187,6 +187,57 @@ describe('ExpenseItemsCard durable files', () => {
     vi.unstubAllGlobals()
   })
 
+  it.each([
+    { mobile: false, selector: '.el-table__row' },
+    { mobile: true, selector: '.expense-mobile-card' },
+  ])('keeps same-day expenses in saved order after changing category (mobile=$mobile)', async ({ mobile, selector }) => {
+    const expense = useExpenseStore()
+    expense.categories = [
+      { id: 'rail_fare', name: '火车票', order: 2, manualSelectable: true },
+      { id: 'local_transport', name: '市内交通费', order: 3, manualSelectable: true },
+      { id: 'lodging', name: '住宿费', order: 4, manualSelectable: true },
+    ]
+    vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    const saved = draft()
+    const savedItems = [
+      ['2026-09-03', 'rail_fare', '次日火车'],
+      ['2026-09-02', 'lodging', '当天住宿'],
+      ['2026-09-02', 'rail_fare', '同类先保存'],
+      ['2026-09-01', 'local_transport', '最早交通'],
+      ['2026-09-02', 'rail_fare', '同类后保存'],
+      [null, 'rail_fare', '待确认日期'],
+    ] as const
+    saved.input.items = savedItems.map(([date, category, description]) => ({
+      date, displayDate: date ?? '', category, description, amount: '10.00', receiptCount: 1,
+    }))
+    useReimbursementDraftStore().currentDraft = saved
+    expense.hydrateFromDraft(saved, [])
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    await flushPromises()
+
+    const descriptions = () => wrapper.findAll(selector).map(row =>
+      row.get('.expense-item-card__description').text())
+    const displayOrder = ['最早交通', '当天住宿', '同类先保存', '同类后保存', '次日火车', '待确认日期']
+    expect(descriptions()).toEqual(displayOrder)
+
+    const editedRow = wrapper.findAll(selector).find(row => row.text().includes('当天住宿'))!
+    await editedRow.findAll('button').find(button => button.text() === '编辑')!.trigger('click')
+    const editor = wrapper.findAllComponents({ name: 'ElDialog' })
+      .find(dialog => dialog.props('title') === '编辑费用明细')!
+    const category = editor.findAllComponents({ name: 'ElFormItem' })
+      .find(field => field.props('label') === '费用类别')!
+    category.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'rail_fare')
+    await flushPromises()
+    await editor.findAll('button').find(button => button.text() === '保存')!.trigger('click')
+    await flushPromises()
+
+    expect(descriptions()).toEqual(displayOrder)
+    const toSave = expense.buildDraftExpenseItems()
+    expect(toSave.map(item => item.description)).toEqual(savedItems.map(([, , name]) => name))
+    expect(toSave[1]).toMatchObject({ date: '2026-09-02', category: 'rail_fare' })
+    wrapper.unmount()
+  })
+
   it.each([false, true])('uploads a manual aggregate photo without OCR and restores count and attachment (mobile=%s)', async (mobile) => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]

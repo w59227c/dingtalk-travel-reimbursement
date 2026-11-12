@@ -62,6 +62,8 @@ OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX R
 
 先停止接单及 worker，记录当前数据库 revision，并核对目标后端镜像的 `alembic heads`、数据库约束和快照格式兼容性。**不能仅改镜像标签就跨数据库版本回滚**：旧镜像无法识别新 revision，启动时的 `alembic upgrade head` 会失败；部分降级还会因业务记录或审计证据而被明确拒绝。
 
+新锁定的单据在版本 11 快照中写入 `detailOrder`，数据库 revision 保持原值。旧后端镜像会拒绝带该字段的快照。生成首份新快照后，保留当前数据的镜像回滚只能选用支持 `detailOrder` 的版本。确需回到更早的镜像时，按下方步骤恢复升级前的一致性备份。
+
 只有确认目标镜像支持当前数据库和已保存快照时，才把 `.env` 的 `IMAGE_TAG` 改为 Actions 已成功发布的目标 `sha-<完整 commit>`，再执行 `docker compose pull` 和 `docker compose up -d --wait --wait-timeout 300`。恢复跟随主线时改回 `IMAGE_TAG=main`。
 
 存在数据库版本或快照不兼容时，优先发布修复版本。确需恢复旧版本，应在停机状态下同时恢复升级前同一时点的 SQLite、staging 与匹配镜像，保留当前数据副本供审计；恢复后先保持 `DINGTALK_OA_WORKER_ENABLED=false`，核对备份之后已经发生的钉钉提交、附件与检查点，再决定恢复接单。不要强改 `alembic_version`、强行丢弃证据或只恢复一个持久卷。

@@ -152,6 +152,7 @@ def test_manual_receipt_is_frozen_in_v8_and_legacy_snapshots_still_roundtrip():
     def legacy_format(value):
         return value.model_copy(update={
             "subsidy_description_format": None,
+            "detail_order": None,
             "form_values": tuple(field.model_copy(update={"value": _description_v1(
                 value.input.items, value.subsidy, value.totals,
             )}) if field.logical_key == "description" else field for field in value.form_values),
@@ -207,7 +208,7 @@ def test_v8_aggregate_payment_exemption_does_not_change_frozen_legacy_rules():
     for legacy_version in (6, 7):
         with pytest.raises(ValidationError, match="payment proof"):
             serialize_snapshot(snapshot.model_copy(update={
-                "snapshot_version": legacy_version, "attachment_mode": None,
+                "snapshot_version": legacy_version, "attachment_mode": None, "detail_order": None,
             }))
 
 

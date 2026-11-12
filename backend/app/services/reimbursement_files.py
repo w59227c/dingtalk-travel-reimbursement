@@ -1122,7 +1122,7 @@ async def generate_draft_excel_preview(
         department_name=snapshot.excel.department_name,
         project=snapshot.excel.project,
         trip=snapshot.excel.trip,
-        items=list(snapshot.excel.items),
+        items=snapshot.excel.items,
         subsidy=snapshot.excel.subsidy,
         totals=snapshot.excel.totals,
         trips=snapshot.excel.trips,
@@ -1130,6 +1130,7 @@ async def generate_draft_excel_preview(
         detailed_subsidies=snapshot.excel.detailed_subsidies,
         compact_subsidies=snapshot.excel.compact_subsidies,
         attendance_description_format=snapshot.excel.attendance_description_format,
+        detail_order=snapshot.excel.detail_order,
     )
 
     # Do not serve a workbook calculated from a draft that changed during the

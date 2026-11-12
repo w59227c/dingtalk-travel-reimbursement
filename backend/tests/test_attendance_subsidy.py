@@ -315,6 +315,7 @@ def test_legacy_city_snapshot_keeps_original_half_day_result_and_json(monkeypatc
 
     def legacy_model(**values):
         values["subsidy_description_format"] = None
+        values["detail_order"] = None
         values["form_values"] = tuple(
             value.model_copy(update={"value": payloads._description_v1(
                 values["input"].items, values["subsidy"], values["totals"], values["subsidies"],

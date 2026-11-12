@@ -18,6 +18,7 @@ from test_receipt_bundle import image_bytes, pdf_bytes
 from app.api import reimbursement_submissions as submission_api
 from app.core.errors import ApiError
 from app.database.base import Base
+from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
 from app.integrations.dingtalk.storage import (
     ApprovalAttachment,
     ApprovalFile,
@@ -65,7 +66,11 @@ from app.services.oa_reimbursement import (
     OAReimbursementProcessor,
     SnapshotSubmissionMaterializer,
 )
-from app.services.oa_reimbursement_payload import parse_snapshot
+from app.services.oa_reimbursement_payload import (
+    ReimbursementSnapshot,
+    build_snapshot,
+    parse_snapshot,
+)
 from app.services.oa_template_profiles import (
     TravelProfileConfirmation,
     confirm_template_catalog,
@@ -1560,6 +1565,205 @@ def test_validation_splits_a_180_day_membership_window_before_querying_dingtalk(
     assert workflow.query_ranges[0][1] + 1 == workflow.query_ranges[1][0]
     assert len(workflow.query_ranges) == 2
     assert workflow.create_calls == 1
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["new-order", "locked-old-order"])
+def test_expense_output_order_across_preview_oa_excel_and_bundle(
+    enabled_manual_worker_client, monkeypatch, legacy,
+):
+    client = enabled_manual_worker_client
+    headers = {"X-CSRF-Token": str(mock_login(client)["csrfToken"])}
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement_schema, travel_schema)
+    draft_id, _ = _persist_ready_draft(
+        client,
+        workflow,
+        travel_type,
+        with_materials=False,
+        excluded_periods=[
+            {"type": "early_end", "startDate": "2026-09-02", "startTime": "18:00"},
+        ],
+    )
+    storage = LocalStorageBoundary()
+    uploads = {
+        "Other first": "other",
+        "Hotel payment": "payment_proof",
+        "Rail late": "other",
+        "Taxi B": "other",
+        "Other second": "other",
+        "Shared itinerary": "itinerary",
+        "Hotel": "source",
+        "Hotel bill": "hotel_bill",
+        "Rail early": "other",
+        "Taxi A": "other",
+    }
+    saved_order = ["Rail late", "Hotel", "Taxi A", "Rail early", "Taxi B"]
+    new_order = ["Rail early", "Taxi A", "Taxi B", "Hotel", "Rail late"]
+    legacy_excel_order = ["Hotel", "Taxi A", "Rail early", "Taxi B", "出差补助", "Rail late"]
+    new_pdf_order = [
+        "Rail early", "Taxi A", "Shared itinerary", "Taxi B", "Hotel",
+        "Hotel bill", "Hotel payment", "Rail late", "Other first", "Other second",
+    ]
+    old_pdf_order = [
+        "Rail late", "Hotel", "Hotel bill", "Hotel payment", "Taxi A",
+        "Shared itinerary", "Rail early", "Taxi B", "Other first", "Other second",
+    ]
+
+    with client.app.state.database_session_factory() as database:
+        draft = database.get(ReimbursementDraft, draft_id)
+        file_ids = {}
+        staging = client.app.state.reimbursement_staging
+        for order, (label, kind) in enumerate(uploads.items()):
+            content = pdf_bytes(label)
+            reservation = staging.new_reservation(
+                StagingArea.DRAFTS, draft_id, "pdf", reserved_bytes=len(content),
+            )
+            staged = staging.write_bytes(reservation, content)
+            file = ReimbursementDraftFile(
+                draft_id=draft_id,
+                sort_order=order,
+                processing_role="EXPENSE_SOURCE" if kind == "source" else "ATTACHMENT_ONLY",
+                attachment_kind="other" if kind == "source" else kind,
+                file_status="ACTIVE",
+                storage_key=staged.storage_key,
+                original_name=f"{label}.pdf",
+                extension="pdf",
+                media_type="application/pdf",
+                reserved_bytes=staged.size_bytes,
+                size_bytes=staged.size_bytes,
+                sha256=staged.sha256,
+                ocr_status="COMPLETE" if kind == "source" else "NOT_REQUESTED",
+            )
+            database.add(file)
+            database.flush()
+            file_ids[label] = file.id
+
+        value = json.loads(draft.input_json)
+        value["items"] = [
+            {
+                "date": "2026-09-03" if label == "Rail late" else "2026-09-01",
+                "displayDate": "票面日期",
+                "category": category,
+                "description": label,
+                "amount": "600.00" if label == "Hotel" else "10.00",
+                **evidence,
+            }
+            for label, category, evidence in [
+                ("Rail late", "rail_fare", {"receiptAttachmentFileIds": [file_ids["Rail late"]]}),
+                ("Hotel", "lodging", {
+                    "sourceFileId": file_ids["Hotel"],
+                    "hotelBillFileIds": [file_ids["Hotel bill"]],
+                    "paymentProofFileIds": [file_ids["Hotel payment"]],
+                }),
+                ("Taxi A", "local_transport", {
+                    "receiptAttachmentFileIds": [file_ids["Taxi A"]],
+                    "transportType": "ride_hailing",
+                    "itineraryFileIds": [file_ids["Shared itinerary"]],
+                }),
+                ("Rail early", "rail_fare", {"receiptAttachmentFileIds": [file_ids["Rail early"]]}),
+                ("Taxi B", "local_transport", {
+                    "receiptAttachmentFileIds": [file_ids["Taxi B"]],
+                    "transportType": "ride_hailing",
+                    "itineraryFileIds": [file_ids["Shared itinerary"]],
+                }),
+            ]
+        ]
+        draft.input_json = validate_and_calculate_input(
+            database,
+            catalog=require_submission_ready_catalog(database),
+            draft_input=ReimbursementDraftInput.model_validate(value),
+            max_items=client.app.state.settings.expense_max_items,
+        ).canonical_json
+        database.commit()
+
+    def workbook_order(content):
+        workbook = load_workbook(io.BytesIO(content))
+        try:
+            return [
+                row[1].value if row[1].value == "出差补助" else row[3].value
+                for row in workbook.active.iter_rows(min_row=4, max_row=9)
+            ]
+        finally:
+            workbook.close()
+
+    def preview(revision):
+        result = client.post(
+            f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+            json={"expectedRevision": revision},
+            headers=headers,
+        )
+        assert result.status_code == 200, result.text
+        return workbook_order(result.content)
+
+    new_excel_order = [*new_order, "出差补助"]
+    assert preview(4) == new_excel_order
+
+    def build_legacy_snapshot(source):
+        frozen = build_snapshot(source).model_dump(mode="json", by_alias=True)
+        del frozen["detailOrder"]
+        description = next(
+            item for item in frozen["formValues"] if item["logicalKey"] == "description"
+        )
+        lines = description["value"].splitlines()
+        by_label = dict(zip(new_order, lines[:-2], strict=True))
+        description["value"] = "\n".join([*(by_label[label] for label in saved_order), *lines[-2:]])
+        by_name = {file["fileName"]: file for file in frozen["originalFiles"]}
+        frozen["originalFiles"] = [
+            {**by_name[f"{label}.pdf"], "sortOrder": index}
+            for index, label in enumerate(old_pdf_order)
+        ]
+        return ReimbursementSnapshot.model_validate(frozen)
+
+    with monkeypatch.context() as patch:
+        if legacy:
+            patch.setattr(submission_api, "build_snapshot", build_legacy_snapshot)
+        submitted = client.post(
+            f"/api/oa/reimbursements/{draft_id}/submit",
+            json={"expectedRevision": 4},
+            headers={**headers, "Idempotency-Key": "11111111-1111-4111-8111-111111111111"},
+        )
+    assert submitted.status_code == 202, submitted.text
+    submission_id = submitted.json()["data"]["submissionId"]
+    rail = CATEGORY_BY_ID[ExpenseCategory.RAIL_FARE]
+    hotel = CATEGORY_BY_ID[ExpenseCategory.LODGING]
+    monkeypatch.setitem(CATEGORY_BY_ID, rail.id, replace(rail, order=hotel.order))
+    monkeypatch.setitem(CATEGORY_BY_ID, hotel.id, replace(hotel, order=rail.order))
+
+    locked = client.get(f"/api/reimbursements/drafts/{draft_id}")
+    assert locked.status_code == 200, locked.text
+    assert [item["description"] for item in locked.json()["data"]["input"]["items"]] == saved_order
+
+    with client.app.state.database_session_factory() as database:
+        row = database.get(ReimbursementSubmission, submission_id)
+        frozen_json, frozen_digest = row.form_snapshot_json, row.snapshot_sha256
+        snapshot = parse_snapshot(frozen_json, expected_sha256=frozen_digest)
+        assert [item.description for item in snapshot.input.items] == saved_order
+        assert [item.description for item in snapshot.ordered_items] == (
+            saved_order if legacy else new_order
+        )
+
+    expected_excel_order = legacy_excel_order if legacy else new_excel_order
+    assert preview(5) == expected_excel_order
+    assert asyncio.run(_worker(client, workflow, storage).run_once())
+    assert workbook_order(storage.put_files[1].content) == expected_excel_order
+    pages = PdfReader(io.BytesIO(storage.put_files[0].content)).pages
+    assert [page.extract_text() for page in pages] == (
+        old_pdf_order if legacy else new_pdf_order
+    )
+    description = next(
+        item.value
+        for item in workflow.created_command.form_values
+        if item.component_id == "description-id"
+    ).splitlines()
+    assert [line.split(" ", 2)[2].split("：")[0] for line in description[:-2]] == (
+        saved_order if legacy else new_order
+    )
+    assert description[-2].startswith("2026-09-02 出差补助 ")
+    assert description[-1] == "合计：840.00"
+    with client.app.state.database_session_factory() as database:
+        row = database.get(ReimbursementSubmission, submission_id)
+        assert row.status == "SUBMITTED"
+        assert (row.form_snapshot_json, row.snapshot_sha256) == (frozen_json, frozen_digest)
 
 
 @pytest.mark.parametrize("exclusion_kind", ["none", "middle", "boundaries"])

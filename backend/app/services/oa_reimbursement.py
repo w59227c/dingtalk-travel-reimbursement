@@ -691,6 +691,7 @@ class SnapshotSubmissionMaterializer:
             detailed_subsidies=workbook_input.detailed_subsidies,
             compact_subsidies=workbook_input.compact_subsidies,
             attendance_description_format=workbook_input.attendance_description_format,
+            detail_order=workbook_input.detail_order,
         )
         if result.filename != snapshot.excel.file_name:
             raise ApiError(

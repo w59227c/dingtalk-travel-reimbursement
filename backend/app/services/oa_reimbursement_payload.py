@@ -26,7 +26,11 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
-from app.domain.expenses import ExpenseTotals, calculate_expense_totals
+from app.domain.expenses import (
+    ExpenseTotals,
+    calculate_expense_totals,
+    expense_output_sort_key,
+)
 from app.domain.money import money_string
 from app.domain.reimbursement_proofs import payment_proof_required
 from app.domain.subsidy import (
@@ -65,6 +69,7 @@ from app.schemas.reimbursements import (
 )
 from app.services.excel_generator import (
     XLSX_MEDIA_TYPE,
+    ExcelDetailOrder,
     ResolvedProject,
     build_download_filename,
     sanitize_filename_component,
@@ -420,6 +425,10 @@ class ReimbursementSnapshot(_SnapshotModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    detail_order: tuple[NonNegativeInt, ...] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     excel: SnapshotExcel
     form_values: tuple[SnapshotFormValue, ...]
 
@@ -427,6 +436,12 @@ class ReimbursementSnapshot(_SnapshotModel):
     def validate_complete_snapshot(self) -> ReimbursementSnapshot:
         _validate_snapshot_semantics(self)
         return self
+
+    @property
+    def ordered_items(self) -> tuple[SnapshotExpenseItem, ...]:
+        if self.detail_order is None:
+            return self.input.items
+        return tuple(self.input.items[index] for index in self.detail_order)
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +506,7 @@ class ExcelGenerationInput:
     totals: ExpenseTotals
     detailed_subsidies: bool = True
     compact_subsidies: bool = True
+    detail_order: ExcelDetailOrder = "current"
     attendance_description_format: AttendanceDescriptionFormat = (
         CURRENT_ATTENDANCE_DESCRIPTION_FORMAT
     )
@@ -597,25 +613,9 @@ def collect_snapshot_source(
         require_terminal_disposition=True,
         require_submission_proofs=True,
     )
-    # Upload sort_order is the compact manifest order. Deleted draft files may
-    # legitimately leave gaps in their own ordering.
-    ordered_ids = list(
-        dict.fromkeys(
-            file_id
-            for item in draft_input.items
-            for file_id in ([item.source_file_id] if item.source_file_id else [])
-            + item.receipt_attachment_file_ids
-            + item.hotel_bill_file_ids
-            + item.itinerary_file_ids
-            + item.payment_proof_file_ids
-        )
-    )
-    active_by_id = {item.id: item for item in active_files}
-    ordered_files = [active_by_id[file_id] for file_id in ordered_ids]
-    ordered_files.extend(item for item in active_files if item.id not in set(ordered_ids))
     originals = tuple(
-        _original_source(item, manifest_order=manifest_order)
-        for manifest_order, item in enumerate(ordered_files)
+        _original_source(item, upload_order=upload_order)
+        for upload_order, item in enumerate(active_files)
     )
     if not originals and (
         draft_input.items or Decimal(calculation.totals_data["subsidyTotal"]) <= 0
@@ -700,6 +700,11 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
         trip = _snapshot_trip(source.draft_input.trip)
         trips = tuple(_snapshot_trip(item) for item in source.draft_input.trips)
         items = tuple(_snapshot_expense_item(item) for item in source.draft_input.items)
+        detail_order = tuple(sorted(
+            range(len(items)),
+            key=lambda index: expense_output_sort_key(items[index].date, items[index].category),
+        ))
+        ordered_items = tuple(items[index] for index in detail_order)
         subsidy = _snapshot_subsidy(source.totals_data.get("subsidy"))
         subsidies = tuple(
             _snapshot_subsidy(item) for item in source.totals_data.get("subsidies", [])
@@ -707,7 +712,20 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
         subsidy_format = CURRENT_SUBSIDY_DESCRIPTION_FORMAT if subsidy or subsidies else None
         totals = _snapshot_totals(source.totals_data)
         related = tuple(_snapshot_related(item) for item in source.related_approvals)
-        originals = tuple(_snapshot_original(item) for item in source.original_files)
+        attachment_order = {
+            file_id: index for index, file_id in enumerate(_expense_attachment_ids(ordered_items))
+        }
+        ordered_originals = sorted(
+            source.original_files,
+            key=lambda file: (
+                attachment_order.get(file.draft_file_id, len(attachment_order)),
+                file.sort_order,
+            ),
+        )
+        originals = tuple(
+            _snapshot_original(item, manifest_order=index)
+            for index, item in enumerate(ordered_originals)
+        )
         excel = SnapshotExcel(
             template_sha256=source.excel_template_sha256,
             file_name=build_download_filename(
@@ -722,7 +740,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
             start_date=start_date,
             end_date=end_date,
             duration_days=duration_days,
-            items=items,
+            items=ordered_items,
             subsidy=subsidy,
             subsidies=subsidies,
             totals=totals,
@@ -765,6 +783,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
             original_files=originals,
             attachment_mode="bundle_and_excel" if originals else "excel_only",
             subsidy_description_format=subsidy_format,
+            detail_order=detail_order,
             excel=excel,
             form_values=form_values,
         )
@@ -857,6 +876,7 @@ def snapshot_excel_input(snapshot: ReimbursementSnapshot) -> ExcelGenerationInpu
         compact_subsidies=(
             snapshot.subsidy_description_format == CURRENT_SUBSIDY_DESCRIPTION_FORMAT
         ),
+        detail_order=snapshot.detail_order,
         attendance_description_format=snapshot.attendance_description_format or "individual_dates",
     )
 
@@ -1040,13 +1060,13 @@ def _related_source(item: ReimbursementDraftRelatedApproval) -> RelatedApprovalS
 def _original_source(
     item: ReimbursementDraftFile,
     *,
-    manifest_order: int,
+    upload_order: int,
 ) -> OriginalFileSource:
     if item.size_bytes is None or item.sha256 is None:
         raise _snapshot_error("附件信息不完整，请重新上传")
     return OriginalFileSource(
         draft_file_id=item.id,
-        sort_order=manifest_order,
+        sort_order=upload_order,
         processing_role=item.processing_role,
         storage_key=item.storage_key,
         file_name=item.original_name,
@@ -1307,10 +1327,10 @@ def _snapshot_related(item: RelatedApprovalSource) -> SnapshotRelatedApproval:
     )
 
 
-def _snapshot_original(item: OriginalFileSource) -> SnapshotOriginalFile:
+def _snapshot_original(item: OriginalFileSource, *, manifest_order: int) -> SnapshotOriginalFile:
     return SnapshotOriginalFile(
         draft_file_id=item.draft_file_id,
-        sort_order=item.sort_order,
+        sort_order=manifest_order,
         processing_role=item.processing_role,
         storage_key=item.storage_key,
         file_name=item.file_name,
@@ -1448,6 +1468,21 @@ def _description_v1(
     return "\n".join(lines)
 
 
+def _expense_attachment_ids(items: tuple[SnapshotExpenseItem, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        file_id
+        for item in items
+        for file_id in (
+            item.source_file_id,
+            *item.receipt_attachment_file_ids,
+            *item.hotel_bill_file_ids,
+            *item.itinerary_file_ids,
+            *item.payment_proof_file_ids,
+        )
+        if file_id is not None
+    ))
+
+
 def _description_v2(
     items, subsidy, totals, subsidies, trips,
     attendance_format: AttendanceDescriptionFormat = CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
@@ -1495,6 +1530,11 @@ def generated_upload_manifest(
 
 def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     trips = snapshot.input.trips or ((snapshot.input.trip,) if snapshot.input.trip else ())
+    if snapshot.detail_order is not None:
+        if snapshot.snapshot_version < 11:
+            raise ValueError("detail order requires snapshot v11")
+        if sorted(snapshot.detail_order) != list(range(len(snapshot.input.items))):
+            raise ValueError("detail order must contain each expense index exactly once")
     if snapshot.subsidy_description_format is not None and (
         snapshot.snapshot_version < 11 or not (snapshot.subsidy or snapshot.subsidies)
     ):
@@ -1574,6 +1614,12 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         raise ValueError("travel profile identities must be unique")
     _validate_template_snapshot(snapshot)
     _validate_business_snapshot(snapshot)
+    if snapshot.detail_order is not None:
+        attachment_ids = _expense_attachment_ids(snapshot.ordered_items)
+        if tuple(
+            file.draft_file_id for file in snapshot.original_files[: len(attachment_ids)]
+        ) != attachment_ids:
+            raise ValueError("original file order differs from expense order")
 
 
 def _validate_template_snapshot(snapshot: ReimbursementSnapshot) -> None:
@@ -1854,7 +1900,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         start_date=start_date,
         end_date=end_date,
         duration_days=snapshot.travel_period.duration_days,
-        items=snapshot.input.items,
+        items=snapshot.ordered_items,
         subsidy=snapshot.subsidy,
         subsidies=snapshot.subsidies,
         totals=snapshot.totals,
