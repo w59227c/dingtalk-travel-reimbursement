@@ -14,7 +14,7 @@ import ReimbursementAttentionNotice from '@/components/reimbursement/Reimburseme
 import TravelApprovalSelector from '@/components/reimbursement/TravelApprovalSelector.vue'
 import TripSubsidyCard from '@/components/reimbursement/TripSubsidyCard.vue'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
-import { prepareReimbursementContext } from '@/api/auth'
+import { getMe, prepareReimbursementContext } from '@/api/auth'
 import {
   createReimbursementDraft,
   getOaReimbursementOptions,
@@ -22,7 +22,7 @@ import {
   listReimbursementSubmissionHistory,
   listWorkspaceReimbursements,
 } from '@/api/reimbursements'
-import { useAuthStore } from '@/stores/auth'
+import { isDelegationContextError, useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useHealthStore } from '@/stores/health'
 import { readConsistentDraft, useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -78,6 +78,7 @@ const departmentBindingError = ref('')
 const employeePickerOpen = ref(false)
 const reimbursementSwitchError = ref('')
 const switchingReimbursement = ref(false)
+const deniedDelegationScope = ref('')
 let reimbursementSwitchRequest: AbortController | undefined
 const bindingApprovalDepartment = ref(false)
 const pendingDepartmentApproval = ref<ReimbursementRelatedApprovalSelection | null>(null)
@@ -271,6 +272,8 @@ const templateMismatch = computed(() => {
   ))
 })
 const reimbursementOptionsUnavailable = computed(() => Boolean(drafts.reimbursementOptionsError))
+const delegationRevoked = computed(() => Boolean(deniedDelegationScope.value
+  && deniedDelegationScope.value === sessionScope()))
 const templateNeedsAdmin = computed(() => [
   'OA_TEMPLATE_CONFIRMATION_REQUIRED', 'OA_TEMPLATE_SCHEMA_CHANGED', 'OA_TEMPLATE_NOT_CONFIGURED',
   'INVALID_SYSTEM_CONFIGURATION',
@@ -286,6 +289,7 @@ const canReplaceOutdatedForm = computed(() => templateMismatch.value && Boolean(
   && !switchingReimbursement.value)
 const formReadOnly = computed(() => !drafts.currentDraft || submitFlowPending.value
   || Boolean(initializationError.value)
+  || delegationRevoked.value
   || switchingReimbursement.value
   || bindingApprovalDepartment.value
   || workspaceConfirmationRequired.value
@@ -294,6 +298,7 @@ const formReadOnly = computed(() => !drafts.currentDraft || submitFlowPending.va
   || drafts.currentDraft.status === 'LOCKED' || draftExpired.value || trackedSubmission.value
   || templateMismatch.value || reimbursementOptionsUnavailable.value || saveRequiresReload.value)
 const formReadOnlyReason = computed(() => {
+  if (delegationRevoked.value) return '代报权限已失效，请返回本人报销'
   if (!drafts.currentDraft) return '正在准备报销表单'
   if (initializationError.value) return '请先重新加载当前报销'
   if (switchingReimbursement.value) return '正在切换报销人，请稍候'
@@ -418,14 +423,20 @@ const reimbursementSwitchBlock = computed(() => {
   if (switchingReimbursement.value || initializingWorkspace.value || bindingApprovalDepartment.value
     || pendingDepartmentApproval.value || verifyingRelatedApprovals.value || submitFlowPending.value
     || submission.submitting || recoveringReimbursement.value || replacingTemplate.value
-    || confirmingDraftReload.value || workspaceConfirmationRequired.value) return '请等待当前操作完成'
+    || confirmingDraftReload.value) return '请等待当前操作完成'
   if (expenseItemsCard.value?.hasUnpersistedFailedUploads) return '请先重试或移除尚未上传成功的文件'
-  if (awaitingMaterialUpload.value || drafts.processingFiles || drafts.files.some(
-    (file) => file.status === 'ACTIVE' && file.ocrStatus === 'RUNNING' && file.ocrStale !== true,
-  )) return '请等待本批文件上传和识别完成'
+  if (drafts.processingFiles) return '请等待本批文件上传和识别完成'
   if (expenseItemsCard.value?.hasOpenMaterialEditor) return '请先完成材料编辑'
   if (drafts.busy || saving.value || refreshingMaterialStatus.value) return '请等待当前报销操作完成'
+  return ''
+})
+const reimbursementSwitchRecheck = computed(() => {
+  if (workspaceConfirmationRequired.value) return '请先核对当前报销，确认新开结果后再切换'
+  if (awaitingMaterialUpload.value || drafts.files.some(
+    (file) => file.status === 'ACTIVE' && file.ocrStatus === 'RUNNING' && file.ocrStale !== true,
+  )) return '请等待本批文件上传和识别完成'
   if (saveRequiresReload.value) return '请先核对最新报销内容'
+  if (drafts.currentDraft && formReadOnly.value && hasUnsavedUserChanges.value) return formReadOnlyReason.value
   return ''
 })
 const attachmentNames = computed(() => {
@@ -967,11 +978,14 @@ async function prepareReimbursementWorkspace(target: AuthSession, signal: AbortS
   if (!target.selectedDepartment) return null
   const request = { signal, reimbursementContext: target.reimbursementContext ?? null }
   const expectedDepartment = target.selectedDepartment
-  const [workspace, options] = await Promise.all([
+  const [workspace, options] = await Promise.allSettled([
     listWorkspaceReimbursements({ ...request, expectedDepartment }),
     getOaReimbursementOptions(request),
   ])
-  const recent = workspace.items[0] ?? await createReimbursementDraft(emptyReimbursementInput(), {
+  if (workspace.status === 'rejected') throw workspace.reason
+  const current = workspace.value.items[0]
+  if (!current && options.status === 'rejected') throw options.reason
+  const recent = current ?? await createReimbursementDraft(emptyReimbursementInput(), {
     ...request, reuseExisting: true, expectedDepartment,
   })
   const read = await readConsistentDraft(recent.id, request)
@@ -985,6 +999,9 @@ async function prepareReimbursementWorkspace(target: AuthSession, signal: AbortS
 async function switchReimbursementEmployee(userId: string | null): Promise<void> {
   const origin = auth.session
   if (!origin || (!origin.canDelegateReimbursements && !origin.operator) || reimbursementSwitchBlock.value) return
+  const returningToPersonal = userId === null && Boolean(origin.operator)
+  const recheckReason = reimbursementSwitchRecheck.value
+  if (!returningToPersonal && (delegationRevoked.value || recheckReason)) return
   if (userId === origin.user.userId || (userId === null && !origin.operator)) {
     employeePickerOpen.value = false
     return
@@ -999,11 +1016,41 @@ async function switchReimbursementEmployee(userId: string | null): Promise<void>
   reimbursementSwitchError.value = ''
   switchingReimbursement.value = true
   if (autosaveTimer) clearTimeout(autosaveTimer)
+  let discardDeniedEdits = false
   try {
-    if (draftId && hasUnsavedUserChanges.value && formWasReadOnly) throw new Error('本页还有未保存的内容，请处理后再切换报销人')
-    if (!formWasReadOnly && (formDirty.value || savePromise)) await flushAutosave()
+    if (returningToPersonal && recheckReason && !delegationRevoked.value) {
+      try {
+        // A conflict or cached file status can hide a revoked scope from autosave.
+        await getMe(origin.reimbursementContext, request.signal)
+      } catch (error) {
+        if (!isDelegationContextError(error)) throw error
+        if (accepts()) deniedDelegationScope.value = oldScope
+      }
+      if (!accepts()) return
+      if (!delegationRevoked.value) throw new Error(recheckReason)
+    }
+    if (!delegationRevoked.value && !formWasReadOnly && (formDirty.value || savePromise)) {
+      try {
+        await flushAutosave()
+      } catch (error) {
+        if (!returningToPersonal || !isDelegationContextError(error)) throw error
+      }
+    }
     if (!accepts()) return
-    if (draftId && hasUnsavedUserChanges.value) throw new Error('当前报销还有未保存的内容，请确认保存后再切换')
+    if (draftId && hasUnsavedUserChanges.value) {
+      if (!returningToPersonal || !delegationRevoked.value) {
+        throw new Error('当前报销还有未保存的内容，请确认保存后再切换')
+      }
+      try {
+        await ElMessageBox.confirm(
+          '代报权限或办理对象已变化。返回本人将舍弃本页未保存的修改。已保存的草稿和票据会保留。',
+          '返回本人报销',
+          { type: 'warning', confirmButtonText: '舍弃修改并返回', cancelButtonText: '保留本页' },
+        )
+      } catch { return }
+      if (!accepts()) return
+      discardDeniedEdits = true
+    }
     const target = await prepareReimbursementContext(userId, request.signal)
     if (!accepts()) return
     if (userId === null ? Boolean(target.operator || target.reimbursementContext)
@@ -1012,16 +1059,21 @@ async function switchReimbursementEmployee(userId: string | null): Promise<void>
     }
     const workspace = await prepareReimbursementWorkspace(target, request.signal)
     if (!accepts()) return
-    if (draftId && hasUnsavedUserChanges.value) throw new Error('当前报销还有未保存的内容，请确认保存后再切换')
+    if (draftId && hasUnsavedUserChanges.value && !discardDeniedEdits) {
+      throw new Error('当前报销还有未保存的内容，请确认保存后再切换')
+    }
     auth.applyReimbursementContext(target)
     employeePickerOpen.value = false
     mobileStep.value = 0
     if (workspace) {
       drafts.restoreWorkspace(workspace.read, workspace.options)
       initializedScope = sessionScope()
+      void expense.loadCategories()
       void showWorkspaceReimbursement(workspace.read.draft)
     } else {
       initializationError.value = ''
+      saveError.value = ''
+      saveRequiresReload.value = false
       companyValue.value = ''
       budgetCodeValue.value = ''
       selectedRelatedApprovals.value = []
@@ -1164,6 +1216,7 @@ async function flushAutosave(options: { includeRelated?: boolean } = {}): Promis
       if (error !== fileOperationPause && drafts.currentDraft?.id === draftId && sessionScope() === scope) {
         if (includeRelated && relatedDirty.value) acceptApprovalReadback(drafts.currentDraft)
         if (apiErrorCode(error) === 'REIMBURSEMENT_DRAFT_EXPIRED') expiredDraftId.value = draftId
+        if (auth.session?.operator && isDelegationContextError(error)) deniedDelegationScope.value = scope
         saveError.value = drafts.mutationError || (error instanceof Error ? error.message : '自动保存失败')
         void refreshOptionsAfterError(error)
       }
@@ -2063,7 +2116,7 @@ onBeforeUnmount(() => {
             v-if="auth.session?.canDelegateReimbursements"
             type="primary"
             link
-            :disabled="Boolean(reimbursementSwitchBlock)"
+            :disabled="Boolean(reimbursementSwitchBlock || reimbursementSwitchRecheck) || delegationRevoked"
             data-testid="select-reimbursement-employee"
             @click="openReimbursementEmployeePicker"
           >
@@ -2079,10 +2132,10 @@ onBeforeUnmount(() => {
             返回本人报销
           </el-button>
           <small
-            v-if="reimbursementSwitchBlock"
+            v-if="reimbursementSwitchBlock || (!delegationRevoked && reimbursementSwitchRecheck)"
             class="reimbursement-switch-note"
             role="status"
-          >{{ switchingReimbursement ? '正在切换报销人…' : reimbursementSwitchBlock }}</small>
+          >{{ switchingReimbursement ? '正在切换报销人…' : reimbursementSwitchBlock || reimbursementSwitchRecheck }}</small>
         </div>
         <p
           v-if="auth.reimbursementContextNotice || (!employeePickerOpen && reimbursementSwitchError)"
@@ -2378,8 +2431,9 @@ onBeforeUnmount(() => {
             </el-button>
           </el-alert>
           <el-alert
-            v-if="(saveError || saveRequiresReload) && !drafts.currentDraft.workspaceRetired"
-            :title="saveRequiresReload ? '报销内容已更新，请核对最新报销内容' : '保存失败，内容仍保留在本页'"
+            v-if="delegationRevoked || ((saveError || saveRequiresReload) && !drafts.currentDraft.workspaceRetired)"
+            :title="delegationRevoked ? '代报权限已失效，请返回本人报销'
+              : saveRequiresReload ? '报销内容已更新，请核对最新报销内容' : '保存失败，内容仍保留在本页'"
             type="error"
             :closable="false"
             show-icon
@@ -2394,7 +2448,7 @@ onBeforeUnmount(() => {
               {{ saveError }}
             </div>
             <el-button
-              v-if="saveRequiresReload || (saveError && formReadOnly && !trackedSubmission)"
+              v-if="!delegationRevoked && (saveRequiresReload || (saveError && formReadOnly && !trackedSubmission))"
               link
               type="primary"
               :disabled="drafts.busy || saving"

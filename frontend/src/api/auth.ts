@@ -23,9 +23,10 @@ export async function loginWithMock(): Promise<AuthSession> {
   return response.data.data
 }
 
-export async function getMe(reimbursementContext?: string | null): Promise<AuthSession> {
+export async function getMe(reimbursementContext?: string | null, signal?: AbortSignal): Promise<AuthSession> {
   const response = await http.get<ApiEnvelope<AuthSession>>('/me', {
     headers: reimbursementContextHeaders(reimbursementContext),
+    signal,
   })
   return response.data.data
 }

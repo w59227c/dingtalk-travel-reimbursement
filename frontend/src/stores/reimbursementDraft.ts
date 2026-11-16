@@ -1577,8 +1577,11 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     revisionConflict.value = false
   }
 
-  function restoreWorkspace(read: DraftRead, options: OaReimbursementOptions): void {
-    reimbursementOptions.value = options
+  function restoreWorkspace(read: DraftRead, options: PromiseSettledResult<OaReimbursementOptions>): void {
+    reimbursementOptions.value = options.status === 'fulfilled' ? options.value : null
+    reimbursementOptionsErrorCode.value = options.status === 'rejected' ? apiErrorCode(options.reason) ?? '' : ''
+    reimbursementOptionsError.value = options.status === 'rejected'
+      ? apiErrorMessage(options.reason, '报销选项加载失败，请重试') : ''
     currentDraft.value = read.draft
     upsertSummary(summaryFromDraft(read.draft))
     files.value = read.files

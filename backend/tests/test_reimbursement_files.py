@@ -85,6 +85,7 @@ def _draft_input(*, amount: str = "44.89") -> dict[str, object]:
 def _insert_draft(
     client, *, revision: int = 1, amount: str = "44.89", owner_user_id: str = "mock-user",
     operator_user_id: str | None = None,
+    department_id: str = "100", department_name: str = "测试部门",
 ) -> str:
     with client.app.state.database_session_factory() as database:
         draft = ReimbursementDraft(
@@ -93,8 +94,8 @@ def _insert_draft(
             operator_user_id=operator_user_id,
             status="DRAFT",
             revision=revision,
-            department_id="100",
-            department_name="测试部门",
+            department_id=department_id,
+            department_name=department_name,
             template_process_code="PROC-REIMBURSEMENT",
             template_config_version=1,
             schema_fingerprint="a" * 64,
@@ -1253,16 +1254,20 @@ def test_excel_preview_recovers_stale_ocr_and_requires_explicit_disposition(
     assert resolved.status_code == 200
 
 
+@pytest.mark.parametrize("grant", ("employee", "department"))
 def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_policy(
-    client_factory, monkeypatch,
+    client_factory, monkeypatch, grant,
 ) -> None:
     client = client_factory(auth_mock_enabled=True, admin_user_ids="mock-user")
     csrf = str(mock_login(client)["csrfToken"])
     headers = {"X-CSRF-Token": csrf}
     personal_draft = _insert_draft(client)
-    employee_draft = _insert_draft(client, owner_user_id="travel-employee")
+    employee_draft = _insert_draft(
+        client, owner_user_id="travel-employee", department_id="200", department_name="报销部门",
+    )
     delegate_draft = _insert_draft(
-        client, owner_user_id="travel-employee", operator_user_id="mock-user"
+        client, owner_user_id="travel-employee", operator_user_id="mock-user",
+        department_id="200", department_name="报销部门",
     )
     admin_path = "/api/admin/reimbursement-delegation"
     previous = client.get(admin_path).json()["data"]["revision"]
@@ -1270,15 +1275,24 @@ def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_polic
         admin_path,
         headers=headers,
         json={
-            "expectedRevision": previous, "departmentIds": [], "employeeUserIds": ["mock-user"]
+            "expectedRevision": previous,
+            "departmentIds": ["100"] if grant == "department" else [],
+            "employeeUserIds": ["mock-user"] if grant == "employee" else [],
         },
     )
     assert policy.status_code == 200, policy.text
 
     async def employee(user_id, *, fresh=False):
+        if grant == "department" and user_id == "mock-user":
+            return DingTalkIdentity(
+                user_id,
+                "mock-union-id:mock-user",
+                "经办人",
+                (DepartmentIdentity("100", "测试部门"),),
+            )
         assert user_id == "travel-employee"
         return DingTalkIdentity(
-            user_id, "beneficiary-union", "报销员工", (DepartmentIdentity("100", "测试部门"),)
+            user_id, "beneficiary-union", "报销员工", (DepartmentIdentity("200", "报销部门"),)
         )
 
     monkeypatch.setattr(client.app.state.dingtalk_service, "get_employee_identity", employee)
@@ -1288,11 +1302,14 @@ def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_polic
     context_headers = {**headers, "X-Reimbursement-Context": context}
 
     personal_upload = _upload(client, csrf, personal_draft, revision=1, name="personal.png")
+    delegated_bytes = _named_image_bytes("delegated.png")
     delegated_upload = _upload(
         client, csrf, delegate_draft, revision=1, name="delegated.png",
-        reimbursement_context=context,
+        content=delegated_bytes, reimbursement_context=context,
     )
-    assert personal_upload.status_code == delegated_upload.status_code == 201
+    assert personal_upload.status_code == 201, personal_upload.text
+    assert delegated_upload.status_code == 201, delegated_upload.text
+    assert delegated_upload.json()["data"]["revision"] == 2
 
     def workspace_ids(request_headers):
         response = client.get("/api/reimbursements/workspace", headers=request_headers)
@@ -1310,6 +1327,10 @@ def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_polic
         f"/api/reimbursements/drafts/{delegate_draft}/files", headers=context_headers,
     ).json()["data"]["items"]
     assert [item["name"] for item in files] == ["delegated.png"]
+    source_url = f"/api/reimbursements/drafts/{delegate_draft}/files/{files[0]['id']}/content"
+    original = client.get(source_url, headers=context_headers)
+    assert original.status_code == 200
+    assert original.content == delegated_bytes
 
     ticket = client.post(
         f"/api/reimbursements/drafts/{delegate_draft}/excel-preview-ticket",
@@ -1345,6 +1366,7 @@ def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_polic
         },
     )
     assert revoked.status_code == 200, revoked.text
+    assert client.get(source_url, headers=context_headers).status_code == 403
     assert client.get(preview["downloadUrl"], headers=download_headers).status_code == 403
     assert workspace_ids(headers) == [personal_draft]
 

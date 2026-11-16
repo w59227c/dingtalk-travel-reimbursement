@@ -437,6 +437,7 @@ async def persist_draft_upload(
         expected_revision=expected_revision,
         operator_user_id=actor.operator_user_id,
         session_id_hash=actor.session_id_hash,
+        operator_department_ids=actor.operator_department_ids,
     )
     reservation: QuotaReservation | None = None
     finalized = False

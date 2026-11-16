@@ -84,6 +84,7 @@ class DraftFileOwner:
     expected_revision: int
     operator_user_id: str | None = None
     session_id_hash: str | None = None
+    operator_department_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +247,7 @@ class ReimbursementQuotaCoordinator:
                         department_name=draft.department_name,
                         operator_user_id=owner.operator_user_id,
                         session_id_hash=owner.session_id_hash,
+                        operator_department_ids=owner.operator_department_ids,
                     ),
                     expected_revision=owner.expected_revision,
                     now=now,
@@ -411,6 +413,7 @@ class ReimbursementQuotaCoordinator:
             or actor.user_id != owner.user_id
             or actor.operator_user_id != owner.operator_user_id
             or actor.session_id_hash != owner.session_id_hash
+            or actor.operator_department_ids != owner.operator_department_ids
         ):
             raise ReimbursementReservationConflict("draft file actor does not own reservation")
         with self._write_session() as database:
