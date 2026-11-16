@@ -5,14 +5,14 @@ import hashlib
 import io
 import json
 from dataclasses import dataclass, replace
-from datetime import date, timedelta
+from datetime import UTC, date, timedelta
 
 import pytest
 from conftest import mock_login
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from pypdf import PdfReader
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from test_receipt_bundle import image_bytes, pdf_bytes
 
 from app.api import reimbursement_submissions as submission_api
@@ -31,6 +31,8 @@ from app.integrations.dingtalk.storage import (
 from app.integrations.dingtalk.workflow import (
     CreatedProcessInstance,
     CreateProcessInstanceCommand,
+    DingTalkProcessInstanceCreateOutcomeUnknown,
+    DingTalkProcessInstanceCreateRejected,
     FormComponent,
     FormOption,
     FormSchema,
@@ -58,7 +60,10 @@ from app.models.reimbursement import (
     ReimbursementUploadStatus,
     utc_now,
 )
+from app.models.session import UserSession
 from app.schemas.reimbursements import ReimbursementDraftInput
+from app.services.dingtalk import DepartmentIdentity, DingTalkIdentity
+from app.services.excel_generator import EXCEL_TEMPLATE
 from app.services.oa_reimbursement import (
     DatabaseSubmissionState,
     DurableOAReimbursementWorker,
@@ -82,6 +87,7 @@ from app.services.oa_template_profiles import (
 from app.services.reimbursement_drafts import DraftActor, validate_and_calculate_input
 from app.services.reimbursement_staging import StagingArea
 from app.services.reimbursement_submissions import create_submission
+from app.services.travel_approvals import TravelApprovalQueryWindow
 
 REIMBURSEMENT_PROCESS_CODE = "PROC-INTEGRATION-REIMBURSEMENT"
 TRAVEL_PROCESS_CODE = "PROC-INTEGRATION-TRAVEL"
@@ -89,6 +95,8 @@ TRAVEL_INSTANCE_ID = "travel-instance-1"
 TRAVEL_INSTANCE_ID_2 = "travel-instance-2"
 OA_INSTANCE_ID = "oa-instance-1"
 OA_BUSINESS_ID = "OA-202609040001"
+PERSONAL_ACTOR = DraftActor("corp-fixed", "mock-user", "100", "测试部门")
+APPROVAL_WINDOW = TravelApprovalQueryWindow.from_dates(date(2026, 8, 15), date(2026, 9, 5))
 MAPPINGS = {
     "company": "company-id",
     "budgetCode": "budget-id",
@@ -520,7 +528,9 @@ def _persist_ready_draft(
     excluded_periods: list | None = None,
     subsidy_only: bool = False,
     with_materials: bool = True,
-    operator_user_id: str | None = None,
+    actor: DraftActor = PERSONAL_ACTOR,
+    mappings: dict[str, str] | None = None,
+    query_window: TravelApprovalQueryWindow = APPROVAL_WINDOW,
 ):
     client.app.state.dingtalk_workflow = workflow
     settings = client.app.state.settings
@@ -543,7 +553,7 @@ def _persist_ready_draft(
                 reimbursement_process_code=REIMBURSEMENT_PROCESS_CODE,
                 expected_config_version=None,
                 reimbursement_schema_fingerprint=reimbursement_schema.fingerprint,
-                reimbursement_mappings=MAPPINGS,
+                reimbursement_mappings=MAPPINGS if mappings is None else mappings,
                 travel_profiles=[
                     TravelProfileConfirmation(
                         profile_key="domestic",
@@ -579,13 +589,13 @@ def _persist_ready_draft(
             max_items=settings.expense_max_items,
         )
         draft = ReimbursementDraft(
-            corp_id="corp-fixed",
-            owner_user_id="mock-user",
-            operator_user_id=operator_user_id,
+            corp_id=actor.corp_id,
+            owner_user_id=actor.user_id,
+            operator_user_id=actor.operator_user_id,
             status=ReimbursementDraftStatus.REVIEW_READY.value,
             revision=4,
-            department_id="100",
-            department_name="测试部门",
+            department_id=actor.department_id,
+            department_name=actor.department_name,
             template_process_code=REIMBURSEMENT_PROCESS_CODE,
             template_config_version=catalog.config_version,
             schema_fingerprint=reimbursement_schema.fingerprint,
@@ -607,11 +617,11 @@ def _persist_ready_draft(
                     process_code=TRAVEL_PROCESS_CODE,
                     catalog_config_version=catalog.config_version,
                     travel_schema_fingerprint=travel_schema.fingerprint,
-                    listed_from_ms=1_780_000_000_000,
-                    listed_to_ms=1_790_000_000_000,
+                    listed_from_ms=query_window.start_time_ms,
+                    listed_to_ms=query_window.end_time_ms,
                     travel_start_date=date(2026, 9, 1),
                     travel_end_date=date(2026, 9, 3),
-                    originator_department_id="100",
+                    originator_department_id=actor.department_id,
                     title="境内出差申请",
                     business_id=f"TRAVEL-{instance_id}",
                     instance_created_at=now,
@@ -726,6 +736,203 @@ def _worker(
         poll_interval_seconds=0.01,
         clock=clock,
     )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["personal", "delegated", "upload_retry", "response_lost", "create_rejected",
+     "missing_fields", "login_ended"],
+)
+def test_submit_freezes_the_beneficiary_and_the_actual_oa_initiator(
+    enabled_manual_worker_client, monkeypatch, mode,
+):
+    client = enabled_manual_worker_client
+    is_delegate = mode != "personal"
+    actor = (
+        DraftActor("corp-fixed", "beneficiary", "200", "费用部门", operator_user_id="mock-user")
+        if is_delegate else PERSONAL_ACTOR
+    )
+    employee_name = "被代报员工" if is_delegate else client.app.state.settings.auth_mock_user_name
+    if is_delegate:
+        client.app.state.settings.admin_user_ids = "mock-user"
+        client.app.state.settings.auth_mock_departments = "100:测试部门,101:第二部门"
+
+    async def employee_identity(user_id, *, fresh=False):
+        if user_id == "mock-user":
+            assert fresh
+            return DingTalkIdentity(
+                user_id, "mock-union-id:mock-user", "实际经办人",
+                (DepartmentIdentity("100", "测试部门"), DepartmentIdentity("101", "第二部门")),
+            )
+        assert user_id == actor.user_id
+        return DingTalkIdentity(
+            user_id, "beneficiary-union", employee_name,
+            (DepartmentIdentity(actor.department_id, actor.department_name),),
+        )
+
+    monkeypatch.setattr(
+        client.app.state.dingtalk_service, "get_employee_identity", employee_identity,
+    )
+    login = mock_login(client)
+    headers = {
+        "X-CSRF-Token": login["csrfToken"],
+        "Idempotency-Key": "1b58c349-b856-46df-a488-bf7e5a45658d",
+    }
+    if is_delegate:
+        assert login["selectedDepartment"] is None
+        policy_path = "/api/admin/reimbursement-delegation"
+        policy = client.get(policy_path).json()["data"]
+        configured = client.put(
+            policy_path, headers=headers,
+            json={"expectedRevision": policy["revision"], "employeeUserIds": ["mock-user"],
+                  "departmentIds": []},
+        )
+        assert configured.status_code == 200, configured.text
+        context = client.post(
+            "/api/me/reimbursement-context", headers=headers, json={"userId": actor.user_id}
+        )
+        assert context.status_code == 200, context.text
+        headers["X-Reimbursement-Context"] = context.json()["data"]["reimbursementContext"]
+
+    approval_created = utc_now().replace(tzinfo=UTC) - timedelta(days=1)
+    approval_created_ms = int(approval_created.timestamp() * 1000)
+
+    class InitiatorWorkflow(LocalWorkflowBoundary):
+        end_login_on_schema_read = False
+
+        async def get_form_schema(self, process_code):
+            if self.end_login_on_schema_read:
+                self.end_login_on_schema_read = False
+                with client.app.state.database_session_factory() as database:
+                    database.execute(
+                        delete(UserSession).where(UserSession.dingtalk_user_id == "mock-user")
+                    )
+                    database.commit()
+            return await super().get_form_schema(process_code)
+
+        async def list_process_instance_ids(self, *, process_code, user_ids, **kwargs):
+            if process_code == REIMBURSEMENT_PROCESS_CODE:
+                assert user_ids == ("mock-user",)
+                return WorkflowInstanceIdPage((OA_INSTANCE_ID,), None)
+            assert user_ids == (actor.user_id,)
+            if not kwargs["start_time"] <= approval_created_ms <= kwargs["end_time"]:
+                return WorkflowInstanceIdPage((), None)
+            return await super().list_process_instance_ids(process_code=process_code, **kwargs)
+
+        async def create_process_instance(self, command):
+            created = await super().create_process_instance(command)
+            if mode == "response_lost":
+                raise DingTalkProcessInstanceCreateOutcomeUnknown(
+                    http_status=None, upstream_code=None
+                )
+            if mode == "create_rejected":
+                raise DingTalkProcessInstanceCreateRejected(
+                    http_status=400, upstream_code="invalidParameter"
+                )
+            return created
+
+        async def get_process_instance(self, instance_id):
+            instance = await super().get_process_instance(instance_id)
+            if instance_id == TRAVEL_INSTANCE_ID:
+                return replace(
+                    instance, originator_user_id=actor.user_id,
+                    originator_department_id=actor.department_id,
+                    executed_cc_user_ids=("mock-user",) if is_delegate else (),
+                    created_at=approval_created.isoformat(),
+                    finished_at=(approval_created + timedelta(hours=12)).isoformat(),
+                )
+            return instance
+
+    reimbursement, travel, travel_type = _schemas()
+    mappings = MAPPINGS
+    if mode != "missing_fields":
+        reimbursement = _schema(
+            REIMBURSEMENT_PROCESS_CODE,
+            (*reimbursement.components, _component("employee-id", "TextField", "报销人"),
+             _component("department-id", "TextField", "报销部门")),
+        )
+        mappings = {
+            **MAPPINGS, "reimbursementEmployee": "employee-id",
+            "reimbursementDepartment": "department-id",
+        }
+    workflow = InitiatorWorkflow(reimbursement, travel)
+    draft_id, _ = _persist_ready_draft(
+        client, workflow, travel_type, actor=actor, mappings=mappings,
+        query_window=TravelApprovalQueryWindow.latest(),
+    )
+    workflow.end_login_on_schema_read = mode == "login_ended"
+    submitted = client.post(
+        f"/api/oa/reimbursements/{draft_id}/submit",
+        json={"expectedRevision": 4}, headers=headers,
+    )
+    preflight_errors = {
+        "missing_fields": (409, "OA_DELEGATED_FIELDS_NOT_CONFIGURED"),
+        "login_ended": (401, "UNAUTHORIZED"),
+    }
+    if mode in preflight_errors:
+        status, code = preflight_errors[mode]
+        assert submitted.status_code == status, submitted.text
+        assert submitted.json()["error"]["code"] == code
+        with client.app.state.database_session_factory() as database:
+            assert database.get(ReimbursementDraft, draft_id).locked_at is None
+            assert database.scalars(select(ReimbursementSubmission)).all() == []
+        return
+
+    assert submitted.status_code == 202, submitted.text
+    submission_id = submitted.json()["data"]["submissionId"]
+    status_path = f"/api/oa/reimbursements/submissions/{submission_id}"
+    storage = LocalStorageBoundary(reject_put_at=2 if mode == "upload_retry" else None)
+    tick = [utc_now()]
+    worker = _worker(client, workflow, storage, clock=lambda: tick[0])
+    assert asyncio.run(worker.run_once())
+    if mode == "upload_retry":
+        retry_status = client.get(status_path, headers=headers).json()["data"]["status"]
+        assert retry_status == "FAILED_RETRYABLE"
+        assert len(storage.committed) == 1 and workflow.create_calls == 0
+        tick[0] += timedelta(minutes=2)
+        assert asyncio.run(worker.run_once())
+        assert storage.probed == storage.committed[:1]
+    if mode == "response_lost":
+        assert client.get(status_path, headers=headers).json()["data"]["status"] == "RECONCILING"
+        tick[0] += timedelta(seconds=5)
+        assert asyncio.run(worker.run_once())
+    polled = client.get(status_path, headers=headers)
+    if mode == "create_rejected":
+        assert polled.json()["data"]["status"] == "FAILED_FINAL", polled.text
+        assert polled.json()["data"]["processInstanceId"] is None
+        assert workflow.create_calls == 1
+        assert storage.recycled == storage.committed
+        assert len(storage.recycled) == 2
+        return
+    assert polled.json()["data"]["status"] == "SUBMITTED", polled.text
+    assert workflow.create_calls == 1
+
+    command = workflow.created_command
+    assert command.originator_user_id == "mock-user"
+    assert command.department_id == 100
+    values = {field.component_id: field.value for field in command.form_values}
+    assert values["employee-id"] == employee_name
+    assert values["department-id"] == actor.department_name
+    assert values["company-id"] == "北京"
+    assert values["budget-id"] == "DEMO-001 项目"
+    assert json.loads(values["related-id"]) == [TRAVEL_INSTANCE_ID]
+    assert json.loads(values["attachment-id"]) == [item.as_oa_value() for item in storage.committed]
+    assert [item.file_type for item in storage.committed] == ["pdf", "xlsx"]
+    pages = PdfReader(io.BytesIO(storage.put_files[0].content)).pages
+    assert len(pages) == 2 and pages[0].extract_text() == "Invoice"
+    workbook = load_workbook(io.BytesIO(storage.put_files[-1].content))
+    try:
+        assert workbook.active[EXCEL_TEMPLATE.employee_name_cell].value == employee_name
+        assert workbook.active[EXCEL_TEMPLATE.department_cell].value == actor.department_name
+    finally:
+        workbook.close()
+    with client.app.state.database_session_factory() as database:
+        row = database.get(ReimbursementSubmission, submission_id)
+        snapshot = parse_snapshot(row.form_snapshot_json, expected_sha256=row.snapshot_sha256)
+        assert snapshot.identity.user_id == actor.user_id
+        assert snapshot.identity.department_id == actor.department_id
+        assert (snapshot.oa_initiator is not None) == is_delegate
+        assert snapshot.approval_initiator.union_id == "mock-union-id:mock-user"
 
 
 @pytest.mark.parametrize("with_materials", [False, True])
@@ -1395,7 +1602,7 @@ def test_worker_checks_executed_copy_for_the_delegate_before_upload(
         "corp-fixed", "mock-user", "100", "测试部门", operator_user_id="synthetic-operator"
     )
     draft_id, _ = _persist_ready_draft(
-        client, workflow, travel_type, operator_user_id=actor.operator_user_id
+        client, workflow, travel_type, actor=actor
     )
     settings = client.app.state.settings
     with client.app.state.database_session_factory() as database:
@@ -1932,6 +2139,11 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
     assert workflow.create_calls == 1
 
     assert workflow.created_command is not None
+    assert workflow.created_command.originator_user_id == PERSONAL_ACTOR.user_id
+    assert workflow.created_command.department_id == int(PERSONAL_ACTOR.department_id)
+    assert {field.component_id for field in workflow.created_command.form_values} == set(
+        MAPPINGS.values()
+    )
     attachment_field = workflow.created_command.form_values[-1]
     assert attachment_field.component_type == "DDAttachment"
     attachment_values = json.loads(attachment_field.value)
@@ -1984,6 +2196,7 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
         assert submission is not None
         assert submission.snapshot_version == 11
         frozen = json.loads(submission.form_snapshot_json)
+        assert "oaInitiator" not in frozen
         if with_exclusions:
             assert frozen["subsidy"]["excludedDays"] == (
                 "1.0" if exclusion_kind == "middle" else "1.5"

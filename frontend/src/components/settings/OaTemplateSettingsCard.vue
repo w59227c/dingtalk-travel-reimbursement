@@ -141,7 +141,7 @@ const saveDisabledReason = computed(() => {
     reimbursement.schema,
     reimbursement.logicalFields,
     reimbursement.mappings,
-  )) return '请完成报销模板的全部字段映射'
+  )) return '请完成报销模板的必需字段映射'
   if (relatedApprovalPolicyError.value) return relatedApprovalPolicyError.value
   for (const profile of travelProfiles.value) {
     if (!mappingComplete(profile.schema, profile.logicalFields, profile.mappings, true)) {
@@ -513,12 +513,12 @@ function usableMappings(
     const components = compatibleComponents(schema, field.key)
     const candidate = candidates
       .map((mapping) => mapping?.[field.key])
-      .find((componentId) => components.some(
-        (component) => component.componentId === componentId,
-      ))
+      .find((componentId) => (field.required === false && componentId === '')
+        || components.some(component => component.componentId === componentId))
     const exactLabels = components.filter((component) => component.label === field.label)
+    const canUseOnlyComponent = field.required !== false && !['company', 'budgetCode'].includes(field.key)
     return [field.key, candidate ?? (exactLabels.length === 1 ? exactLabels[0]!.componentId
-      : components.length === 1 && !['company', 'budgetCode'].includes(field.key) ? components[0]!.componentId : '')]
+      : components.length === 1 && canUseOnlyComponent ? components[0]!.componentId : '')]
   }))
 }
 
@@ -530,9 +530,12 @@ function mappingComplete(
 ): boolean {
   return schema !== null
     && logicalFields.length > 0
-    && logicalFields.every((field) => optionalTravelType && field.key === 'travelType' && !mappings[field.key] || compatibleComponents(schema, field.key).some(
-      (component) => component.componentId === mappings[field.key],
-    ))
+    && logicalFields.every((field) => {
+      const optional = field.required === false || (optionalTravelType && field.key === 'travelType')
+      const componentId = mappings[field.key]
+      return (optional && !componentId)
+        || compatibleComponents(schema, field.key).some(component => component.componentId === componentId)
+    })
 }
 
 function componentDisplay(component: OaFormComponent): string {
@@ -609,7 +612,7 @@ async function saveCatalog(): Promise<void> {
     reimbursement: {
       processCode: reimbursement.processCode,
       schemaFingerprint: reimbursementSchema.schemaFingerprint,
-      mappings: { ...reimbursement.mappings },
+      mappings: Object.fromEntries(Object.entries(reimbursement.mappings).filter(([, value]) => value)),
     },
     travelProfiles: profiles as ConfirmOaTemplateCatalogInput['travelProfiles'],
   }
@@ -830,6 +833,8 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
               <el-select
                 v-model="reimbursement.mappings[field.key]"
                 filterable
+                :clearable="field.required === false"
+                value-on-clear=""
                 class="full-width"
                 :aria-label="`${field.label}字段映射`"
                 placeholder="选择 OA 控件"
@@ -843,7 +848,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
                 />
               </el-select>
               <div class="field-help">
-                支持 {{ field.supportedComponentTypes.join(' / ') }}
+                {{ field.required === false ? '代报提交必需。' : '' }}支持 {{ field.supportedComponentTypes.join(' / ') }}
               </div>
             </el-form-item>
           </div>
@@ -851,7 +856,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
             v-else
             class="oa-template-placeholder"
           >
-            填写 processCode 并点击“读取并检查模板”后，在这里映射 10 个报销字段。
+            填写 processCode 并点击“读取并检查模板”后，在这里映射报销字段。
           </p>
           <el-alert
             v-if="reimbursement.schema && !inspected"

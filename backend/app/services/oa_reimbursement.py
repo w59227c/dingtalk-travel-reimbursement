@@ -49,6 +49,7 @@ from app.models.reimbursement import (
 from app.services.excel_generator import generate_expense_workbook
 from app.services.oa_reimbursement_payload import (
     ReimbursementSnapshot,
+    SnapshotOaInitiator,
     build_create_command,
     create_command_sha256,
     draft_input_from_snapshot,
@@ -393,6 +394,8 @@ class SubmissionMaterializer(Protocol):
 
     def read_upload(self, job: SubmissionJob, upload: SubmissionUpload) -> bytes: ...
 
+    def approval_initiator(self, job: SubmissionJob) -> SnapshotOaInitiator: ...
+
     def build_create_command(
         self,
         job: SubmissionJob,
@@ -442,7 +445,6 @@ class SnapshotSubmissionMaterializer:
         heartbeat: WorkHeartbeat,
     ) -> None:
         snapshot = self._snapshot(job)
-        _validate_job_identity(job, snapshot)
         await _call_with_heartbeat(
             heartbeat,
             lambda: asyncio.to_thread(
@@ -783,6 +785,9 @@ class SnapshotSubmissionMaterializer:
     ) -> CreateProcessInstanceCommand:
         return build_create_command(self._snapshot(job), attachments)
 
+    def approval_initiator(self, job: SubmissionJob) -> SnapshotOaInitiator:
+        return self._snapshot(job).approval_initiator
+
     def serialize_create_command(self, command: CreateProcessInstanceCommand) -> str:
         return serialize_create_command(command)
 
@@ -817,7 +822,9 @@ class SnapshotSubmissionMaterializer:
         return value.strip()
 
     def _snapshot(self, job: SubmissionJob) -> ReimbursementSnapshot:
-        return parse_snapshot(job.snapshot_json, expected_sha256=job.snapshot_sha256)
+        snapshot = parse_snapshot(job.snapshot_json, expected_sha256=job.snapshot_sha256)
+        _validate_job_identity(job, snapshot)
+        return snapshot
 
     async def _listed_instance_ids(
         self,
@@ -1813,12 +1820,13 @@ class OAReimbursementProcessor:
     ) -> None:
         try:
             lease = await self._renew(lease)
-            space = await self._storage.get_approval_space(job.originator_user_id)
+            initiator = self._materializer.approval_initiator(job)
+            space = await self._storage.get_approval_space(initiator.user_id)
             job = await self._state_call(self._state.load_job, lease)
             for upload in job.uploads:
                 if upload.status is ReimbursementUploadStatus.COMMITTED:
                     outcome = await self._storage.probe_attachment(
-                        union_id=job.originator_union_id,
+                        union_id=initiator.union_id,
                         expected=upload.as_attachment(),
                     )
                     if outcome is AttachmentProbe.EXACT:
@@ -1846,7 +1854,7 @@ class OAReimbursementProcessor:
                         error_message="附件提交结果需要人工核对",
                     )
                     return
-                lease = await self._upload_one(lease, job, upload, space)
+                lease = await self._upload_one(lease, job, upload, space, initiator.union_id)
         except _UploadCommitUncertain:
             return
         except _RetryableUploadFailure as failure:
@@ -1900,12 +1908,13 @@ class OAReimbursementProcessor:
         job: SubmissionJob,
         upload: SubmissionUpload,
         space: ApprovalSpace,
+        union_id: str,
     ) -> SubmissionLease:
         content = await asyncio.to_thread(self._materializer.read_upload, job, upload)
         approval_file = upload.as_approval_file(content)
         prepared = await self._storage.prepare_upload(
             space=space,
-            union_id=job.originator_union_id,
+            union_id=union_id,
             file=approval_file,
         )
         lease = await self._renew(lease)
@@ -2113,7 +2122,7 @@ class OAReimbursementProcessor:
                     end_time=_epoch_millis(query_end),
                     next_token=token,
                     max_results=_RECONCILIATION_PAGE_SIZE,
-                    user_ids=(job.originator_user_id,),
+                    user_ids=(command.originator_user_id,),
                     statuses=("RUNNING", "TERMINATED", "COMPLETED"),
                 ),
             )
@@ -2263,6 +2272,9 @@ class OAReimbursementProcessor:
                 error_message="审批已经存在，禁止清理附件",
             )
             return
+        # Historical personal jobs already have the upload identity on the row,
+        # even if their older form snapshot cannot be rendered by this worker.
+        union_id = job.originator_union_id if job.operator_user_id is None else None
         for upload in job.uploads:
             if upload.status in {
                 ReimbursementUploadStatus.CLEANED,
@@ -2281,8 +2293,10 @@ class OAReimbursementProcessor:
                     upload,
                 )
             try:
+                if union_id is None:
+                    union_id = self._materializer.approval_initiator(job).union_id
                 outcome = await self._storage.recycle_attachment(
-                    union_id=job.originator_union_id,
+                    union_id=union_id,
                     attachment=upload.as_attachment(),
                 )
             except ApiError as exc:
@@ -2701,6 +2715,10 @@ def _validate_job_identity(
         or snapshot.identity.user_id != job.originator_user_id
         or snapshot.identity.union_id != job.originator_union_id
         or snapshot.identity.department_id != str(job.department_id)
+        or (
+            snapshot.oa_initiator is not None
+            and snapshot.oa_initiator.user_id != job.operator_user_id
+        )
     ):
         raise ApiError(
             "REIMBURSEMENT_SNAPSHOT_IDENTITY_MISMATCH",

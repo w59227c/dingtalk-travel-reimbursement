@@ -38,6 +38,7 @@ from app.services.oa_reimbursement import (
     SubmissionUpload,
     strict_instance_matches_command,
 )
+from app.services.oa_reimbursement_payload import SnapshotOaInitiator
 from app.services.reimbursement_submissions import ReimbursementSubmissionConflict
 
 NOW = datetime(2026, 9, 4, 8, 0, 0)
@@ -301,6 +302,13 @@ class FakeMaterializer:
 
     def read_upload(self, _job, _upload):
         return CONTENT
+
+    def approval_initiator(self, job):
+        return SnapshotOaInitiator(
+            user_id=job.originator_user_id,
+            union_id=job.originator_union_id,
+            department_id=str(job.department_id),
+        )
 
     def build_create_command(self, _job, _attachments):
         return _command()
@@ -649,6 +657,41 @@ async def test_transient_staging_failure_keeps_bounded_retry_behavior() -> None:
     assert state.job.status is ReimbursementSubmissionStatus.FAILED_RETRYABLE
     assert state.job.resume_status is ReimbursementSubmissionStatus.GENERATING_EXCEL
     assert state.excel_calls == 1
+
+
+@pytest.mark.parametrize("operator_user_id", [None, "delegate-operator"])
+async def test_orphan_cleanup_with_an_unreadable_snapshot(operator_user_id) -> None:
+    class UnreadableSnapshotMaterializer(FakeMaterializer):
+        def approval_initiator(self, _job):
+            raise ApiError("REIMBURSEMENT_SNAPSHOT_INVALID", "unreadable snapshot", 409)
+
+    class PersonalStorage(FakeStorage):
+        async def recycle_attachment(self, *, union_id, attachment):
+            assert union_id == "union-1"
+            return await super().recycle_attachment(union_id=union_id, attachment=attachment)
+
+    job = _job(
+        ReimbursementSubmissionStatus.ORPHAN_CLEANUP,
+        upload=_upload(ReimbursementUploadStatus.COMMITTED),
+    )
+    state = FakeState(replace(job, operator_user_id=operator_user_id))
+    storage = PersonalStorage()
+    processor = OAReimbursementProcessor(
+        state=state,
+        materializer=UnreadableSnapshotMaterializer(),
+        workflow=FakeWorkflow(),
+        storage=storage,
+        lease_seconds=30,
+        clock=lambda: NOW,
+    )
+    await processor.process(_lease(ReimbursementSubmissionStatus.ORPHAN_CLEANUP))
+
+    if operator_user_id is None:
+        assert storage.events == ["recycle"]
+        assert state.job.status is ReimbursementSubmissionStatus.FAILED_FINAL
+    else:
+        assert storage.events == []
+        assert state.job.status is ReimbursementSubmissionStatus.MANUAL_REVIEW
 
 
 async def test_permanent_orphan_cleanup_error_requires_manual_review() -> None:

@@ -62,7 +62,7 @@ OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX R
 
 先停止接单及 worker，记录当前数据库 revision，并核对目标后端镜像的 `alembic heads`、数据库约束和快照格式兼容性。**不能仅改镜像标签就跨数据库版本回滚**：旧镜像无法识别新 revision，启动时的 `alembic upgrade head` 会失败；部分降级还会因业务记录或审计证据而被明确拒绝。
 
-新锁定的单据在版本 11 快照中写入 `detailOrder`，数据库 revision 保持原值。旧后端镜像会拒绝带该字段的快照。生成首份新快照后，保留当前数据的镜像回滚只能选用支持 `detailOrder` 的版本。确需回到更早的镜像时，按下方步骤恢复升级前的一致性备份。
+数据库 revision 相同也须核对应用格式。版本 11 快照可能包含 `detailOrder`、代报的 `oaInitiator` 及报销身份字段映射，模板目录也可保存报销人和报销部门映射。保留当前数据的镜像回滚须选用支持已写入字段和映射的后端。确需回到更早的镜像时，按下方步骤恢复升级前的一致性备份。
 
 只有确认目标镜像支持当前数据库和已保存快照时，才把 `.env` 的 `IMAGE_TAG` 改为 Actions 已成功发布的目标 `sha-<完整 commit>`，再执行 `docker compose pull` 和 `docker compose up -d --wait --wait-timeout 300`。恢复跟随主线时改回 `IMAGE_TAG=main`。
 

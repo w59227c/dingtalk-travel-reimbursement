@@ -114,7 +114,10 @@ _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _SIGNED_INT64_MAX = 9_223_372_036_854_775_807
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _POSITIVE_DECIMAL_IDENTIFIER = re.compile(r"^[1-9]\d{0,18}$")
-_OA_LOGICAL_KEYS = tuple(item.key for item in REIMBURSEMENT_LOGICAL_FIELD_SPECS)
+_OA_LOGICAL_KEYS = tuple(item.key for item in REIMBURSEMENT_LOGICAL_FIELD_SPECS if item.required)
+_OA_IDENTITY_KEYS = tuple(
+    item.key for item in REIMBURSEMENT_LOGICAL_FIELD_SPECS if not item.required
+)
 _OA_VALUE_KEYS = _OA_LOGICAL_KEYS[:-1]
 _ATTACHMENTS_KEY = _OA_LOGICAL_KEYS[-1]
 
@@ -134,12 +137,15 @@ class _SnapshotModel(BaseModel):
     )
 
 
-class SnapshotIdentity(_SnapshotModel):
-    corp_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+class SnapshotOaInitiator(_SnapshotModel):
     user_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     union_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
-    name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     department_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+
+
+class SnapshotIdentity(SnapshotOaInitiator):
+    corp_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    name: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     department_name: ShortText
     microapp_agent_id: PositiveInt
 
@@ -404,6 +410,10 @@ class ReimbursementSnapshot(_SnapshotModel):
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
+    oa_initiator: SnapshotOaInitiator | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     template: SnapshotTemplate
     selections: SnapshotSelections
     input: SnapshotInput
@@ -442,6 +452,10 @@ class ReimbursementSnapshot(_SnapshotModel):
         if self.detail_order is None:
             return self.input.items
         return tuple(self.input.items[index] for index in self.detail_order)
+
+    @property
+    def approval_initiator(self) -> SnapshotOaInitiator:
+        return self.oa_initiator or self.identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +505,7 @@ class SnapshotSource:
     related_approvals: tuple[RelatedApprovalSource, ...]
     original_files: tuple[OriginalFileSource, ...]
     excel_template_sha256: str
+    oa_initiator: SnapshotOaInitiator | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -525,6 +540,7 @@ def collect_snapshot_source(
     excel_template_path: Path,
     max_items: int,
     ocr_timeout_seconds: int,
+    oa_initiator: SnapshotOaInitiator | None = None,
 ) -> SnapshotSource:
     """Recover interrupted OCR, then read one fail-closed submission view.
 
@@ -655,6 +671,7 @@ def collect_snapshot_source(
         related_approvals=related,
         original_files=originals,
         excel_template_sha256=hash_excel_template(excel_template_path),
+        oa_initiator=oa_initiator,
     )
 
 
@@ -676,6 +693,14 @@ def _only_derived_project_changed(stored_json: str, calculated_json: str) -> boo
 def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
     """Build the versioned immutable payload persisted with a submission."""
 
+    if source.oa_initiator and not all(
+        key in source.catalog.reimbursement.mappings for key in _OA_IDENTITY_KEYS
+    ):
+        raise ApiError(
+            "OA_DELEGATED_FIELDS_NOT_CONFIGURED",
+            "请联系管理员在 OA 报销模板添加并映射「报销人」和「报销部门」单行文本控件，再提交代报",
+            409,
+        )
     try:
         company = _mapped_option(source.catalog, "company", source.draft_input.company_value)
         budget = _mapped_option(
@@ -755,6 +780,7 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
             draft_id=source.draft_id,
             draft_revision=source.draft_revision,
             identity=source.identity,
+            oa_initiator=source.oa_initiator,
             template=template,
             selections=SnapshotSelections(
                 company=_snapshot_option(company),
@@ -932,11 +958,15 @@ def build_create_command(
     snapshot: ReimbursementSnapshot,
     attachments: Sequence[ApprovalAttachment],
 ) -> CreateProcessInstanceCommand:
-    """Build all ten OA fields, requiring originals first and Excel last."""
+    """Build the OA request from the frozen business fields and initiator."""
 
     snapshot = _require_snapshot(snapshot)
     normalized_attachments = _validate_attachment_manifest(snapshot, attachments)
     values_by_key = {item.logical_key: item.value for item in snapshot.form_values}
+    values_by_key.update(
+        reimbursementEmployee=snapshot.identity.name,
+        reimbursementDepartment=snapshot.identity.department_name,
+    )
     values_by_key[_ATTACHMENTS_KEY] = _canonical_json(
         [item.as_oa_value() for item in normalized_attachments]
     )
@@ -948,23 +978,20 @@ def build_create_command(
         )
     form_values = tuple(
         CreateWorkflowFormValue(
-            name=bindings[key].name,
-            value=values_by_key[key],
-            component_id=bindings[key].component_id,
-            component_type=bindings[key].component_type,
-            biz_alias=bindings[key].biz_alias,
+            name=binding.name,
+            value=values_by_key[binding.logical_key],
+            component_id=binding.component_id,
+            component_type=binding.component_type,
+            biz_alias=binding.biz_alias,
         )
-        for key in _OA_LOGICAL_KEYS
-        if not has_range or key not in {"endDate", "durationDays"}
+        for binding in snapshot.template.fields
+        if not has_range or binding.logical_key not in {"endDate", "durationDays"}
     )
-    try:
-        department_id = int(snapshot.identity.department_id)
-    except ValueError:
-        raise _snapshot_error("发起部门标识无效，请重新进入应用") from None
+    initiator = snapshot.approval_initiator
     return CreateProcessInstanceCommand(
         process_code=snapshot.template.process_code,
-        originator_user_id=snapshot.identity.user_id,
-        department_id=department_id,
+        originator_user_id=initiator.user_id,
+        department_id=int(initiator.department_id),
         microapp_agent_id=snapshot.identity.microapp_agent_id,
         form_values=form_values,
     )
@@ -1179,6 +1206,8 @@ def _snapshot_template(catalog: OaTemplateCatalogContract) -> SnapshotTemplate:
     fields: list[SnapshotTemplateField] = []
     for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS:
         component_id = reimbursement.mappings.get(spec.key)
+        if component_id is None and not spec.required:
+            continue
         component = components.get(component_id)
         if component is None or component.component_type not in spec.supported_component_types:
             raise _snapshot_error("审批模板字段映射已经变化，请管理员重新确认")
@@ -1552,8 +1581,23 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         raise ValueError("department id must be a positive signed int64")
     if snapshot.identity.microapp_agent_id > _SIGNED_INT64_MAX:
         raise ValueError("microapp agent id must be a positive signed int64")
-    if tuple(item.logical_key for item in snapshot.template.fields) != _OA_LOGICAL_KEYS:
+    field_keys = tuple(item.logical_key for item in snapshot.template.fields)
+    identity_keys = tuple(key for key in _OA_IDENTITY_KEYS if key in field_keys)
+    if field_keys != (*_OA_LOGICAL_KEYS, *identity_keys):
         raise ValueError("template fields are incomplete or out of order")
+    if snapshot.oa_initiator is not None:
+        initiator = snapshot.oa_initiator
+        if (
+            snapshot.snapshot_version < 11
+            or identity_keys != _OA_IDENTITY_KEYS
+            or initiator.user_id == snapshot.identity.user_id
+            or initiator.union_id == snapshot.identity.union_id
+            or not _POSITIVE_DECIMAL_IDENTIFIER.fullmatch(initiator.department_id)
+            or int(initiator.department_id) > _SIGNED_INT64_MAX
+        ):
+            raise ValueError("delegated OA initiator is invalid")
+    if identity_keys and snapshot.snapshot_version < 11:
+        raise ValueError("reimbursement identity fields require snapshot v11")
     if tuple(item.logical_key for item in snapshot.form_values) != _OA_VALUE_KEYS:
         raise ValueError("form values are incomplete or out of order")
     range_bindings = [
@@ -1564,7 +1608,7 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         or len({item.component_id for item in range_bindings}) != 1
     ):
         raise ValueError("date range requires all three date bindings")
-    expected_ids = len(_OA_LOGICAL_KEYS) - (2 if range_bindings else 0)
+    expected_ids = len(field_keys) - (2 if range_bindings else 0)
     if len({item.component_id for item in snapshot.template.fields}) != expected_ids:
         raise ValueError("template component ids must be unique")
     if not snapshot.related_approvals:

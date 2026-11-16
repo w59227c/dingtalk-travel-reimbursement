@@ -564,6 +564,10 @@ def create_submission(
             snapshot.snapshot_version != snapshot_version
             or snapshot.draft_id != draft.id
             or snapshot.draft_revision != expected_revision
+            or (
+                snapshot.oa_initiator is not None
+                and snapshot.oa_initiator.user_id != actor.operator_user_id
+            )
         ):
             raise ReimbursementSubmissionConflict("submission snapshot identity mismatch")
         if snapshot_version >= 11:

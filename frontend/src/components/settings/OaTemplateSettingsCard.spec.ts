@@ -535,6 +535,48 @@ describe('OaTemplateSettingsCard', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('maps the employee and department fields used in delegated OA, mobile=%s', async (mobile) => {
+    const inspected = inspection()
+    const identityFields: OaLogicalField[] = [
+      { key: 'reimbursementEmployee', label: '报销人', supportedComponentTypes: ['TextField'], required: false },
+      { key: 'reimbursementDepartment', label: '报销部门', supportedComponentTypes: ['TextField'], required: false },
+    ]
+    inspected.reimbursement.logicalFields = [...reimbursementFields, ...identityFields]
+    inspected.reimbursement.schema.components.push(
+      component('employee-id', 'TextField', '报销人', 'reimbursementEmployee', [], false),
+      component('department-id', 'TextField', '归属部门', 'reimbursementDepartment', [], false),
+    )
+    vi.mocked(inspectOaTemplateCatalog).mockResolvedValue(inspected)
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
+    const page = mountSettingsPage(mobile)
+    try {
+      await flushPromises()
+      await findButton(page, '读取并检查模板')!.trigger('click')
+      await flushPromises()
+      const selects = page.findAllComponents(ElSelect)
+      const [employee, department] = selects.slice(reimbursementFields.length)
+      expect(employee?.props('modelValue')).toBe('employee-id')
+      expect(department?.props('modelValue')).toBe('')
+      expect(findButton(page, '保存整个目录')?.attributes('disabled')).toBeUndefined()
+      await changeSelect(page, reimbursementFields.length + 1, 'department-id')
+      await findButton(page, '读取并检查模板')!.trigger('click')
+      await flushPromises()
+      await findButton(page, '保存整个目录')!.trigger('click')
+      await flushPromises()
+      expect(confirmOaTemplateCatalog).toHaveBeenCalledWith(expect.objectContaining({
+        reimbursement: expect.objectContaining({
+          mappings: {
+            ...reimbursementMappings,
+            reimbursementEmployee: 'employee-id',
+            reimbursementDepartment: 'department-id',
+          },
+        }),
+      }))
+    } finally {
+      page.unmount()
+    }
+  })
+
   it.each([false, true])('preserves conflicting mappings until an explicit successful reload, mobile=%s', async (mobile) => {
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
     vi.mocked(confirmOaTemplateCatalog).mockRejectedValue({

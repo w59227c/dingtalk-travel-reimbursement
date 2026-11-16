@@ -52,6 +52,7 @@ export interface OaLogicalField {
   key: string
   label: string
   supportedComponentTypes: string[]
+  required?: boolean
 }
 
 export type OaFieldMappings = Record<string, string>

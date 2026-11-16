@@ -91,17 +91,25 @@ class TemplateMappingsWrite(StrictRequest):
     reimbursement_amount: str = Field(alias="reimbursementAmount", min_length=1, max_length=128)
     related_approvals: str = Field(alias="relatedApprovals", min_length=1, max_length=128)
     attachments: str = Field(min_length=1, max_length=128)
+    reimbursement_employee: str | None = Field(
+        default=None, alias="reimbursementEmployee", min_length=1, max_length=128,
+    )
+    reimbursement_department: str | None = Field(
+        default=None, alias="reimbursementDepartment", min_length=1, max_length=128,
+    )
 
     @field_validator("*")
     @classmethod
-    def normalize_component_id(cls, value: str) -> str:
+    def normalize_component_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         normalized = value.strip()
         if not normalized:
             raise ValueError("component id must not be blank")
         return normalized
 
     def as_mapping(self) -> dict[str, str]:
-        return {
+        mappings = {
             "company": self.company,
             "budgetCode": self.budget_code,
             "travelType": self.travel_type,
@@ -113,6 +121,11 @@ class TemplateMappingsWrite(StrictRequest):
             "relatedApprovals": self.related_approvals,
             "attachments": self.attachments,
         }
+        if self.reimbursement_employee is not None:
+            mappings["reimbursementEmployee"] = self.reimbursement_employee
+        if self.reimbursement_department is not None:
+            mappings["reimbursementDepartment"] = self.reimbursement_department
+        return mappings
 
 
 class TravelMappingsWrite(StrictRequest):

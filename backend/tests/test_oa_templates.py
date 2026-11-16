@@ -330,6 +330,40 @@ def confirm(
     )
 
 
+@pytest.mark.parametrize("include_identity_fields", [False, True])
+def test_catalog_api_confirms_with_or_without_delegation_mappings(
+    client_factory, include_identity_fields,
+) -> None:
+    payload = schema_payload()
+    mappings = dict(MAPPINGS)
+    if include_identity_fields:
+        payload["result"]["schemaContent"]["items"].extend([
+            component("TextField", "employee-id", "报销人", required=False),
+            component("TextField", "department-id", "报销部门", required=False),
+        ])
+        mappings.update(
+            reimbursementEmployee="employee-id", reimbursementDepartment="department-id",
+        )
+    transport, _calls = transport_for_schema(
+        lambda _number, _request: httpx.Response(200, json=payload)
+    )
+    client, headers = admin_client(client_factory, transport)
+    inspected = inspect(client, headers)
+    assert inspected.status_code == 200, inspected.text
+    reimbursement = inspected.json()["data"]["reimbursement"]
+    optional_keys = {
+        field["key"] for field in reimbursement["logicalFields"] if field.get("required") is False
+    }
+    assert optional_keys == {"reimbursementEmployee", "reimbursementDepartment"}
+    confirmed = confirm(client, headers, reimbursement["schema"]["schemaFingerprint"], mappings)
+    assert confirmed.status_code == 200, confirmed.text
+    current = client.get("/api/admin/oa/templates/catalog")
+    assert current.status_code == 200, current.text
+    catalog = current.json()["data"]["catalog"]
+    assert catalog["reimbursement"]["mappings"] == mappings
+    assert catalog["isSubmissionReady"]
+
+
 def test_travel_accounting_mappings_survive_catalog_api_confirmation(client_factory) -> None:
     def travel_response(process_code: str, _request: httpx.Request) -> httpx.Response:
         payload = travel_schema_payload(process_code)

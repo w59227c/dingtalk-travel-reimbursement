@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -15,6 +16,7 @@ from app.schemas.common import success
 from app.schemas.reimbursement_submissions import SubmitReimbursementRequest
 from app.services.oa_reimbursement_payload import (
     SNAPSHOT_VERSION,
+    SnapshotOaInitiator,
     build_snapshot,
     collect_snapshot_source,
     serialize_snapshot,
@@ -38,6 +40,7 @@ from app.services.reimbursement_submissions import (
 from app.services.sessions import (
     CurrentSession,
     require_admin_csrf,
+    selectable_departments,
 )
 
 router = APIRouter(tags=["reimbursement-submissions"])
@@ -126,6 +129,11 @@ async def submit_reimbursement(
             "钉钉应用 AgentId 尚未配置",
             503,
         )
+    if actor.operator_user_id is not None:
+        # The schema read releases the transaction. Keep these values even if
+        # another tab logs out before the later live-session check.
+        operator_union_id = current.record.dingtalk_union_id
+        preferred_department_id = current.record.current_department_id
     # Verify the live OA schemas before producing an immutable snapshot or
     # locking the draft. The helper persists DRIFTED so every session stops
     # using an outdated catalog until an administrator reconfirms it.
@@ -134,6 +142,30 @@ async def submit_reimbursement(
         request.app.state.database_session_factory,
         request.app.state.dingtalk_workflow,
     )
+    oa_initiator = None
+    if actor.operator_user_id is not None:
+        database.rollback()
+        operator = await request.app.state.dingtalk_service.get_employee_identity(
+            actor.operator_user_id, fresh=True
+        )
+        if operator.user_id != actor.operator_user_id or operator.union_id != operator_union_id:
+            raise ApiError("UNAUTHORIZED", "登录身份已变化，请重新进入", 401)
+        departments = selectable_departments(operator.departments)
+        if not departments:
+            raise ApiError(
+                "OA_INITIATOR_DEPARTMENT_UNAVAILABLE",
+                "无法确认经办人的钉钉发起部门，请联系管理员",
+                409,
+            )
+        department = next(
+            (item for item in departments if item.id == preferred_department_id), departments[0]
+        )
+        actor = replace(
+            actor, operator_department_ids=tuple(item.id for item in operator.departments)
+        )
+        oa_initiator = SnapshotOaInitiator(
+            user_id=operator.user_id, union_id=operator.union_id, department_id=department.id,
+        )
     await verify_delegated_saved_approvals(
         database,
         request.app.state.dingtalk_workflow,
@@ -153,6 +185,7 @@ async def submit_reimbursement(
         excel_template_path=settings.excel_template_path,
         max_items=settings.expense_max_items,
         ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
+        oa_initiator=oa_initiator,
     )
     snapshot = build_snapshot(source)
     if (

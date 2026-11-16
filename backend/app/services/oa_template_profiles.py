@@ -56,12 +56,14 @@ class LogicalFieldSpec:
     key: str
     label: str
     supported_component_types: frozenset[str]
+    required: bool = True
 
     def as_dict(self) -> dict[str, object]:
         return {
             "key": self.key,
             "label": self.label,
             "supportedComponentTypes": sorted(self.supported_component_types),
+            **({"required": False} if not self.required else {}),
         }
 
 
@@ -170,6 +172,10 @@ REIMBURSEMENT_LOGICAL_FIELD_SPECS: Final[tuple[LogicalFieldSpec, ...]] = (
     ),
     LogicalFieldSpec("relatedApprovals", "关联审批单", frozenset({"RelateField"})),
     LogicalFieldSpec("attachments", "附件", frozenset({"DDAttachment"})),
+    LogicalFieldSpec("reimbursementEmployee", "报销人", frozenset({"TextField"}), required=False),
+    LogicalFieldSpec(
+        "reimbursementDepartment", "报销部门", frozenset({"TextField"}), required=False,
+    ),
 )
 TRAVEL_LOGICAL_FIELD_SPECS: Final[tuple[LogicalFieldSpec, ...]] = (
     LogicalFieldSpec(
@@ -768,7 +774,10 @@ def validate_template_mapping(schema: FormSchema, mappings: dict[str, str]) -> d
     normalized = _validate_mapping(
         schema,
         mappings,
-        specs=REIMBURSEMENT_LOGICAL_FIELD_SPECS,
+        specs=tuple(
+            spec for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS
+            if spec.required or spec.key in mappings
+        ),
         reject_unmapped_required=True,
         reusable_component_types=frozenset({"DDDateRangeField"}),
     )
