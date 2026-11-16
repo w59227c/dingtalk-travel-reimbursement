@@ -163,6 +163,7 @@ onBeforeUnmount(() => active?.abort())
       v-model="open"
       :title="`选择${noun}`"
       width="min(520px, calc(100vw - 32px))"
+      append-to-body
     >
       <div
         v-if="kind === 'employee'"

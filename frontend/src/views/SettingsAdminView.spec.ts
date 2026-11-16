@@ -1,7 +1,7 @@
 import ElementPlus from 'element-plus'
 import { ElMessageBox } from 'element-plus'
 import { createPinia } from 'pinia'
-import { flushPromises, mount, type DOMWrapper } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { listAttendanceCalendars } from '@/api/attendanceCalendars'
@@ -29,19 +29,27 @@ function adminPinia() {
   return pinia
 }
 
-async function chooseEmployee(field: Pick<DOMWrapper<Element>, 'findAll' | 'get'>): Promise<void> {
+function activeDirectoryDialog(): DOMWrapper<Element> {
+  const dialog = new DOMWrapper(document.body).findAll('.el-dialog').find(item => item.isVisible())
+  if (!dialog) throw new Error('Expected an open directory dialog outside the settings form')
+  return dialog
+}
+
+async function chooseEmployee(field: Pick<DOMWrapper<Element>, 'findAll'>): Promise<void> {
   await field.findAll('button').find(button => button.text() === '选择员工')!.trigger('click')
-  await field.get('input[aria-label="员工姓名或 userId"]').setValue('合成员工')
-  await field.findAll('button').find(button => button.text() === '搜索')!.trigger('click')
+  const dialog = activeDirectoryDialog()
+  expect(dialog.element.closest('.el-form-item__content')).toBeNull()
+  await dialog.get('input[aria-label="员工姓名或 userId"]').setValue('合成员工')
+  await dialog.findAll('button').find(button => button.text() === '搜索')!.trigger('click')
   await flushPromises()
-  const results = field.findAll('.directory-choices label')
+  const results = dialog.findAll('.directory-choices label')
   expect(results).toHaveLength(2)
   expect(results[0]!.text()).toContain('合成采购部')
   expect(results[0]!.text()).toContain('synthetic-same-name')
   expect(results[1]!.text()).toContain('合成人事部、合成项目部')
   expect(results[1]!.text()).toContain('synthetic-user')
   await results[1]!.get('input[type="checkbox"]').setValue(true)
-  await field.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+  await dialog.findAll('button').find(button => button.text() === '确定')!.trigger('click')
 }
 
 vi.mock('@/api/attendanceCalendars', () => ({ listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), deleteAttendanceCalendar: vi.fn() }))
@@ -102,11 +110,12 @@ describe('SettingsAdminView receipt keywords', () => {
       const departments = card.get('[aria-label="允许代报的部门"]')
       await departments.findAll('button').find(button => button.text() === '选择部门')!.trigger('click')
       await flushPromises()
-      await departments.get('input[type="checkbox"]').setValue(true)
-      await departments.get('button[aria-label="查看合成人事部的下级部门"]').trigger('click')
+      const dialog = activeDirectoryDialog()
+      await dialog.get('input[type="checkbox"]').setValue(true)
+      await dialog.get('button[aria-label="查看合成人事部的下级部门"]').trigger('click')
       await flushPromises()
-      await departments.get('input[type="checkbox"]').setValue(true)
-      await departments.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+      await dialog.get('input[type="checkbox"]').setValue(true)
+      await dialog.findAll('button').find(button => button.text() === '确定')!.trigger('click')
       const employees = card.get('[aria-label="允许代报的员工"]')
       await chooseEmployee(employees)
       expect(employees.get('.directory-employee-tag').text()).toMatch(/合成员工\s+synthetic-user/)
@@ -148,8 +157,9 @@ describe('SettingsAdminView receipt keywords', () => {
       const field = wrapper.get('[aria-label="额外管理员部门"]')
       await field.findAll('button').find(button => button.text() === '选择部门')!.trigger('click')
       await flushPromises()
-      await field.get('input[type="checkbox"]').setValue(true)
-      await field.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+      const dialog = activeDirectoryDialog()
+      await dialog.get('input[type="checkbox"]').setValue(true)
+      await dialog.findAll('button').find(button => button.text() === '确定')!.trigger('click')
       await chooseEmployee(employees)
       const tags = employees.findAll('.directory-employee-tag')
       expect(tags.map(tag => tag.get('.directory-employee-id').text())).toEqual([
