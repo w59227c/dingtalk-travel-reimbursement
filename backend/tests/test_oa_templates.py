@@ -364,6 +364,85 @@ def test_catalog_api_confirms_with_or_without_delegation_mappings(
     assert catalog["isSubmissionReady"]
 
 
+@pytest.mark.parametrize("travel_change", ["unchanged", "republished", "accounting_source"])
+def test_additive_delegation_mappings_preserve_only_compatible_draft_bindings_and_admin_cas(
+    client_factory, travel_change,
+) -> None:
+    payload = schema_payload()
+    items = payload["result"]["schemaContent"]["items"]
+    next(item for item in items if item["props"]["id"] == "description-id")["props"][
+        "required"
+    ] = False
+    items.extend([
+        component("TextField", "employee-id", "报销人", required=False),
+        component("TextField", "department-id", "报销部门", required=False),
+        component("TextField", "alternate-description", "另一个说明", required=False),
+    ])
+    process_code = TRAVEL_PROCESS_CODES[0]
+    travel_payload = travel_schema_payload(process_code)
+    travel_items = travel_payload["result"]["schemaContent"]["items"]
+    travel_items.append(component("TextField", "company-original", "所属公司", required=False))
+    transport, _calls = transport_for_schema(
+        lambda _number, _request: httpx.Response(200, json=payload),
+        travel_response_factory=lambda code, _request: httpx.Response(
+            200, json=travel_payload if code == process_code else travel_schema_payload(code)
+        ),
+    )
+    client, headers = admin_client(client_factory, transport)
+    inspection = inspect(client, headers)
+    assert inspection.status_code == 200, inspection.text
+    fingerprint = inspection.json()["data"]["reimbursement"]["schema"]["schemaFingerprint"]
+    travel_fingerprints = {
+        process_code: normalize_form_schema(process_code, travel_payload).fingerprint,
+    }
+    initial = confirm(client, headers, fingerprint, travel_schema_fingerprints=travel_fingerprints)
+    assert initial.status_code == 200, initial.text
+    if travel_change == "republished":
+        travel_payload["result"]["gmtModified"] = "2026-09-04T12:00:00+08:00"
+    elif travel_change == "accounting_source":
+        travel_items[-1]["props"]["id"] = "company-replacement"
+        inspected = inspect(client, headers)
+        assert inspected.status_code == 200, inspected.text
+        assert inspected.json()["data"]["compatibilityStatus"] == "DRIFTED"
+    travel_fingerprints[process_code] = normalize_form_schema(
+        process_code, travel_payload
+    ).fingerprint
+    with_employee = {**MAPPINGS, "reimbursementEmployee": "employee-id"}
+    with_department = {**with_employee, "reimbursementDepartment": "department-id"}
+
+    for admin_version, mappings in enumerate(
+        [with_employee, with_department, with_department], start=1
+    ):
+        confirmation = {
+            "expected_config_version": admin_version,
+            "travel_schema_fingerprints": travel_fingerprints,
+        }
+        saved = confirm(
+            client, headers, fingerprint, mappings, **confirmation
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["data"]["configVersion"] == admin_version + 1
+        stale = confirm(
+            client, headers, fingerprint, mappings, **confirmation
+        )
+        assert stale.status_code == 409, stale.text
+        options = client.get("/api/oa/reimbursements/options")
+        assert options.status_code == 200, options.text
+        assert options.json()["data"]["templateConfigVersion"] == (
+            2 if travel_change == "accounting_source" else 1
+        )
+
+    changed_core_mappings = {**with_department, "description": "alternate-description"}
+    changed = confirm(
+        client, headers, fingerprint, changed_core_mappings, expected_config_version=4,
+        travel_schema_fingerprints=travel_fingerprints,
+    )
+    assert changed.status_code == 200, changed.text
+    options = client.get("/api/oa/reimbursements/options")
+    assert options.status_code == 200, options.text
+    assert options.json()["data"]["templateConfigVersion"] == 5
+
+
 def test_travel_accounting_mappings_survive_catalog_api_confirmation(client_factory) -> None:
     def travel_response(process_code: str, _request: httpx.Request) -> httpx.Response:
         payload = travel_schema_payload(process_code)

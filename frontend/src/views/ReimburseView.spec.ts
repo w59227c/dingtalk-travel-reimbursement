@@ -708,7 +708,10 @@ describe('ReimburseView single-form OA flow', () => {
       id: 'synthetic-delegate-draft', department: coworkerDepartment,
       input: { ...canonicalNoSubsidyInput(), items: [] },
     })
-    vi.mocked(listReimbursementEmployees).mockResolvedValue([coworker])
+    vi.mocked(listReimbursementEmployees).mockResolvedValue([
+      { name: coworker.name, userId: 'synthetic-same-name', departmentNames: ['合成采购部'] },
+      { ...coworker, departmentNames: [coworkerDepartment.name, '合成项目部'] },
+    ])
     vi.mocked(prepareReimbursementContext).mockImplementation(async (userId) => {
       expect(serverDraft.input.items[0]?.description).toBe('切换前保存的费用说明')
       return userId ? delegatedSession : personalSession
@@ -732,7 +735,19 @@ describe('ReimburseView single-form OA flow', () => {
       expect(drafts.files).toEqual([activeFile])
       expense.items[0]!.description = '切换前保存的费用说明'
       await nextTick()
-      await selectCoworker(wrapper)
+      await wrapper.get('[data-testid="select-reimbursement-employee"]').trigger('click')
+      await wrapper.get('input[aria-label="员工姓名或 userId"]').setValue(coworker.name)
+      await wrapper.get('.employee-search').trigger('submit')
+      await flushPromises()
+      const matches = wrapper.findAll('.employee-match')
+      expect(matches).toHaveLength(2)
+      expect(matches[0]!.text()).toContain('合成采购部')
+      expect(matches[0]!.text()).toContain('synthetic-same-name')
+      expect(matches[1]!.text()).toContain('合成同事部门、合成项目部')
+      expect(matches[1]!.text()).toContain(coworker.userId)
+      await matches[1]!.trigger('click')
+      await flushPromises()
+      expect(prepareReimbursementContext).toHaveBeenCalledWith(coworker.userId, expect.any(AbortSignal))
       expect(updateReimbursementDraft).toHaveBeenCalledWith(
         serverDraft.id, 1, expect.objectContaining({ items: [expect.objectContaining({ description: '切换前保存的费用说明' })] }),
         expect.anything(),
@@ -1130,27 +1145,31 @@ describe('ReimburseView single-form OA flow', () => {
   it.each([false, true])(
     'derives a multi-department user scope from the selected travel approval without showing a submission-stage state (mobile=%s)',
     async (mobile) => {
+    const businessDepartment = { id: '200', name: '示例业务部门' }
+    serverDraft.department = businessDepartment
     const { wrapper } = await mountView((auth) => {
       auth.status = 'department_required'
       auth.session!.selectedDepartment = null
       auth.session!.departments = [
         { id: '100', name: '示例管理部门' },
-        { id: '200', name: '示例业务部门' },
+        businessDepartment,
       ]
     }, false, mobile)
     const departmentResolution = deferred<Awaited<ReturnType<typeof selectDepartmentFromTravelApproval>>>()
     vi.mocked(selectDepartmentFromTravelApproval).mockReturnValue(departmentResolution.promise)
     const resolvedDepartment = {
-      selectedDepartment: { id: '200', name: '示例业务部门' },
+      selectedDepartment: businessDepartment,
       selectionRequired: false,
       departments: [
         { id: '100', name: '示例管理部门' },
-        { id: '200', name: '示例业务部门' },
+        businessDepartment,
       ],
     }
 
     expect(wrapper.text()).not.toContain('选择本次报销部门')
     expect(wrapper.text()).not.toContain('确认部门')
+    const headerActions = () => wrapper.get('.hero-links').findAll('button').map(button => button.text())
+    expect(headerActions()).toEqual([])
     const selector = wrapper.findComponent(TravelApprovalSelectorStub)
     expect(selector.props('single')).toBe(true)
     selector.vm.$emit('update:modelValue', [selection])
@@ -1173,6 +1192,18 @@ describe('ReimburseView single-form OA flow', () => {
       [selection],
       { signal: expect.any(AbortSignal) },
     )
+    expect(headerActions()).toEqual(['报销记录', '新开一笔'])
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+    await visibleButton(wrapper, '新开一笔').trigger('click')
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledWith(expect.any(String), '新开一笔报销', expect.anything())
+    expect(createReimbursementDraft).not.toHaveBeenCalled()
+    await visibleButton(wrapper, '报销记录').trigger('click')
+    await flushPromises()
+    expect(listReimbursementSubmissionHistory).toHaveBeenCalledWith({
+      expectedDepartment: businessDepartment,
+      signal: expect.any(AbortSignal),
+    })
     wrapper.unmount()
     },
   )

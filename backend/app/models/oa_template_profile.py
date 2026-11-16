@@ -33,6 +33,7 @@ class OaTemplateProfile(Base):
     schema_json: Mapped[str] = mapped_column(Text)
     mapping_json: Mapped[str] = mapped_column(Text)
     config_version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    draft_binding_version: Mapped[int | None] = mapped_column(Integer)
     allowed_travel_process_codes_json: Mapped[str] = mapped_column(Text)
     travel_profiles_json: Mapped[str] = mapped_column(
         Text,

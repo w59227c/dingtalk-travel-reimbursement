@@ -1,7 +1,7 @@
 import ElementPlus from 'element-plus'
 import { ElMessageBox } from 'element-plus'
 import { createPinia } from 'pinia'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type DOMWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { listAttendanceCalendars } from '@/api/attendanceCalendars'
@@ -27,6 +27,21 @@ function adminPinia() {
   const pinia = createPinia()
   useAuthStore(pinia).session = { user: { userId: 'synthetic-admin', name: '合成管理员' }, departments: [], selectedDepartment: null, csrfToken: 'synthetic-csrf', isAdmin: true }
   return pinia
+}
+
+async function chooseEmployee(field: Pick<DOMWrapper<Element>, 'findAll' | 'get'>): Promise<void> {
+  await field.findAll('button').find(button => button.text() === '选择员工')!.trigger('click')
+  await field.get('input[aria-label="员工姓名或 userId"]').setValue('合成员工')
+  await field.findAll('button').find(button => button.text() === '搜索')!.trigger('click')
+  await flushPromises()
+  const results = field.findAll('.directory-choices label')
+  expect(results).toHaveLength(2)
+  expect(results[0]!.text()).toContain('合成采购部')
+  expect(results[0]!.text()).toContain('synthetic-same-name')
+  expect(results[1]!.text()).toContain('合成人事部、合成项目部')
+  expect(results[1]!.text()).toContain('synthetic-user')
+  await results[1]!.get('input[type="checkbox"]').setValue(true)
+  await field.findAll('button').find(button => button.text() === '确定')!.trigger('click')
 }
 
 vi.mock('@/api/attendanceCalendars', () => ({ listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), deleteAttendanceCalendar: vi.fn() }))
@@ -65,7 +80,10 @@ beforeEach(() => {
   }))
   vi.mocked(listAdminDepartments).mockReset().mockImplementation(async parentId => parentId === '1'
     ? [{ id: '201', name: '合成人事部' }] : [{ id: '302', name: '合成行政组' }])
-  vi.mocked(searchAdminEmployees).mockReset().mockResolvedValue([{ id: 'synthetic-user', name: '合成员工' }])
+  vi.mocked(searchAdminEmployees).mockReset().mockResolvedValue([
+    { id: 'synthetic-same-name', name: '合成员工', departmentNames: ['合成采购部'] },
+    { id: 'synthetic-user', name: '合成员工', departmentNames: ['合成人事部', '合成项目部'] },
+  ])
   vi.mocked(lookupAdminDirectoryLabels).mockReset().mockImplementation(async (_kind, ids) =>
     ids.map(id => ({ id, name: `已授权 ${id}` })))
 })
@@ -90,13 +108,8 @@ describe('SettingsAdminView receipt keywords', () => {
       await departments.get('input[type="checkbox"]').setValue(true)
       await departments.findAll('button').find(button => button.text() === '确定')!.trigger('click')
       const employees = card.get('[aria-label="允许代报的员工"]')
-      await employees.findAll('button').find(button => button.text() === '选择员工')!.trigger('click')
-      await flushPromises()
-      await employees.get('input[aria-label="员工姓名或 userId"]').setValue('合成员工')
-      await employees.findAll('button').find(button => button.text() === '搜索')!.trigger('click')
-      await flushPromises()
-      await employees.get('input[type="checkbox"]').setValue(true)
-      await employees.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+      await chooseEmployee(employees)
+      expect(employees.get('.directory-employee-tag').text()).toMatch(/合成员工\s+synthetic-user/)
       await card.findAll('button').find(button => button.text() === '保存代报权限')!.trigger('click')
       await flushPromises()
       expect(updateReimbursementDelegationSettings).toHaveBeenCalledWith({
@@ -109,15 +122,17 @@ describe('SettingsAdminView receipt keywords', () => {
     } finally { wrapper.unmount(); refresh.mockRestore() }
   })
 
-  it.each([false, true])('chooses additional admin departments and resolves existing employees, mobile=%s', async (mobile) => {
+  it.each([false, true])('chooses additional admin employees and departments, mobile=%s', async (mobile) => {
     const settings: AdminExpenseSettings = {
-      revision: 'synthetic-settings-v1', appTitle: '报销系统', adminUserIds: ['existing-admin'],
+      revision: 'synthetic-settings-v1', appTitle: '报销系统', adminUserIds: ['synthetic-same-name'],
       adminDepartmentIds: [], environmentAdminUserIds: ['bootstrap-admin'], calculationMode: 'half_day_12',
       subsidyRates: {
         business: '100', short_term_project: '100', long_term_project: '100', same_city_project: '100',
         short_term_internal: '100', long_term_internal: '100', short_term_overseas: '0', long_term_overseas: '0',
       },
     }
+    vi.mocked(lookupAdminDirectoryLabels).mockImplementation(async (_kind, ids) =>
+      ids.map(id => ({ id, name: id === 'synthetic-same-name' ? '合成员工' : `已授权 ${id}` })))
     vi.mocked(getAdminExpenseSettings).mockResolvedValue(settings)
     vi.mocked(updateExpenseSettings).mockImplementation(async value => value)
     const pinia = adminPinia()
@@ -127,18 +142,24 @@ describe('SettingsAdminView receipt keywords', () => {
     })
     try {
       await flushPromises()
-      expect(wrapper.get('[aria-label="额外管理员员工"]').text()).toContain('已授权 existing-admin')
+      const employees = wrapper.get('[aria-label="额外管理员员工"]')
+      expect(employees.get('.directory-employee-tag').text()).toMatch(/合成员工\s+synthetic-same-name/)
       expect(wrapper.get('[aria-label="配置文件管理员"]').find('button').exists()).toBe(false)
       const field = wrapper.get('[aria-label="额外管理员部门"]')
       await field.findAll('button').find(button => button.text() === '选择部门')!.trigger('click')
       await flushPromises()
       await field.get('input[type="checkbox"]').setValue(true)
       await field.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+      await chooseEmployee(employees)
+      const tags = employees.findAll('.directory-employee-tag')
+      expect(tags.map(tag => tag.get('.directory-employee-id').text())).toEqual([
+        'synthetic-same-name', 'synthetic-user',
+      ])
       await wrapper.get('.settings-subsidy-card').findAll('button')
         .find(button => button.text() === '保存设置')!.trigger('click')
       await flushPromises()
       expect(updateExpenseSettings).toHaveBeenCalledWith(expect.objectContaining({
-        adminUserIds: ['existing-admin'], adminDepartmentIds: ['201'], revision: settings.revision,
+        adminUserIds: ['synthetic-same-name', 'synthetic-user'], adminDepartmentIds: ['201'], revision: settings.revision,
       }))
       expect(refresh).toHaveBeenCalledOnce()
     } finally { wrapper.unmount(); refresh.mockRestore() }

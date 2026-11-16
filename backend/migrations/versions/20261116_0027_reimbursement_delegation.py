@@ -68,7 +68,7 @@ def upgrade():
     """)
 
 
-def downgrade():
+def _preflight_downgrade():
     bind = op.get_bind()
     if bind.scalar(sa.text(
         "SELECT 1 FROM settings WHERE key GLOB 'reimbursement_delegation:*' LIMIT 1"
@@ -90,6 +90,10 @@ def downgrade():
         # Check 0026 and its earlier migration guards before any SQLite DDL.
         previous = ScriptDirectory.from_config(context.config).get_revision(down_revision)
         previous.module._preflight_downgrade()
+
+
+def downgrade():
+    _preflight_downgrade()
     for table in reversed(_TABLES):
         op.execute(f"DROP TRIGGER trg_{table}_operator_insert")
         op.execute(f"DROP TRIGGER trg_{table}_operator_immutable")

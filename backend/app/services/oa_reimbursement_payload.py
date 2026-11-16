@@ -1558,6 +1558,10 @@ def generated_upload_manifest(
     )
 
 
+def is_oa_department_id(value: str) -> bool:
+    return bool(_POSITIVE_DECIMAL_IDENTIFIER.fullmatch(value)) and int(value) <= _SIGNED_INT64_MAX
+
+
 def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     trips = snapshot.input.trips or ((snapshot.input.trip,) if snapshot.input.trip else ())
     if snapshot.detail_order is not None:
@@ -1574,10 +1578,7 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         or not any(item.attendance_dates is not None for item in trips)
     ):
         raise ValueError("attendance description format requires attendance dates")
-    if (
-        not _POSITIVE_DECIMAL_IDENTIFIER.fullmatch(snapshot.identity.department_id)
-        or int(snapshot.identity.department_id) > _SIGNED_INT64_MAX
-    ):
+    if not is_oa_department_id(snapshot.identity.department_id):
         raise ValueError("department id must be a positive signed int64")
     if snapshot.identity.microapp_agent_id > _SIGNED_INT64_MAX:
         raise ValueError("microapp agent id must be a positive signed int64")
@@ -1592,8 +1593,7 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
             or identity_keys != _OA_IDENTITY_KEYS
             or initiator.user_id == snapshot.identity.user_id
             or initiator.union_id == snapshot.identity.union_id
-            or not _POSITIVE_DECIMAL_IDENTIFIER.fullmatch(initiator.department_id)
-            or int(initiator.department_id) > _SIGNED_INT64_MAX
+            or not is_oa_department_id(initiator.department_id)
         ):
             raise ValueError("delegated OA initiator is invalid")
     if identity_keys and snapshot.snapshot_version < 11:

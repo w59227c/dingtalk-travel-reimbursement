@@ -741,28 +741,42 @@ def _worker(
 @pytest.mark.parametrize(
     "mode",
     ["personal", "delegated", "upload_retry", "response_lost", "create_rejected",
-     "missing_fields", "login_ended"],
+     "missing_fields", "login_ended", "same_name_departments", "map_existing_personal",
+     "map_existing_delegated"],
 )
 def test_submit_freezes_the_beneficiary_and_the_actual_oa_initiator(
     enabled_manual_worker_client, monkeypatch, mode,
 ):
     client = enabled_manual_worker_client
-    is_delegate = mode != "personal"
+    is_delegate = mode not in {"personal", "map_existing_personal"}
+    add_mappings_later = mode in {"map_existing_personal", "map_existing_delegated"}
+    same_name_departments = mode == "same_name_departments"
     actor = (
         DraftActor("corp-fixed", "beneficiary", "200", "费用部门", operator_user_id="mock-user")
         if is_delegate else PERSONAL_ACTOR
     )
     employee_name = "被代报员工" if is_delegate else client.app.state.settings.auth_mock_user_name
-    if is_delegate:
+    if is_delegate or add_mappings_later:
         client.app.state.settings.admin_user_ids = "mock-user"
-        client.app.state.settings.auth_mock_departments = "100:测试部门,101:第二部门"
+    second_department_name = "测试部门" if same_name_departments else "第二部门"
+    if is_delegate:
+        client.app.state.settings.auth_mock_departments = (
+            f"100:测试部门,101:{second_department_name}"
+        )
 
     async def employee_identity(user_id, *, fresh=False):
         if user_id == "mock-user":
             assert fresh
+            departments = (
+                DepartmentIdentity("100", "测试部门"),
+                DepartmentIdentity("101", second_department_name),
+            )
+            if same_name_departments:
+                departments = departments[::-1]
+            elif mode == "delegated":
+                departments = (DepartmentIdentity("99", "其他合成部门"), *departments)
             return DingTalkIdentity(
-                user_id, "mock-union-id:mock-user", "实际经办人",
-                (DepartmentIdentity("100", "测试部门"), DepartmentIdentity("101", "第二部门")),
+                user_id, "mock-union-id:mock-user", "实际经办人", departments,
             )
         assert user_id == actor.user_id
         return DingTalkIdentity(
@@ -779,7 +793,9 @@ def test_submit_freezes_the_beneficiary_and_the_actual_oa_initiator(
         "Idempotency-Key": "1b58c349-b856-46df-a488-bf7e5a45658d",
     }
     if is_delegate:
-        assert login["selectedDepartment"] is None
+        assert login["selectedDepartment"] == (
+            {"id": "100", "name": "测试部门"} if same_name_departments else None
+        )
         policy_path = "/api/admin/reimbursement-delegation"
         policy = client.get(policy_path).json()["data"]
         configured = client.put(
@@ -843,23 +859,60 @@ def test_submit_freezes_the_beneficiary_and_the_actual_oa_initiator(
                 )
             return instance
 
-    reimbursement, travel, travel_type = _schemas()
+    base_reimbursement, travel, travel_type = _schemas()
+    reimbursement = base_reimbursement
     mappings = MAPPINGS
     if mode != "missing_fields":
         reimbursement = _schema(
             REIMBURSEMENT_PROCESS_CODE,
-            (*reimbursement.components, _component("employee-id", "TextField", "报销人"),
-             _component("department-id", "TextField", "报销部门")),
+            (
+                *reimbursement.components,
+                replace(_component("employee-id", "TextField", "报销人"), required=False),
+                replace(_component("department-id", "TextField", "报销部门"), required=False),
+            ),
         )
         mappings = {
             **MAPPINGS, "reimbursementEmployee": "employee-id",
             "reimbursementDepartment": "department-id",
         }
-    workflow = InitiatorWorkflow(reimbursement, travel)
-    draft_id, _ = _persist_ready_draft(
-        client, workflow, travel_type, actor=actor, mappings=mappings,
+    workflow = InitiatorWorkflow(
+        base_reimbursement if add_mappings_later else reimbursement, travel
+    )
+    draft_id, original_ids = _persist_ready_draft(
+        client, workflow, travel_type, actor=actor,
+        mappings=MAPPINGS if add_mappings_later else mappings,
         query_window=TravelApprovalQueryWindow.latest(),
     )
+    if add_mappings_later:
+        workflow.schemas[REIMBURSEMENT_PROCESS_CODE] = reimbursement
+        updated_catalog = client.put(
+            "/api/admin/oa/templates/catalog", headers=headers,
+            json={
+                "expectedConfigVersion": 1,
+                "reimbursement": {
+                    "processCode": REIMBURSEMENT_PROCESS_CODE,
+                    "schemaFingerprint": reimbursement.fingerprint,
+                    "mappings": mappings,
+                },
+                "travelProfiles": [{
+                    "profileKey": "domestic",
+                    "displayName": "境内出差",
+                    "processCode": TRAVEL_PROCESS_CODE,
+                    "schemaFingerprint": travel.fingerprint,
+                    "mappings": {"startDate": "travel-start-id", "endDate": "travel-end-id"},
+                    "travelTypeOption": travel_type.as_dict(),
+                }],
+            },
+        )
+        assert updated_catalog.status_code == 200, updated_catalog.text
+        assert updated_catalog.json()["data"]["configVersion"] == 2
+        options = client.get("/api/oa/reimbursements/options", headers=headers)
+        assert options.status_code == 200, options.text
+        assert options.json()["data"]["templateConfigVersion"] == 1
+        files = client.get(f"/api/reimbursements/drafts/{draft_id}/files", headers=headers)
+        assert files.status_code == 200, files.text
+        assert files.json()["data"]["revision"] == 4
+        assert {file["id"] for file in files.json()["data"]["items"]} == set(original_ids)
     workflow.end_login_on_schema_read = mode == "login_ended"
     submitted = client.post(
         f"/api/oa/reimbursements/{draft_id}/submit",

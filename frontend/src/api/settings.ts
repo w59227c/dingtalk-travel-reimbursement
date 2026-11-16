@@ -25,6 +25,7 @@ export type DirectoryKind = 'department' | 'employee'
 export interface DirectoryEntry {
   id: string
   name: string
+  departmentNames?: string[]
 }
 
 export async function listAdminDepartments(parentId: string, signal?: AbortSignal): Promise<DirectoryEntry[]> {

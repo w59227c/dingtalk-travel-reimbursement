@@ -140,9 +140,14 @@ onBeforeUnmount(() => active?.abort())
         :key="id"
         :closable="!disabled && !readOnly"
         :title="id"
+        :class="{ 'directory-employee-tag': kind === 'employee' }"
         @close="ids = ids.filter(item => item !== id)"
       >
         {{ names.get(id) ?? id }}
+        <small
+          v-if="kind === 'employee' && names.has(id) && names.get(id) !== id"
+          class="directory-employee-id"
+        >{{ id }}</small>
       </el-tag>
       <span v-if="!ids.length">未配置</span>
     </div>
@@ -238,8 +243,13 @@ onBeforeUnmount(() => active?.abort())
               :disabled="chosen.length >= limit && !chosen.includes(entry.id)"
               @change="toggle(entry.id)"
             >
-            <span>{{ entry.name }}</span>
-            <small v-if="kind === 'employee'">{{ entry.id }}</small>
+            <span class="directory-choice-text">
+              <span>{{ entry.name }}</span>
+              <template v-if="kind === 'employee'">
+                <small v-if="entry.departmentNames?.length">{{ entry.departmentNames.join('、') }}</small>
+                <small>{{ entry.id }}</small>
+              </template>
+            </span>
           </label>
           <el-button
             v-if="kind === 'department'"
@@ -273,10 +283,14 @@ onBeforeUnmount(() => active?.abort())
 .directory-grant-field { width: 100%; }
 .directory-grant-list, .directory-breadcrumbs { display: flex; flex-wrap: wrap; gap: 6px; }
 .directory-grant-list { margin-bottom: 6px; }
+.directory-employee-tag { max-width: 100%; height: auto; min-height: 24px; white-space: normal; }
+.directory-employee-tag :deep(.el-tag__content) { min-width: 0; overflow-wrap: anywhere; }
+.directory-employee-id { margin-inline-start: 6px; color: var(--el-text-color-secondary); }
 .directory-search { display: flex; gap: 8px; }
 .directory-choices { list-style: none; margin: 12px 0 0; padding: 0; max-height: 45vh; overflow-y: auto; }
 .directory-choices li { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 6px 0; }
 .directory-choices label { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; cursor: pointer; }
+.directory-choice-text { display: grid; min-width: 0; overflow-wrap: anywhere; }
 .directory-choices small, .directory-count { color: var(--el-text-color-secondary); }
 .directory-count { margin-right: 10px; }
 .directory-error { color: var(--el-color-danger); }

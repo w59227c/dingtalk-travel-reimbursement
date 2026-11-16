@@ -4,7 +4,7 @@ import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import httpx
 
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 PERMISSION_ERROR_CODES = {88, 43007, 60011, 60020}
 _EMPLOYEE_NOT_FOUND = {60111, 60121}
 _EMPLOYEE_SEARCH_SIZE = 8
+_EMPLOYEE_DEPARTMENT_LOOKUP_TIMEOUT_SECONDS = 2.0
 _IDENTITY_CACHE_SECONDS = 30
 _IDENTITY_CACHE_SIZE = 128
 
@@ -33,6 +34,19 @@ class DingTalkIdentity:
     union_id: str
     name: str
     departments: tuple[DepartmentIdentity, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DirectoryEmployee:
+    user_id: str
+    name: str
+    department_ids: tuple[str, ...]
+
+
+class EmployeeSearchMatch(TypedDict):
+    userId: str
+    name: str
+    departmentNames: list[str]
 
 
 class DingTalkService:
@@ -122,7 +136,7 @@ class DingTalkService:
             retry_transient=True,
         )
 
-    async def employee_directory_entry(self, user_id: str) -> dict[str, str] | None:
+    async def employee_directory_entry(self, user_id: str) -> DirectoryEmployee | None:
         try:
             user = await self._get_user(user_id)
         except ApiError as exc:
@@ -130,9 +144,16 @@ class DingTalkService:
                 return None
             raise
         name = user.get("name")
-        if user.get("userid") == user_id and isinstance(name, str) and name.strip():
-            return {"userId": user_id, "name": name.strip()}
-        return None
+        if user.get("userid") != user_id or not isinstance(name, str) or not name.strip():
+            return None
+        raw_departments = user.get("dept_id_list")
+        department_ids = tuple(dict.fromkeys(
+            department_id for raw_id in raw_departments
+            if isinstance(raw_id, (int, str))
+            and (department_id := str(raw_id).strip()).isascii()
+            and department_id.isdecimal()
+        )) if isinstance(raw_departments, list) else ()
+        return DirectoryEmployee(user_id, name.strip(), department_ids)
 
     async def list_child_departments(self, parent_id: int) -> tuple[DepartmentIdentity, ...]:
         from app.integrations.dingtalk.client import DingTalkOpenAPIError
@@ -183,7 +204,7 @@ class DingTalkService:
             self._employee_identities.popitem(last=False)
         return identity
 
-    async def search_employee_entries(self, query: str) -> list[dict[str, str]]:
+    async def search_employee_entries(self, query: str) -> list[EmployeeSearchMatch]:
         from app.integrations.dingtalk.client import DingTalkOpenAPIError
         from app.services.reimbursement_delegation_policy import normalize_directory_id
 
@@ -195,7 +216,7 @@ class DingTalkService:
             if exact_id:
                 exact = await self.employee_directory_entry(exact_id)
                 if exact:
-                    return [exact]
+                    return await self._employee_search_matches([exact])
             payload = await self._client.request_openapi_json(
                 "POST",
                 "/v1.0/contact/users/search",
@@ -217,7 +238,8 @@ class DingTalkService:
             entries = await asyncio.gather(
                 *(self.employee_directory_entry(user_id) for user_id in user_ids)
             )
-            return [item for item in entries if item is not None]
+            employees = [item for item in entries if item is not None]
+            return await self._employee_search_matches(employees)
         except DingTalkOpenAPIError as exc:
             if exc.code == "DINGTALK_PERMISSION_MISSING":
                 raise ApiError(
@@ -228,6 +250,43 @@ class DingTalkService:
             raise self._employee_lookup_failed() from exc
         except ValueError:
             raise self._employee_lookup_failed() from None
+
+    async def _employee_search_matches(
+        self, employees: list[DirectoryEmployee],
+    ) -> list[EmployeeSearchMatch]:
+        department_ids = tuple(dict.fromkeys(
+            department_id for employee in employees for department_id in employee.department_ids
+        ))
+        concurrent_lookups = asyncio.Semaphore(5)
+        name_by_id: dict[str, str] = {}
+
+        async def resolve_department_name(department_id: str) -> None:
+            async with concurrent_lookups:
+                try:
+                    department = await self.get_department_identity(department_id)
+                except ApiError:
+                    # Search results remain usable by userId if a label cannot be read.
+                    return
+                name_by_id[department_id] = department.name
+
+        try:
+            async with asyncio.timeout(_EMPLOYEE_DEPARTMENT_LOOKUP_TIMEOUT_SECONDS):
+                await asyncio.gather(
+                    *(resolve_department_name(dept_id) for dept_id in department_ids)
+                )
+        except TimeoutError:
+            pass  # Keep the names completed before the search deadline.
+        return [
+            {
+                "userId": employee.user_id,
+                "name": employee.name,
+                "departmentNames": [
+                    name for department_id in employee.department_ids
+                    if (name := name_by_id.get(department_id)) is not None
+                ],
+            }
+            for employee in employees
+        ]
 
     async def _identity_from_user(
         self, user_id: str, user: dict[str, Any]

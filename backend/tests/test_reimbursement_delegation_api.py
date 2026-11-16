@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.api import oa_reimbursements, reimbursement_submissions
 from app.integrations.dingtalk.workflow import FormOption
-from app.services import reimbursement_approval_scope, reimbursement_drafts
+from app.services import dingtalk, reimbursement_approval_scope, reimbursement_drafts
 
 ADMIN_GRANTS = "/api/admin/reimbursement-delegation"
 EMPLOYEES = "/api/me/reimbursement-employees"
@@ -31,16 +32,26 @@ ADMIN = "bootstrap-admin"
 @dataclass
 class DelegationApi:
     connect: Callable[..., tuple[TestClient, dict]]
-    departments: dict[str, int]
+    departments: dict[str, int | tuple[int, ...]]
     approvals: dict[str, dict]
     listed_origins: list[str]
+    employee_names: dict[str, str]
+    employee_search_results: dict[str, list[str]]
+    department_lookups: list[int]
+    unavailable_departments: set[int]
 
 
 @pytest.fixture
 def delegation_api(client_factory):
-    departments = {ADMIN: 31, OPERATOR: 11, SECOND_OPERATOR: 12, EMPLOYEE: 25}
+    departments: dict[str, int | tuple[int, ...]] = {
+        ADMIN: 31, OPERATOR: 11, SECOND_OPERATOR: 12, EMPLOYEE: 25,
+    }
     approvals: dict[str, dict] = {}
     listed_origins: list[str] = []
+    employee_names: dict[str, str] = {}
+    employee_search_results: dict[str, list[str]] = {}
+    department_lookups: list[int] = []
+    unavailable_departments: set[int] = set()
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -52,6 +63,9 @@ def delegation_api(client_factory):
             assert user_id in departments
             return httpx.Response(200, json={"errcode": 0, "result": {"userid": user_id}})
         if path.endswith("/contact/users/search"):
+            if body["queryWord"] in employee_search_results:
+                matches = employee_search_results[body["queryWord"]]
+                return httpx.Response(200, json={"list": matches, "totalCount": len(matches)})
             return httpx.Response(
                 403, json={"code": "Forbidden.AccessDenied.AccessTokenPermissionDenied"}
             )
@@ -59,21 +73,29 @@ def delegation_api(client_factory):
             user_id = body["userid"]
             if user_id not in departments:
                 return httpx.Response(200, json={"errcode": 60121})
+            current_departments = departments[user_id]
             return httpx.Response(
                 200,
                 json={
                     "errcode": 0,
                     "result": {
                         "userid": user_id,
-                        "name": f"合成员工 {user_id}",
+                        "name": employee_names.get(user_id, f"合成员工 {user_id}"),
                         "unionid": f"fixture-union-{user_id}",
-                        "dept_id_list": [departments[user_id]],
+                        "dept_id_list": (
+                            [current_departments] if isinstance(current_departments, int)
+                            else list(current_departments)
+                        ),
                     },
                 },
             )
         if path.endswith("/department/get"):
+            department_id = body["dept_id"]
+            department_lookups.append(department_id)
+            if department_id in unavailable_departments:
+                return httpx.Response(200, json={"errcode": 60003})
             return httpx.Response(
-                200, json={"errcode": 0, "result": {"name": f"合成部门 {body['dept_id']}"}}
+                200, json={"errcode": 0, "result": {"name": f"合成部门 {department_id}"}}
             )
         if path.endswith("/department/listsub"):
             rows = [{"dept_id": 11, "name": "合成部门 11"}] if body["dept_id"] == 1 else []
@@ -104,7 +126,10 @@ def delegation_api(client_factory):
             assert response.status_code == 200, response.text
             return client, response.json()["data"]
 
-        yield DelegationApi(connect, departments, approvals, listed_origins)
+        yield DelegationApi(
+            connect, departments, approvals, listed_origins, employee_names,
+            employee_search_results, department_lookups, unavailable_departments,
+        )
 
 
 def _context(client: TestClient, session: dict, beneficiary: str | None, **values):
@@ -209,7 +234,7 @@ def test_grant_uses_actual_operator_and_can_be_revoked(delegation_api, employees
     )
     assert operator.get("/api/me").json()["data"]["canDelegateReimbursements"]
     assert operator.get(EMPLOYEES, params={"q": ADMIN}).json()["data"]["items"] == [
-        {"userId": ADMIN, "name": f"合成员工 {ADMIN}"}
+        {"userId": ADMIN, "name": f"合成员工 {ADMIN}", "departmentNames": ["合成部门 31"]}
     ]
     assert operator.get(EMPLOYEES, params={"q": OPERATOR}).json()["data"]["items"] == []
     _assert_error(
@@ -286,7 +311,65 @@ def test_employee_user_id_selection_works_without_name_search_permission(delegat
     selected = operator.get(EMPLOYEES, params={"q": EMPLOYEE})
     assert selected.status_code == 200, selected.text
     assert selected.json()["data"]["items"] == [
-        {"userId": EMPLOYEE, "name": f"合成员工 {EMPLOYEE}"}
+        {"userId": EMPLOYEE, "name": f"合成员工 {EMPLOYEE}", "departmentNames": ["合成部门 25"]}
+    ]
+
+
+@pytest.mark.parametrize("label_failure", ["unavailable", "timeout"])
+def test_employee_name_search_returns_current_departments_for_both_pickers(
+    delegation_api, monkeypatch, label_failure,
+):
+    admin, admin_session = delegation_api.connect(ADMIN)
+    operator, _ = delegation_api.connect(OPERATOR)
+    assert _write_grants(admin, admin_session, employees=(OPERATOR,)).status_code == 200
+    same_name = "合成同名员工"
+    other = "another-beneficiary"
+    delegation_api.departments[EMPLOYEE] = (26, 25, 26, 99)
+    delegation_api.departments[other] = (26, 30)
+    delegation_api.employee_names.update({EMPLOYEE: same_name, other: same_name})
+    delegation_api.employee_search_results[same_name] = [EMPLOYEE, other, EMPLOYEE]
+    cancelled_lookups = []
+    if label_failure == "unavailable":
+        delegation_api.unavailable_departments.add(99)
+    else:
+        service = operator.app.state.dingtalk_service
+        original_lookup = service.get_department_identity
+
+        async def lookup_department(department_id):
+            if department_id != "99":
+                return await original_lookup(department_id)
+            delegation_api.department_lookups.append(99)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled_lookups.append(department_id)
+
+        monkeypatch.setattr(dingtalk, "_EMPLOYEE_DEPARTMENT_LOOKUP_TIMEOUT_SECONDS", 0.1)
+        monkeypatch.setattr(service, "get_department_identity", lookup_department)
+    admin_search = "/api/admin/directory/employees"
+    assert operator.get(admin_search, params={"q": same_name}).status_code == 403
+
+    for client, path, id_key in ((operator, EMPLOYEES, "userId"), (admin, admin_search, "id")):
+        delegation_api.department_lookups.clear()
+        response = client.get(path, params={"q": same_name})
+        assert response.status_code == 200, response.text
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json()["data"]["items"] == [
+            {
+                id_key: EMPLOYEE, "name": same_name,
+                "departmentNames": ["合成部门 26", "合成部门 25"],
+            },
+            {id_key: other, "name": same_name, "departmentNames": ["合成部门 26", "合成部门 30"]},
+        ]
+        assert sorted(delegation_api.department_lookups) == [25, 26, 30, 99]
+    if label_failure == "timeout":
+        assert cancelled_lookups == ["99", "99"]
+
+    delegation_api.departments[EMPLOYEE] = 35
+    current = operator.get(EMPLOYEES, params={"q": EMPLOYEE})
+    assert current.status_code == 200, current.text
+    assert current.json()["data"]["items"] == [
+        {"userId": EMPLOYEE, "name": same_name, "departmentNames": ["合成部门 35"]}
     ]
 
 
@@ -305,7 +388,9 @@ def test_directory_selection_and_admin_department_authorization(delegation_api):
     ).json()["data"]["items"] == []
     assert admin.get(
         f"{directory}/employees", params={"q": OPERATOR},
-    ).json()["data"]["items"] == [{"id": OPERATOR, "name": f"合成员工 {OPERATOR}"}]
+    ).json()["data"]["items"] == [
+        {"id": OPERATOR, "name": f"合成员工 {OPERATOR}", "departmentNames": ["合成部门 11"]}
+    ]
     assert admin.get(
         f"{directory}/labels",
         params=[("kind", "employee"), ("ids", OPERATOR), ("ids", "missing")],

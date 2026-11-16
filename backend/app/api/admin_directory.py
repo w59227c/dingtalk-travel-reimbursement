@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -19,7 +20,7 @@ router = APIRouter(prefix="/admin/directory", tags=["admin-directory"])
 
 async def _directory_response(
     request: Request, response: Response, database: Session, session_id: str,
-    items: list[dict[str, str]],
+    items: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
     current = get_current_session(request, database)
     if current.record.session_id_hash != session_id:
@@ -61,7 +62,10 @@ async def search_employees(
     entries = await directory.search_employee_entries(query.strip()) if query.strip() else []
     return await _directory_response(
         request, response, database, session_id,
-        [{"id": item["userId"], "name": item["name"]} for item in entries],
+        [
+            {"id": item["userId"], "name": item["name"], "departmentNames": item["departmentNames"]}
+            for item in entries
+        ],
     )
 
 
@@ -87,7 +91,7 @@ async def lookup_labels(
                     item = await directory.get_department_identity(item_id)
                     return {"id": item.id, "name": item.name}
                 employee = await directory.employee_directory_entry(item_id)
-                return {"id": item_id, "name": employee["name"]} if employee else None
+                return {"id": item_id, "name": employee.name} if employee else None
             except (ApiError, DingTalkOpenAPIError, ValueError):
                 return None
 

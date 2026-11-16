@@ -430,7 +430,7 @@ async def diagnose_travel_approval(
     try:
         async with asyncio.timeout(_TIMEOUT_SECONDS):
             catalog = await load_readonly_submission_catalog(database_session_factory, workflow)
-            report["configVersion"] = catalog.config_version
+            report["configVersion"] = catalog.catalog_revision or catalog.config_version
             checks.append(_check("catalog", _STAGES[stage], "passed", "当前模板结构和选项核对通过"))
             reads = _Reads(workflow, catalog)
             candidates = await list_current_user_travel_approvals(

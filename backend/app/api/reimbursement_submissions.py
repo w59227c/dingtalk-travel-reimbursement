@@ -19,6 +19,7 @@ from app.services.oa_reimbursement_payload import (
     SnapshotOaInitiator,
     build_snapshot,
     collect_snapshot_source,
+    is_oa_department_id,
     serialize_snapshot,
     snapshot_sha256,
 )
@@ -150,21 +151,25 @@ async def submit_reimbursement(
         )
         if operator.user_id != actor.operator_user_id or operator.union_id != operator_union_id:
             raise ApiError("UNAUTHORIZED", "登录身份已变化，请重新进入", 401)
-        departments = selectable_departments(operator.departments)
-        if not departments:
+        departments = tuple(
+            item for item in operator.departments if is_oa_department_id(item.id)
+        )
+        department_id = next(
+            (item.id for item in departments if item.id == preferred_department_id), None
+        )
+        if department_id is None:
+            department_id = next((item.id for item in selectable_departments(departments)), None)
+        if department_id is None:
             raise ApiError(
                 "OA_INITIATOR_DEPARTMENT_UNAVAILABLE",
                 "无法确认经办人的钉钉发起部门，请联系管理员",
                 409,
             )
-        department = next(
-            (item for item in departments if item.id == preferred_department_id), departments[0]
-        )
         actor = replace(
             actor, operator_department_ids=tuple(item.id for item in operator.departments)
         )
         oa_initiator = SnapshotOaInitiator(
-            user_id=operator.user_id, union_id=operator.union_id, department_id=department.id,
+            user_id=operator.user_id, union_id=operator.union_id, department_id=department_id,
         )
     await verify_delegated_saved_approvals(
         database,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Final
 
@@ -23,6 +23,7 @@ from app.services.oa_template_compatibility import (
     SchemaChangeKind,
     classify_schema_change,
 )
+from app.services.travel_approvals import travel_source_component_id
 
 REIMBURSEMENT_PROFILE_KEY: Final = "reimbursement"
 
@@ -107,9 +108,12 @@ class TravelTemplateContract:
 
 @dataclass(frozen=True, slots=True)
 class OaTemplateCatalogContract:
+    """The binding version follows drafts. The catalog revision guards confirmations."""
+
     config_version: int
     reimbursement: ReimbursementTemplateContract
     travel_profiles: tuple[TravelTemplateContract, ...]
+    catalog_revision: int | None = None
 
     @property
     def allowed_travel_process_codes(self) -> tuple[str, ...]:
@@ -458,13 +462,23 @@ async def confirm_template_catalog(
     else:
         if profile is None or profile.config_version != expected_config_version:
             raise _configuration_changed_error()
+        draft_binding_version = _preserved_draft_binding(
+            profile, reimbursement_schema, normalized_reimbursement_mapping, contracts,
+        )
         result = database.execute(
             update(OaTemplateProfile)
             .where(
                 OaTemplateProfile.profile_key == REIMBURSEMENT_PROFILE_KEY,
                 OaTemplateProfile.config_version == expected_config_version,
+                OaTemplateProfile.schema_fingerprint == profile.schema_fingerprint,
+                OaTemplateProfile.travel_profiles_json == profile.travel_profiles_json,
+                OaTemplateProfile.compatibility_status == profile.compatibility_status,
             )
-            .values(config_version=expected_config_version + 1, **values),
+            .values(
+                config_version=expected_config_version + 1,
+                draft_binding_version=draft_binding_version,
+                **values,
+            ),
             execution_options={"synchronize_session": False},
         )
         if result.rowcount != 1:
@@ -476,6 +490,38 @@ async def confirm_template_catalog(
     if saved is None:
         raise _configuration_changed_error()
     return template_catalog_data(saved)
+
+
+def _preserved_draft_binding(
+    profile: OaTemplateProfile,
+    reimbursement_schema: FormSchema,
+    mappings: dict[str, str],
+    travel_profiles: list[TravelTemplateContract],
+) -> int | None:
+    try:
+        current = _validated_persisted_catalog(profile, require_compatible_status=False)
+    except ApiError:
+        return None
+    existing = current.reimbursement.mappings
+    additions = mappings.keys() - existing.keys()
+    identity_fields = {spec.key for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS if not spec.required}
+    # Reconfirming an unchanged catalog must keep a binding already preserved.
+    if (
+        (not additions and profile.draft_binding_version is None)
+        or additions - identity_fields
+        or any(mappings.get(key) != component_id for key, component_id in existing.items())
+    ):
+        return None
+    refreshed = _compatible_refreshed_catalog(
+        current,
+        reimbursement_schema=reimbursement_schema,
+        travel_schemas=[item.schema for item in travel_profiles],
+    )
+    if refreshed is None or [
+        replace(item, confirmed_schema_fingerprint=None) for item in refreshed.travel_profiles
+    ] != travel_profiles:
+        return None
+    return current.config_version
 
 
 def current_template_catalog(database: Session) -> dict[str, object]:
@@ -546,7 +592,6 @@ async def load_fresh_submission_catalog(
                 )
             except ApiError:
                 raise _confirmation_required_error() from None
-            config_version = contract.config_version
             reimbursement_process_code = contract.reimbursement.process_code
             expected_state = _catalog_cas_state(profile)
             travel_process_codes = tuple(
@@ -577,7 +622,7 @@ async def load_fresh_submission_catalog(
         with database_session_factory() as final_database:
             current = require_submission_ready_catalog(final_database)
             if (
-                current.config_version == config_version
+                current.catalog_revision == expected_state.config_version
                 and current.reimbursement.process_code == reimbursement_process_code
                 and tuple(item.process_code for item in current.travel_profiles)
                 == travel_process_codes
@@ -684,6 +729,7 @@ def _compatible_refreshed_catalog(
             ),
         ),
         travel_profiles=refreshed_profiles,
+        catalog_revision=configured.catalog_revision,
     )
 
 
@@ -694,11 +740,22 @@ def _refresh_travel_contract(
     reimbursement_schema: FormSchema,
     reimbursement_mapping: dict[str, str],
 ) -> TravelTemplateContract:
+    # Older templates may supply company and budget via implicit mappings.
+    observed_profile = replace(configured, schema=observed)
+    accounting_fields = ("company", "budgetCode")
+    accounting_sources = tuple(
+        travel_source_component_id(configured, field) for field in accounting_fields
+    )
     if (
-        classify_schema_change(
+        accounting_sources != tuple(
+            travel_source_component_id(observed_profile, field) for field in accounting_fields
+        )
+        or classify_schema_change(
             configured.schema,
             observed,
-            mapped_component_ids=set(configured.mappings.values()),
+            mapped_component_ids=set(configured.mappings.values()).union(
+                item for item in accounting_sources if item is not None
+            ),
         )
         is SchemaChangeKind.INCOMPATIBLE
     ):
@@ -1455,6 +1512,10 @@ def _validated_persisted_catalog(
 ) -> OaTemplateCatalogContract:
     if require_compatible_status and profile.compatibility_status != COMPATIBLE:
         raise _configuration_error()
+    if profile.draft_binding_version is not None and not (
+        0 < profile.draft_binding_version < profile.config_version
+    ):
+        raise _configuration_error()
     reimbursement_schema = _deserialize_schema(profile.schema_json)
     if (
         reimbursement_schema.process_code != profile.process_code
@@ -1484,7 +1545,7 @@ def _validated_persisted_catalog(
         allowed_travel_process_codes=list(derived_codes),
     )
     return OaTemplateCatalogContract(
-        config_version=profile.config_version,
+        config_version=profile.draft_binding_version or profile.config_version,
         reimbursement=ReimbursementTemplateContract(
             process_code=profile.process_code,
             schema=reimbursement_schema,
@@ -1492,6 +1553,7 @@ def _validated_persisted_catalog(
             confirmed_schema_fingerprint=profile.confirmed_schema_fingerprint,
         ),
         travel_profiles=tuple(travel_profiles),
+        catalog_revision=profile.config_version,
     )
 
 

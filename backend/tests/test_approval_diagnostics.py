@@ -56,6 +56,7 @@ class Workflow:
 @pytest.fixture
 def catalog(monkeypatch):
     configured = _catalog(_profile("domestic", "PROC-A"))
+    configured.catalog_revision = 8
 
     async def load(_factory, _workflow):
         return configured
@@ -102,6 +103,7 @@ async def test_same_day_reuses_normal_policy_and_never_performs_unscoped_lookup(
     workflow = Workflow(instance)
     report = await diagnose(workflow)
     assert report["outcome"] == "visible"
+    assert report["configVersion"] == 8
     assert report["record"]["sameDay"] is True
     assert check(report, "dates")["status"] == "passed"
     assert report["counts"]["returned"] == 1

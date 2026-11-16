@@ -229,6 +229,7 @@ def test_ready_rejects_a_missing_reimbursement_table(
     ("table_name", "missing_column"),
     [
         ("oa_template_profiles", "travel_profiles_json"),
+        ("oa_template_profiles", "draft_binding_version"),
         ("reimbursement_drafts", "owner_user_id"),
         ("reimbursement_draft_files", "file_status"),
         ("reimbursement_draft_related_approvals", "originator_department_id"),
