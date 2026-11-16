@@ -23,7 +23,7 @@ import {
   updateReimbursementDraftFile,
   uploadReimbursementDraftFile,
 } from '@/api/reimbursements'
-import type { ListOaTravelApprovalsOptions } from '@/api/reimbursements'
+import type { ListOaTravelApprovalsOptions, ReimbursementRequestOptions } from '@/api/reimbursements'
 import { downloadBlob } from '@/api/excel'
 import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import { inputSignature } from '@/utils/reimbursementInput'
@@ -136,6 +136,22 @@ const READ_ONLY_FAILURES: Record<string, DraftAccessState> = {
   REIMBURSEMENT_RECOVERY_PENDING: { recoveryPending: true },
   REIMBURSEMENT_DRAFT_EXPIRED: { status: 'EXPIRED' },
   REIMBURSEMENT_DRAFT_LOCKED: { status: 'LOCKED' },
+}
+
+export async function readConsistentDraft(
+  draftId: string,
+  options: ReimbursementRequestOptions,
+): Promise<DraftRead> {
+  for (let attempt = 0; attempt < CONSISTENT_READ_ATTEMPTS; attempt += 1) {
+    const [draft, fileList] = await Promise.all([
+      getReimbursementDraft(draftId, options),
+      listReimbursementDraftFiles(draftId, options),
+    ])
+    if (draft.id === draftId && fileList.draftId === draft.id && fileList.revision === draft.revision) {
+      return { draft, files: fileList.items, pendingUploads: fileList.pendingUploads ?? [] }
+    }
+  }
+  throw new Error('报销内容读取期间持续发生变化，请稍后重试')
 }
 
 export const useReimbursementDraftStore = defineStore('reimbursementDraft', () => {
@@ -291,7 +307,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     pipeline.controllers.add(context.controller)
     try {
       if (pipeline.needsRefresh) {
-        const result = await readConsistentDraft(pipeline.draftId, context.controller.signal)
+        const result = await readConsistentDraft(pipeline.draftId, { signal: context.controller.signal })
         if (!isFilePipelineActive(id) || !accepts(context)) return false
         if (observeReadOnlyDraft(result.draft, context, guard)) return false
         if (result.draft.id !== pipeline.draftId || !['DRAFT', 'REVIEW_READY'].includes(result.draft.status)
@@ -675,22 +691,6 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     } finally { releaseRequest(context) }
   }
 
-  async function readConsistentDraft(
-    draftId: string,
-    signal: AbortSignal,
-  ): Promise<DraftRead> {
-    for (let attempt = 0; attempt < CONSISTENT_READ_ATTEMPTS; attempt += 1) {
-      const [draft, fileList] = await Promise.all([
-        getReimbursementDraft(draftId, { signal }),
-        listReimbursementDraftFiles(draftId, { signal }),
-      ])
-      if (fileList.draftId === draft.id && fileList.revision === draft.revision) {
-        return { draft, files: fileList.items, pendingUploads: fileList.pendingUploads ?? [] }
-      }
-    }
-    throw new Error('报销内容读取期间持续发生变化，请稍后重试')
-  }
-
   async function loadDraft(
     draftId: string,
     keepCurrent = false,
@@ -719,7 +719,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadingCurrentDraft.value = true
     loadError.value = ''
     try {
-      const result = await readConsistentDraft(draftId, context.controller.signal)
+      const result = await readConsistentDraft(draftId, { signal: context.controller.signal })
       if (requestVersion !== detailRequestVersion || !acceptsDraftRead(context, guard)
         || result.draft.id !== draftId) return false
       if (shouldAdopt && !shouldAdopt(result.draft)) return false
@@ -812,7 +812,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       createdDraftId = created.id
       if (reuseExisting && accepts(context) && intentVersion === currentIntentVersion) {
         const guard = draftReadGuard(created.id, intentVersion)
-        const result = await readConsistentDraft(created.id, context.controller.signal)
+        const result = await readConsistentDraft(created.id, { signal: context.controller.signal })
         if (result.draft.workspaceRetired) {
           throw new Error('当前报销已变化，请重新读取当前报销')
         }
@@ -861,7 +861,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     ) return false
     const refresh = requestContext()
     try {
-      const result = await readConsistentDraft(draftId, refresh.controller.signal)
+      const result = await readConsistentDraft(draftId, { signal: refresh.controller.signal })
       if (!acceptsDraftRead(context, guard) || currentDraft.value?.id !== draftId) return false
       return adoptDraftRead(result, refresh, guard)
     } catch (error) {
@@ -1577,6 +1577,14 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     revisionConflict.value = false
   }
 
+  function restoreWorkspace(read: DraftRead, options: OaReimbursementOptions): void {
+    reimbursementOptions.value = options
+    currentDraft.value = read.draft
+    upsertSummary(summaryFromDraft(read.draft))
+    files.value = read.files
+    pendingUploads.value = read.pendingUploads
+  }
+
   return {
     drafts,
     draftListOffset,
@@ -1612,6 +1620,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadTravelApprovals,
     loadDrafts,
     loadDraft,
+    restoreWorkspace,
     refreshCurrentFiles,
     createDraft,
     recoverDraft,

@@ -27,7 +27,8 @@ import {
 } from '@/api/reimbursements'
 import type { ReimbursementDraftInput } from '@/types/reimbursements'
 
-vi.mock('@/api/http', () => ({
+vi.mock('@/api/http', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/api/http')>(),
   http: {
     delete: vi.fn(),
     get: vi.fn(),

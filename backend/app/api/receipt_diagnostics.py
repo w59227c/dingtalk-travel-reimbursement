@@ -8,12 +8,13 @@ from fastapi import APIRouter, Depends, Request, Response
 from app.core.errors import ApiError
 from app.core.request_id import request_id_for
 from app.schemas.common import success
-from app.services.application_settings import get_additional_admin_ids
 from app.services.file_coordination import FileOperationBusy, SessionFilesRetired, UploadBusy
 from app.services.multipart_uploads import parse_upload_files
 from app.services.receipt_keywords import load_receipt_keyword_rules
 from app.services.sessions import (
     CurrentSession,
+    get_current_session,
+    has_admin_access,
     require_admin_csrf,
     require_fresh_active_file_session,
 )
@@ -37,12 +38,13 @@ async def diagnose_receipt(
     settings = state.settings
     session_id = current.record.session_id_hash
 
-    def revalidate() -> None:
+    async def revalidate() -> None:
         require_fresh_active_file_session(state.database_session_factory, settings, session_id)
         with state.database_session_factory() as database:
-            if current.record.dingtalk_user_id not in (
-                settings.admin_ids | get_additional_admin_ids(database)
-            ):
+            fresh = get_current_session(request, database)
+            if fresh.record.session_id_hash != session_id:
+                raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
+            if not await has_admin_access(request, database, fresh, fresh_directory=True):
                 raise ApiError("FORBIDDEN", "仅管理员可以执行此操作", 403)
 
     with state.database_session_factory() as database:
@@ -51,21 +53,21 @@ async def diagnose_receipt(
     stored = None
     try:
         async with state.file_coordinator.async_upload_lease(session_id):
-            revalidate()
+            await revalidate()
             budget = new_upload_budget(settings, session_id, 1)
             uploads = await parse_upload_files(request.headers, request.stream(), settings, budget)
             stored = await store_upload(
                 uploads[0], settings, session_id, budget, state.file_validation_runner
             )
         async with state.file_coordinator.async_session_lease(session_id):
-            revalidate()
+            await revalidate()
             payload = await state.ocr_service.recognize_material_file(
                 stored,
                 reference_year=None,
                 keyword_rules=rules,
                 diagnostics=True,
             )
-            revalidate()
+            await revalidate()
             if not isinstance(payload.get("diagnostic"), dict):
                 raise ApiError(
                     "RECEIPT_DIAGNOSIS_INCOMPLETE", "本次诊断未取得完整识别依据，请重试", 503

@@ -83,6 +83,7 @@ def _instance(
     end_date: str | None = "2026-08-12",
     title: str = "测试员工提交的境内出差申请",
     business_id: str | None = None,
+    cc_user_ids: tuple[str, ...] | None = None,
 ) -> WorkflowProcessInstance:
     values = [
         WorkflowFormValue("source-company", "所属公司", "DDSelectField", "北京公司", None, None),
@@ -123,6 +124,7 @@ def _instance(
         created_at="2026-08-01T08:00:00+08:00",
         finished_at="2026-08-02T08:00:00+08:00",
         form_values=tuple(values),
+        executed_cc_user_ids=cc_user_ids,
     )
 
 
@@ -430,6 +432,111 @@ async def test_listing_pages_each_profile_uses_only_current_identity_and_filters
         "missing-date",
         "target-b",
     }
+
+
+@pytest.mark.asyncio
+async def test_delegated_listing_requires_cc_to_the_operator_and_preserves_personal_listing() -> (
+    None
+):
+    catalog = _catalog(_profile("domestic", "PROC-TRAVEL"))
+    details = {
+        "visible": _instance("visible", cc_user_ids=("hr-1", "hr-2")),
+        "other-hr": _instance("other-hr", cc_user_ids=("hr-10",)),
+        "employee": _instance("employee", cc_user_ids=("employee-1",)),
+        "unknown": _instance("unknown"),
+        "none": _instance("none", cc_user_ids=()),
+        "other-employee": _instance("other-employee", user_id="employee-2", cc_user_ids=("hr-1",)),
+        "refused": _instance("refused", result="refuse", cc_user_ids=("hr-1",)),
+    }
+    workflow = FakeWorkflow(
+        {("PROC-TRAVEL", 0): WorkflowInstanceIdPage(tuple(details), None)},
+        details,
+    )
+
+    delegated = await list_current_user_travel_approvals(
+        workflow,
+        catalog,
+        current_user_id="employee-1",
+        query_window=_window(),
+        required_cc_user_id="hr-1",
+    )
+    personal = await list_current_user_travel_approvals(
+        workflow,
+        catalog,
+        current_user_id="employee-1",
+        query_window=_window(),
+    )
+
+    assert [item.instance.instance_id for item in delegated] == ["visible"]
+    assert "hr-1" not in json.dumps(delegated[0].as_dict())
+    assert "hr-2" not in json.dumps(delegated[0].as_dict())
+    assert {item.instance.instance_id for item in personal} == {
+        "visible",
+        "other-hr",
+        "employee",
+        "unknown",
+        "none",
+    }
+    assert all(call["user_ids"] == ("employee-1",) for call in workflow.list_calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("recipients", "expected_code"),
+    [
+        (("hr-1",), None),
+        (("hr-2",), "TRAVEL_APPROVAL_CC_REQUIRED"),
+        (("employee-1",), "TRAVEL_APPROVAL_CC_REQUIRED"),
+        ((), "TRAVEL_APPROVAL_CC_REQUIRED"),
+        (None, "TRAVEL_APPROVAL_CC_UNVERIFIED"),
+    ],
+)
+async def test_delegated_selection_rechecks_executed_cc_for_the_operator(
+    recipients: tuple[str, ...] | None,
+    expected_code: str | None,
+) -> None:
+    catalog = _catalog(_profile("domestic", "PROC-TRAVEL"))
+    workflow = FakeWorkflow(
+        {("PROC-TRAVEL", 0): WorkflowInstanceIdPage(("selected",), None)},
+        {"selected": _instance("selected", cc_user_ids=recipients)},
+    )
+    operation = reverify_travel_approval_selection(
+        workflow,
+        catalog,
+        current_user_id="employee-1",
+        selections=(TravelApprovalSelection("domestic", "selected", _window()),),
+        required_cc_user_id="hr-1",
+    )
+
+    if expected_code is None:
+        selected = await operation
+        assert [item.instance.instance_id for item in selected.approvals] == ["selected"]
+    else:
+        with pytest.raises(ApiError) as caught:
+            await operation
+        assert caught.value.code == expected_code
+        assert caught.value.status_code == (502 if recipients is None else 409)
+
+
+@pytest.mark.asyncio
+async def test_missing_cc_evidence_reports_unverified_instead_of_an_empty_list() -> None:
+    catalog = _catalog(_profile("domestic", "PROC-TRAVEL"))
+    workflow = FakeWorkflow(
+        {("PROC-TRAVEL", 0): WorkflowInstanceIdPage(("unknown",), None)},
+        {"unknown": _instance("unknown")},
+    )
+
+    with pytest.raises(ApiError) as caught:
+        await list_current_user_travel_approvals(
+            workflow,
+            catalog,
+            current_user_id="employee-1",
+            query_window=_window(),
+            required_cc_user_id="hr-1",
+        )
+
+    assert caught.value.code == "TRAVEL_APPROVAL_CC_UNVERIFIED"
+    assert caught.value.status_code == 502
 
 
 @pytest.mark.asyncio

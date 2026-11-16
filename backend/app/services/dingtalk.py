@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+from collections import OrderedDict
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -12,6 +15,10 @@ if TYPE_CHECKING:
     from app.integrations.dingtalk.client import DingTalkOpenAPIClient
 
 PERMISSION_ERROR_CODES = {88, 43007, 60011, 60020}
+_EMPLOYEE_NOT_FOUND = {60111, 60121}
+_EMPLOYEE_SEARCH_SIZE = 8
+_IDENTITY_CACHE_SECONDS = 30
+_IDENTITY_CACHE_SIZE = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +51,7 @@ class DingTalkService:
         elif transport is not None:
             raise ValueError("transport belongs to DingTalkOpenAPIClient")
         self._client = client
+        self._employee_identities: OrderedDict[str, tuple[float, DingTalkIdentity]] = OrderedDict()
 
     async def close(self) -> None:
         await self._client.close()
@@ -58,6 +66,10 @@ class DingTalkService:
             return await self._get_identity(auth_code)
         except DingTalkOpenAPIError:
             raise self._safe_error() from None
+        except ApiError as exc:
+            if exc.code == "REIMBURSEMENT_EMPLOYEE_NOT_FOUND":
+                raise self._safe_error() from None
+            raise
 
     async def get_department_identity(self, department_id: str) -> DepartmentIdentity:
         """Resolve the canonical DingTalk department selected by an OA instance."""
@@ -100,13 +112,126 @@ class DingTalkService:
         user_id = str(user_info.get("userid") or "").strip()
         if not user_id:
             raise self._safe_error()
+        return await self._identity_from_user(user_id, await self._get_user(user_id))
 
-        user = await self._oapi(
+    async def _get_user(self, user_id: str) -> dict[str, Any]:
+        return await self._oapi(
             "/topapi/v2/user/get",
             {"userid": user_id, "language": "zh_CN"},
             retry_invalid_token=True,
             retry_transient=True,
         )
+
+    async def employee_directory_entry(self, user_id: str) -> dict[str, str] | None:
+        try:
+            user = await self._get_user(user_id)
+        except ApiError as exc:
+            if exc.code == "REIMBURSEMENT_EMPLOYEE_NOT_FOUND":
+                return None
+            raise
+        name = user.get("name")
+        if user.get("userid") == user_id and isinstance(name, str) and name.strip():
+            return {"userId": user_id, "name": name.strip()}
+        return None
+
+    async def list_child_departments(self, parent_id: int) -> tuple[DepartmentIdentity, ...]:
+        from app.integrations.dingtalk.client import DingTalkOpenAPIError
+
+        try:
+            payload = await self._oapi(
+                "/topapi/v2/department/listsub",
+                {"dept_id": parent_id, "language": "zh_CN"},
+                retry_invalid_token=True,
+                retry_transient=True,
+            )
+        except DingTalkOpenAPIError:
+            raise ApiError("DIRECTORY_LOOKUP_FAILED", "暂时无法读取钉钉部门，请重试", 502) from None
+        rows = payload.get("result")
+        if not isinstance(rows, list):
+            raise ApiError("DIRECTORY_LOOKUP_FAILED", "钉钉部门列表格式异常，请重试", 502)
+        departments: dict[str, DepartmentIdentity] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            department_id = str(row.get("dept_id", ""))
+            name = row.get("name")
+            if (
+                department_id.isascii() and department_id.isdecimal()
+                and department_id != str(parent_id)
+                and isinstance(name, str) and name.strip()
+            ):
+                departments[department_id] = DepartmentIdentity(department_id, name.strip())
+        return tuple(departments.values())
+
+    async def get_employee_identity(self, user_id: str, *, fresh: bool = False) -> DingTalkIdentity:
+        from app.integrations.dingtalk.client import DingTalkOpenAPIError
+
+        cached = self._employee_identities.get(user_id)
+        if not fresh and cached is not None and cached[0] > monotonic():
+            self._employee_identities.move_to_end(user_id)
+            return cached[1]
+        try:
+            user = await self._get_user(user_id)
+            if user.get("userid") != user_id:
+                raise self._employee_not_found()
+            identity = await self._identity_from_user(user_id, user)
+        except DingTalkOpenAPIError as exc:
+            raise self._employee_lookup_failed() from exc
+        self._employee_identities[user_id] = (monotonic() + _IDENTITY_CACHE_SECONDS, identity)
+        self._employee_identities.move_to_end(user_id)
+        if len(self._employee_identities) > _IDENTITY_CACHE_SIZE:
+            self._employee_identities.popitem(last=False)
+        return identity
+
+    async def search_employee_entries(self, query: str) -> list[dict[str, str]]:
+        from app.integrations.dingtalk.client import DingTalkOpenAPIError
+        from app.services.reimbursement_delegation_policy import normalize_directory_id
+
+        try:
+            try:
+                exact_id = normalize_directory_id(query)
+            except ValueError:
+                exact_id = None
+            if exact_id:
+                exact = await self.employee_directory_entry(exact_id)
+                if exact:
+                    return [exact]
+            payload = await self._client.request_openapi_json(
+                "POST",
+                "/v1.0/contact/users/search",
+                json={"queryWord": query, "offset": 0, "size": _EMPLOYEE_SEARCH_SIZE},
+                retry_transient=True,
+            )
+            ids = payload.get("list")
+            if ids is None and payload.get("totalCount") == 0:
+                return []
+            if not isinstance(ids, list):
+                raise self._employee_lookup_failed()
+            user_ids = tuple(
+                dict.fromkeys(
+                    normalize_directory_id(item)
+                    for item in ids[:_EMPLOYEE_SEARCH_SIZE]
+                    if isinstance(item, str)
+                )
+            )
+            entries = await asyncio.gather(
+                *(self.employee_directory_entry(user_id) for user_id in user_ids)
+            )
+            return [item for item in entries if item is not None]
+        except DingTalkOpenAPIError as exc:
+            if exc.code == "DINGTALK_PERMISSION_MISSING":
+                raise ApiError(
+                    "REIMBURSEMENT_EMPLOYEE_SEARCH_UNAVAILABLE",
+                    "钉钉应用未授权姓名搜索，请输入准确的员工 userId 或联系管理员",
+                    502,
+                ) from None
+            raise self._employee_lookup_failed() from exc
+        except ValueError:
+            raise self._employee_lookup_failed() from None
+
+    async def _identity_from_user(
+        self, user_id: str, user: dict[str, Any]
+    ) -> DingTalkIdentity:
         name = str(user.get("name") or "").strip()
         union_id = str(user.get("unionid") or "").strip()
         raw_department_ids = user.get("dept_id_list")
@@ -185,7 +310,17 @@ class DingTalkService:
                 "钉钉应用权限不足，请联系管理员",
                 502,
             )
+        if path == "/topapi/v2/user/get" and errcode in _EMPLOYEE_NOT_FOUND:
+            raise self._employee_not_found()
         raise self._safe_error()
+
+    @staticmethod
+    def _employee_not_found() -> ApiError:
+        return ApiError("REIMBURSEMENT_EMPLOYEE_NOT_FOUND", "未找到可办理报销的员工", 404)
+
+    @staticmethod
+    def _employee_lookup_failed() -> ApiError:
+        return ApiError("REIMBURSEMENT_EMPLOYEE_LOOKUP_FAILED", "暂时无法读取钉钉员工，请重试", 502)
 
     @staticmethod
     def _error_code(payload: dict[str, Any]) -> int:

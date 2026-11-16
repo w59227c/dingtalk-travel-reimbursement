@@ -12,6 +12,7 @@ from uuid import uuid4
 import httpx
 from fastapi import FastAPI, Request, Response
 
+from app.api.admin_directory import router as admin_directory_router
 from app.api.approval_diagnostics import router as approval_diagnostics_router
 from app.api.attendance_calendars import router as attendance_calendars_router
 from app.api.auth import router as auth_router
@@ -391,6 +392,7 @@ def create_app(
     application.include_router(receipt_keywords_router, prefix="/api")
     application.include_router(receipt_diagnostics_router, prefix="/api")
     application.include_router(settings_router, prefix="/api")
+    application.include_router(admin_directory_router, prefix="/api")
     application.include_router(attendance_calendars_router, prefix="/api")
     application.include_router(calculations_router, prefix="/api")
     application.include_router(oa_templates_router, prefix="/api")

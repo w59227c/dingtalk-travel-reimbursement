@@ -1,7 +1,7 @@
 import axios, { type AxiosProgressEvent } from 'axios'
 
 import { filenameFromContentDisposition } from './excel'
-import { http } from './http'
+import { http, reimbursementContextHeaders } from './http'
 import type { ApiEnvelope } from '@/types/auth'
 import type {
   OaReimbursementOptions,
@@ -34,6 +34,7 @@ const OCR_REQUEST_TIMEOUT_MS = 360_000
 
 export interface ReimbursementRequestOptions {
   signal?: AbortSignal
+  reimbursementContext?: string | null
 }
 
 export interface ListReimbursementDraftsOptions extends ReimbursementRequestOptions {
@@ -84,7 +85,7 @@ export async function getOaReimbursementOptions(
 ): Promise<OaReimbursementOptions> {
   const response = await http.get<ApiEnvelope<OaReimbursementOptions>>(
     '/oa/reimbursements/options',
-    { signal: options.signal },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
   )
   return response.data.data
 }
@@ -131,7 +132,7 @@ export async function createReimbursementDraft(
     { expectedRevision: 0, input, ...(options.reuseExisting ? { reuseExisting: true } : {}),
       ...(options.replaceCurrent ? { replacesDraftId: options.replaceCurrent.id, replacesDraftRevision: options.replaceCurrent.revision } : {}),
       ...expectedDepartmentParams(options.expectedDepartment) },
-    { signal: options.signal },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
   )
   return response.data.data
 }
@@ -168,7 +169,11 @@ export async function listWorkspaceReimbursements(
 ): Promise<{ items: ReimbursementDraftSummary[]; total: number }> {
   const response = await http.get<ApiEnvelope<{ items: ReimbursementDraftSummary[]; total: number }>>(
     '/reimbursements/workspace',
-    { signal: options.signal, params: { ...expectedDepartmentParams(options.expectedDepartment), offset: options.offset ?? 0 } },
+    {
+      signal: options.signal,
+      headers: reimbursementContextHeaders(options.reimbursementContext),
+      params: { ...expectedDepartmentParams(options.expectedDepartment), offset: options.offset ?? 0 },
+    },
   )
   return response.data.data
 }
@@ -188,7 +193,7 @@ export async function getReimbursementDraft(
 ): Promise<ReimbursementDraft> {
   const response = await http.get<ApiEnvelope<ReimbursementDraft>>(
     draftUrl(draftId),
-    { signal: options.signal },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
   )
   return response.data.data
 }
@@ -255,7 +260,7 @@ export async function listReimbursementDraftFiles(
 ): Promise<ReimbursementDraftFileList> {
   const response = await http.get<ApiEnvelope<ReimbursementDraftFileList>>(
     `${draftUrl(draftId)}/files`,
-    { signal: options.signal },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
   )
   return response.data.data
 }

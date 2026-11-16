@@ -7,6 +7,7 @@ import stat
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import mock_login
@@ -29,6 +30,7 @@ from app.models.reimbursement import (
 from app.models.session import UserSession
 from app.ocr.engine import FakeOcrEngine
 from app.ocr.types import OcrLine
+from app.services.dingtalk import DepartmentIdentity, DingTalkIdentity
 from app.services.file_coordination import SessionFilesRetired, UploadBusy
 from app.services.reimbursement_drafts import DraftActor
 from app.services.reimbursement_files import recognize_draft_file
@@ -80,11 +82,15 @@ def _draft_input(*, amount: str = "44.89") -> dict[str, object]:
     }
 
 
-def _insert_draft(client, *, revision: int = 1, amount: str = "44.89") -> str:
+def _insert_draft(
+    client, *, revision: int = 1, amount: str = "44.89", owner_user_id: str = "mock-user",
+    operator_user_id: str | None = None,
+) -> str:
     with client.app.state.database_session_factory() as database:
         draft = ReimbursementDraft(
             corp_id="corp-fixed",
-            owner_user_id="mock-user",
+            owner_user_id=owner_user_id,
+            operator_user_id=operator_user_id,
             status="DRAFT",
             revision=revision,
             department_id="100",
@@ -117,6 +123,7 @@ def _upload(
     content_type: str = "application/octet-stream",
     role: str = "EXPENSE_SOURCE",
     attachment_kind: str = "other",
+    reimbursement_context: str | None = None,
 ):
     if content is None:
         content = _named_image_bytes(name)
@@ -127,7 +134,13 @@ def _upload(
             "role": role,
             "attachmentKind": attachment_kind,
         },
-        headers={"X-CSRF-Token": csrf},
+        headers={
+            "X-CSRF-Token": csrf,
+            **(
+                {"X-Reimbursement-Context": reimbursement_context}
+                if reimbursement_context is not None else {}
+            ),
+        },
         files=[("files[]", (name, content, content_type))],
     )
 
@@ -1238,6 +1251,102 @@ def test_excel_preview_recovers_stale_ocr_and_requires_explicit_disposition(
         json={"expectedRevision": 3},
     )
     assert resolved.status_code == 200
+
+
+def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_policy(
+    client_factory, monkeypatch,
+) -> None:
+    client = client_factory(auth_mock_enabled=True, admin_user_ids="mock-user")
+    csrf = str(mock_login(client)["csrfToken"])
+    headers = {"X-CSRF-Token": csrf}
+    personal_draft = _insert_draft(client)
+    employee_draft = _insert_draft(client, owner_user_id="travel-employee")
+    delegate_draft = _insert_draft(
+        client, owner_user_id="travel-employee", operator_user_id="mock-user"
+    )
+    admin_path = "/api/admin/reimbursement-delegation"
+    previous = client.get(admin_path).json()["data"]["revision"]
+    policy = client.put(
+        admin_path,
+        headers=headers,
+        json={
+            "expectedRevision": previous, "departmentIds": [], "employeeUserIds": ["mock-user"]
+        },
+    )
+    assert policy.status_code == 200, policy.text
+
+    async def employee(user_id, *, fresh=False):
+        assert user_id == "travel-employee"
+        return DingTalkIdentity(
+            user_id, "beneficiary-union", "报销员工", (DepartmentIdentity("100", "测试部门"),)
+        )
+
+    monkeypatch.setattr(client.app.state.dingtalk_service, "get_employee_identity", employee)
+    context = client.post(
+        "/api/me/reimbursement-context", json={"userId": "travel-employee"}, headers=headers
+    ).json()["data"]["reimbursementContext"]
+    context_headers = {**headers, "X-Reimbursement-Context": context}
+
+    personal_upload = _upload(client, csrf, personal_draft, revision=1, name="personal.png")
+    delegated_upload = _upload(
+        client, csrf, delegate_draft, revision=1, name="delegated.png",
+        reimbursement_context=context,
+    )
+    assert personal_upload.status_code == delegated_upload.status_code == 201
+
+    def workspace_ids(request_headers):
+        response = client.get("/api/reimbursements/workspace", headers=request_headers)
+        assert response.status_code == 200, response.text
+        return [item["id"] for item in response.json()["data"]["items"]]
+
+    assert workspace_ids(context_headers) == [delegate_draft]
+    assert workspace_ids(headers) == [personal_draft]
+    assert client.get(
+        f"/api/reimbursements/drafts/{employee_draft}/files", headers=context_headers
+    ).status_code == 404
+    assert client.get(f"/api/reimbursements/drafts/{delegate_draft}/files").status_code == 404
+    assert workspace_ids(context_headers) == [delegate_draft]
+    files = client.get(
+        f"/api/reimbursements/drafts/{delegate_draft}/files", headers=context_headers,
+    ).json()["data"]["items"]
+    assert [item["name"] for item in files] == ["delegated.png"]
+
+    ticket = client.post(
+        f"/api/reimbursements/drafts/{delegate_draft}/excel-preview-ticket",
+        headers=context_headers, json={"expectedRevision": 2},
+    )
+    assert ticket.status_code == 200, ticket.text
+    preview = ticket.json()["data"]
+    download_headers = {"X-Reimbursement-Download-Token": preview["downloadToken"]}
+
+    async def verify_approvals(_database, _workflow, *, actor, **_kwargs):
+        assert actor.user_id == "travel-employee"
+        assert actor.operator_user_id == "mock-user"
+
+    async def render(**kwargs):
+        assert kwargs["employee_name"] == "报销员工"
+        assert kwargs["draft_id"] == delegate_draft
+        return SimpleNamespace(filename="report.xlsx", content=b"synthetic workbook")
+
+    monkeypatch.setattr(
+        reimbursement_files_api, "verify_delegated_saved_approvals", verify_approvals
+    )
+    monkeypatch.setattr(reimbursement_files_api, "generate_draft_excel_preview", render)
+    download = client.get(preview["downloadUrl"], headers=download_headers)
+    assert download.status_code == 200, download.text
+    assert download.content == b"synthetic workbook"
+
+    revoked = client.put(
+        admin_path,
+        headers=headers,
+        json={
+            "expectedRevision": policy.json()["data"]["revision"],
+            "departmentIds": [], "employeeUserIds": [],
+        },
+    )
+    assert revoked.status_code == 200, revoked.text
+    assert client.get(preview["downloadUrl"], headers=download_headers).status_code == 403
+    assert workspace_ids(headers) == [personal_draft]
 
 
 def test_excel_preview_native_ticket_survives_external_download_without_session_cookie(

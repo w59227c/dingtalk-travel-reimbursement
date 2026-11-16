@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, nextTick } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-router'
 
-import { getPublicConfig, selectDepartmentFromTravelApproval } from '@/api/auth'
+import { getPublicConfig, listReimbursementEmployees, prepareReimbursementContext, selectDepartmentFromTravelApproval } from '@/api/auth'
 import { calculateTotals } from '@/api/expenses'
 import { fetchReadiness } from '@/api/health'
 import {
@@ -36,6 +36,7 @@ import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { useReimbursementSubmissionStore } from '@/stores/reimbursementSubmission'
 import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 import { updateSubsidyWindow } from '@/utils/subsidyWindow'
+import type { AuthSession } from '@/types/auth'
 import type {
   ReimbursementDraft,
   ReimbursementDraftFile,
@@ -50,6 +51,8 @@ vi.mock('@/api/health', () => ({ fetchReadiness: vi.fn() }))
 vi.mock('@/api/auth', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/api/auth')>(),
   getPublicConfig: vi.fn(),
+  listReimbursementEmployees: vi.fn(),
+  prepareReimbursementContext: vi.fn(),
   selectDepartmentFromTravelApproval: vi.fn(),
 }))
 vi.mock('@/api/expenses', async (importOriginal) => {
@@ -282,6 +285,7 @@ const TravelApprovalSelectorStub = defineComponent({
     linkedApprovals: { type: Array, default: () => [] },
     readonly: { type: Boolean, default: false },
     busy: { type: Boolean, default: false },
+    delegated: { type: Boolean, default: false },
     requiredStartDate: { type: String, default: '' },
     requiredEndDate: { type: String, default: '' },
     single: { type: Boolean, default: false },
@@ -377,6 +381,34 @@ function installServerMocks(): void {
     return serverDraft
   })
   vi.mocked(submitOaReimbursement).mockResolvedValue(submissionResult())
+}
+
+const coworker = { userId: 'synthetic-coworker', name: '合成同事' }
+const coworkerDepartment = { id: '200', name: '合成同事部门' }
+const personalSession: AuthSession = {
+  user: { userId: 'synthetic-user', name: '测试用户' },
+  departments: [{ id: '100', name: '测试部门' }],
+  selectedDepartment: { id: '100', name: '测试部门' },
+  isAdmin: false,
+  csrfToken: 'synthetic-csrf',
+  canDelegateReimbursements: true,
+}
+const delegatedSession: AuthSession = {
+  ...personalSession,
+  operator: personalSession.user,
+  user: coworker,
+  departments: [coworkerDepartment],
+  selectedDepartment: coworkerDepartment,
+  reimbursementContext: 'synthetic-signed-delegation',
+}
+
+async function selectCoworker(wrapper: VueWrapper): Promise<void> {
+  await wrapper.get('[data-testid="select-reimbursement-employee"]').trigger('click')
+  await wrapper.get('input[aria-label="员工姓名或 userId"]').setValue(coworker.name)
+  await wrapper.get('.employee-search').trigger('submit')
+  await flushPromises()
+  await wrapper.get('.employee-match').trigger('click')
+  await flushPromises()
 }
 
 async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void, realMaterials = false, mobile = false, realSummary = false): Promise<{
@@ -667,6 +699,119 @@ describe('ReimburseView single-form OA flow', () => {
     window.sessionStorage.clear()
     vi.restoreAllMocks()
     vi.useRealTimers()
+  })
+
+  it.each([false, true])('saves the original draft and restores its receipts on return, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ input: canonicalNoSubsidyInput() })
+    const coworkerDraft = makeDraft({
+      id: 'synthetic-delegate-draft', department: coworkerDepartment,
+      input: { ...canonicalNoSubsidyInput(), items: [] },
+    })
+    vi.mocked(listReimbursementEmployees).mockResolvedValue([coworker])
+    vi.mocked(prepareReimbursementContext).mockImplementation(async (userId) => {
+      expect(serverDraft.input.items[0]?.description).toBe('切换前保存的费用说明')
+      return userId ? delegatedSession : personalSession
+    })
+    vi.mocked(listWorkspaceReimbursements).mockImplementation(async (request) => ({
+      items: [request?.reimbursementContext ? coworkerDraft : serverDraft], total: 1,
+    }))
+    vi.mocked(getReimbursementDraft).mockImplementation(async (id, request) => {
+      if (id === coworkerDraft.id) {
+        expect(request?.reimbursementContext).toBe(delegatedSession.reimbursementContext)
+        return coworkerDraft
+      }
+      return serverDraft
+    })
+    vi.mocked(listReimbursementDraftFiles).mockImplementation(async (id) => id === coworkerDraft.id
+      ? { draftId: coworkerDraft.id, revision: coworkerDraft.revision, items: [] }
+      : { draftId: serverDraft.id, revision: serverDraft.revision, items: serverFiles })
+    const { wrapper, expense, drafts } = await mountView((auth) => { auth.session = personalSession }, false, mobile)
+    try {
+      expect(wrapper.get('[data-testid="reimbursement-subject-name"]').text()).toBe('为本人报销')
+      expect(drafts.files).toEqual([activeFile])
+      expense.items[0]!.description = '切换前保存的费用说明'
+      await nextTick()
+      await selectCoworker(wrapper)
+      expect(updateReimbursementDraft).toHaveBeenCalledWith(
+        serverDraft.id, 1, expect.objectContaining({ items: [expect.objectContaining({ description: '切换前保存的费用说明' })] }),
+        expect.anything(),
+      )
+      expect(wrapper.get('[data-testid="reimbursement-subject-name"]').text()).toBe('正在为合成同事报销')
+      expect(wrapper.getComponent(TravelApprovalSelectorStub).props('delegated')).toBe(true)
+      expect(drafts.currentDraft?.id).toBe(coworkerDraft.id)
+      expect(drafts.files).toEqual([])
+      await wrapper.get('[data-testid="return-to-personal-reimbursement"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="reimbursement-subject-name"]').text()).toBe('为本人报销')
+      expect(wrapper.getComponent(TravelApprovalSelectorStub).props('delegated')).toBe(false)
+      expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+      expect(drafts.files).toEqual([activeFile])
+      expect(expense.items[0]?.description).toBe('切换前保存的费用说明')
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('holds a switch during upload and keeps the original when target loading fails, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ input: canonicalNoSubsidyInput() })
+    vi.mocked(listReimbursementEmployees).mockResolvedValue([coworker])
+    vi.mocked(prepareReimbursementContext).mockResolvedValue(delegatedSession)
+    vi.mocked(listWorkspaceReimbursements).mockImplementation(async (request) => {
+      if (request?.reimbursementContext) throw new Error('目标报销不可用')
+      return { items: [serverDraft], total: 1 }
+    })
+    const { wrapper, drafts } = await mountView((auth) => { auth.session = personalSession }, false, mobile)
+    try {
+      drafts.processingFiles = true
+      await nextTick()
+      expect(wrapper.get('[data-testid="select-reimbursement-employee"]').attributes('disabled')).toBeDefined()
+      expect(wrapper.text()).toContain('请等待本批文件上传和识别完成')
+      drafts.processingFiles = false
+      await nextTick()
+      await selectCoworker(wrapper)
+      expect(wrapper.text()).toContain('目标报销不可用')
+      expect(wrapper.get('[data-testid="reimbursement-subject-name"]').text()).toBe('为本人报销')
+      expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+      expect(drafts.files).toEqual([activeFile])
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('blocks a switch when the original input cannot be saved, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ input: canonicalNoSubsidyInput() })
+    vi.mocked(listReimbursementEmployees).mockResolvedValue([coworker])
+    vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(Object.assign(new Error('合成保存失败'), {
+      isAxiosError: true, response: { status: 422, data: { error: { message: '合成保存失败' } } },
+    }))
+    const { wrapper, expense, drafts } = await mountView((auth) => { auth.session = personalSession }, false, mobile)
+    try {
+      expense.items[0]!.description = '待保存的合成说明'
+      await nextTick()
+      await selectCoworker(wrapper)
+      expect(wrapper.text()).toContain('合成保存失败')
+      expect(prepareReimbursementContext).not.toHaveBeenCalled()
+      expect(expense.items[0]?.description).toBe('待保存的合成说明')
+      expect(drafts.files).toEqual([activeFile])
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('accepts exact userId after DingTalk denies name search, mobile=%s', async (mobile) => {
+    vi.mocked(listReimbursementEmployees).mockRejectedValueOnce(Object.assign(new Error('姓名搜索需要钉钉权限'), {
+      isAxiosError: true, response: { status: 502, data: { error: { code: 'REIMBURSEMENT_EMPLOYEE_SEARCH_UNAVAILABLE' } } },
+    })).mockResolvedValueOnce([coworker])
+    const { wrapper } = await mountView((auth) => { auth.session = personalSession }, false, mobile)
+    try {
+      await wrapper.get('[data-testid="select-reimbursement-employee"]').trigger('click')
+      const query = wrapper.get('input[aria-label="员工姓名或 userId"]')
+      const form = wrapper.get('.employee-search')
+      await query.setValue(coworker.name)
+      await form.trigger('submit')
+      await flushPromises()
+      expect(wrapper.text()).toContain('请输入准确的员工 userId 后重试')
+      await query.setValue(coworker.userId)
+      await form.trigger('submit')
+      await flushPromises()
+      expect(listReimbursementEmployees).toHaveBeenLastCalledWith(coworker.userId, expect.any(AbortSignal))
+      expect(wrapper.get('.employee-match').text()).toContain(coworker.name)
+    } finally { wrapper.unmount() }
   })
 
   async function saveCurrent(wrapper: VueWrapper): Promise<void> {

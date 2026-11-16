@@ -994,7 +994,10 @@ function focusMaterial(itemId?: string, fileId?: string): void {
   element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   element?.focus({ preventScroll: true })
 }
-defineExpose({ focusMaterial, hasOpenMaterialEditor })
+const hasUnpersistedFailedUploads = computed(() => batchFiles.value.some(
+  (entry) => entry.status === 'failed' && !entry.uploaded && Boolean(entry.source),
+))
+defineExpose({ focusMaterial, hasOpenMaterialEditor, hasUnpersistedFailedUploads })
 
 function releaseReceiptPreview(): void {
   previewController?.abort()

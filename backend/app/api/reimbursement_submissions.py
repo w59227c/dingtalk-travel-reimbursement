@@ -21,6 +21,11 @@ from app.services.oa_reimbursement_payload import (
     snapshot_sha256,
 )
 from app.services.oa_template_profiles import load_fresh_submission_catalog
+from app.services.reimbursement_approval_scope import verify_delegated_saved_approvals
+from app.services.reimbursement_context import (
+    get_reimbursement_session,
+    require_reimbursement_csrf,
+)
 from app.services.reimbursement_drafts import draft_actor
 from app.services.reimbursement_submissions import (
     admin_confirm_manual_review_not_created,
@@ -32,9 +37,7 @@ from app.services.reimbursement_submissions import (
 )
 from app.services.sessions import (
     CurrentSession,
-    get_current_session,
     require_admin_csrf,
-    require_csrf,
 )
 
 router = APIRouter(tags=["reimbursement-submissions"])
@@ -94,7 +97,7 @@ async def submit_reimbursement(
     body: SubmitReimbursementRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key")],
 ) -> dict[str, object]:
     """Lock one reviewed revision; all remote work is performed by the worker."""
@@ -131,12 +134,19 @@ async def submit_reimbursement(
         request.app.state.database_session_factory,
         request.app.state.dingtalk_workflow,
     )
+    await verify_delegated_saved_approvals(
+        database,
+        request.app.state.dingtalk_workflow,
+        actor=actor,
+        draft_id=draft_id,
+        expected_revision=body.expected_revision,
+    )
     source = collect_snapshot_source(
         database,
         staging=request.app.state.reimbursement_staging,
         actor=actor,
-        originator_union_id=current.record.dingtalk_union_id,
-        originator_name=current.record.name,
+        originator_union_id=current.reimbursement_union_id,
+        originator_name=current.reimbursement_name,
         draft_id=draft_id,
         expected_revision=body.expected_revision,
         microapp_agent_id=agent_id,
@@ -160,8 +170,8 @@ async def submit_reimbursement(
         actor=actor,
         draft_id=draft_id,
         expected_revision=body.expected_revision,
-        originator_union_id=current.record.dingtalk_union_id,
-        originator_name=current.record.name,
+        originator_union_id=current.reimbursement_union_id,
+        originator_name=current.reimbursement_name,
         idempotency_key=normalized_key,
         snapshot_version=SNAPSHOT_VERSION,
         schema_fingerprint=snapshot.template.schema_fingerprint,
@@ -180,12 +190,13 @@ async def submit_reimbursement(
 def get_reimbursement_submission(
     submission_id: str,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
 ) -> dict[str, object]:
     submission = require_owned_submission(
         database,
         actor=draft_actor(current),
         submission_id=submission_id,
+        allow_submitted_beneficiary=True,
     )
     return success(_submission_data(submission))
 
@@ -228,7 +239,7 @@ def recheck_reimbursement_submission(
     submission_id: str,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
     actor = draft_actor(current)
     existing = require_owned_submission(database, actor=actor, submission_id=submission_id)
@@ -251,7 +262,7 @@ def recheck_reimbursement_submission(
 def get_reimbursement_submission_for_draft(
     draft_id: str,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
 ) -> dict[str, object]:
     """Recover an existing submission without mutating or locking its draft."""
 
@@ -259,6 +270,7 @@ def get_reimbursement_submission_for_draft(
         database,
         actor=draft_actor(current),
         draft_id=draft_id,
+        allow_submitted_beneficiary=True,
     )
     if submission is None:
         raise ApiError("REIMBURSEMENT_SUBMISSION_NOT_FOUND", "提交记录不存在", 404)

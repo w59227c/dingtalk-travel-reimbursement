@@ -13,10 +13,19 @@ from app.schemas.common import success
 from app.schemas.primitives import DecimalString
 from app.services.application_settings import (
     MAX_ADDITIONAL_ADMINS,
+    MAX_ADMIN_DEPARTMENTS,
     MAX_APP_TITLE_LENGTH,
     get_admin_settings_snapshot,
     get_expense_settings,
+    normalize_admin_departments,
     update_expense_settings,
+)
+from app.services.reimbursement_delegation_policy import (
+    MAX_DELEGATION_GRANTS,
+    DelegationPolicy,
+    get_delegation_policy,
+    normalize_grant_ids,
+    update_delegation_policy,
 )
 from app.services.sessions import (
     CurrentSession,
@@ -78,6 +87,14 @@ class SettingsWrite(BaseModel):
     calculation_mode: Literal["half_day_12"] = Field(alias="calculationMode")
     app_title: str = Field(alias="appTitle", min_length=1, max_length=MAX_APP_TITLE_LENGTH)
     admin_user_ids: list[str] = Field(alias="adminUserIds", max_length=MAX_ADDITIONAL_ADMINS)
+    admin_department_ids: list[str] | None = Field(
+        default=None, alias="adminDepartmentIds", max_length=MAX_ADMIN_DEPARTMENTS
+    )
+
+    @field_validator("admin_department_ids")
+    @classmethod
+    def normalize_department_ids(cls, values: list[str] | None) -> list[str] | None:
+        return list(normalize_admin_departments(values)) if values is not None else None
 
     @field_validator("app_title")
     @classmethod
@@ -113,7 +130,7 @@ def get_admin_application_settings(
     database: Annotated[Session, Depends(get_db)],
     _current: Annotated[CurrentSession, Depends(require_admin)],
 ) -> dict[str, object]:
-    settings = get_admin_settings_snapshot(database).as_api_dict()
+    settings = get_admin_settings_snapshot(database, _current.record.corp_id).as_api_dict()
     return success(
         settings
         | {
@@ -135,6 +152,10 @@ def update_application_settings(
         calculation_mode=body.calculation_mode,
         app_title=body.app_title,
         additional_admin_ids=tuple(body.admin_user_ids),
+        additional_admin_department_ids=(
+            tuple(body.admin_department_ids) if body.admin_department_ids is not None else None
+        ),
+        corp_id=_current.record.corp_id,
         expected_revision=body.expected_revision,
     )
     return success(
@@ -143,3 +164,39 @@ def update_application_settings(
             "environmentAdminUserIds": sorted(request.app.state.settings.admin_ids),
         }
     )
+
+
+class DelegationPolicyWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    employee_user_ids: list[str] = Field(alias="employeeUserIds", max_length=MAX_DELEGATION_GRANTS)
+    department_ids: list[str] = Field(alias="departmentIds", max_length=MAX_DELEGATION_GRANTS)
+    expected_revision: str = Field(alias="expectedRevision", pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("employee_user_ids", "department_ids")
+    @classmethod
+    def validate_grants(cls, values: list[str]) -> list[str]:
+        return list(normalize_grant_ids(values))
+
+
+@router.get("/admin/reimbursement-delegation")
+def get_reimbursement_delegation_settings(
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_admin)],
+) -> dict[str, object]:
+    return success(get_delegation_policy(database, current.record.corp_id).as_dict())
+
+
+@router.put("/admin/reimbursement-delegation")
+def update_reimbursement_delegation_settings(
+    body: DelegationPolicyWrite,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_admin_csrf)],
+) -> dict[str, object]:
+    policy = update_delegation_policy(
+        database,
+        corp_id=current.record.corp_id,
+        proposed=DelegationPolicy(tuple(body.employee_user_ids), tuple(body.department_ids)),
+        expected_revision=body.expected_revision,
+    )
+    return success(policy.as_dict())

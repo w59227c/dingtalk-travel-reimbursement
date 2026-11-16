@@ -9,6 +9,7 @@ import {
   updateExpenseSettings,
   type AdminExpenseSettings,
 } from '@/api/settings'
+import DirectoryGrantField from '@/components/settings/DirectoryGrantField.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { SubsidyRateType } from '@/types/expenses'
 
@@ -23,6 +24,7 @@ const form = reactive({
   revision: '',
   appTitle: '智能差旅费报销申请',
   adminUserIds: [] as string[],
+  adminDepartmentIds: [] as string[],
   environmentAdminUserIds: [] as string[],
   subsidyRates: {
     business: '100.00',
@@ -55,7 +57,8 @@ async function load(): Promise<void> {
   loading.value = true
   loadError.value = ''
   try {
-    Object.assign(form, await getAdminExpenseSettings())
+    const settings = await getAdminExpenseSettings()
+    Object.assign(form, settings, { adminDepartmentIds: settings.adminDepartmentIds ?? [] })
     saveError.value = ''
     conflict.value = false
     unsavedAfterSave.value = false
@@ -86,6 +89,7 @@ function writableSignature(value: AdminExpenseSettings): string {
   return JSON.stringify({
     appTitle: value.appTitle,
     adminUserIds: [...value.adminUserIds].sort(),
+    adminDepartmentIds: [...(value.adminDepartmentIds ?? [])].sort(),
     subsidyRates: rateFields.map(({ id }) => normalizeSubsidyRate(value.subsidyRates[id])
       ?? value.subsidyRates[id]),
     calculationMode: value.calculationMode,
@@ -98,13 +102,14 @@ function acceptSaved(updated: AdminExpenseSettings, sent: AdminExpenseSettings):
     form.revision = updated.revision
     form.environmentAdminUserIds = updated.environmentAdminUserIds
   } else {
-    Object.assign(form, updated)
+    Object.assign(form, updated, { adminDepartmentIds: updated.adminDepartmentIds ?? [] })
   }
   unsavedAfterSave.value = newerInput
   saveError.value = ''
   conflict.value = false
   auth.appTitle = updated.appTitle
   document.title = updated.appTitle
+  void auth.refreshMe().catch(() => { /* Admin access is rechecked on the next request. */ })
   if (!newerInput) ElMessage.success('系统设置已保存')
 }
 
@@ -219,45 +224,33 @@ async function save(): Promise<void> {
         />
       </el-form-item>
       <el-form-item label="配置文件管理员（始终保留）">
-        <div class="admin-id-list">
-          <el-tag
-            v-for="userId in form.environmentAdminUserIds"
-            :key="userId"
-          >
-            {{ userId }}
-          </el-tag>
-          <span v-if="!form.environmentAdminUserIds.length">
-            未配置
-          </span>
-        </div>
+        <DirectoryGrantField
+          v-model="form.environmentAdminUserIds"
+          kind="employee"
+          label="配置文件管理员"
+          read-only
+        />
       </el-form-item>
-      <el-form-item label="额外管理员 userId">
-        <div class="admin-id-editor">
-          <div
-            v-for="(_userId, index) in form.adminUserIds"
-            :key="index"
-            class="admin-id-row"
-          >
-            <el-input
-              v-model="form.adminUserIds[index]"
-              maxlength="128"
-              placeholder="钉钉 userId"
-            />
-            <el-button
-              type="danger"
-              plain
-              @click="form.adminUserIds.splice(index, 1)"
-            >
-              移除
-            </el-button>
-          </div>
-          <el-button
-            :disabled="formDisabled || form.adminUserIds.length >= 50"
-            @click="form.adminUserIds.push('')"
-          >
-            添加管理员
-          </el-button>
-        </div>
+      <el-form-item label="额外管理员员工">
+        <DirectoryGrantField
+          v-model="form.adminUserIds"
+          kind="employee"
+          label="额外管理员员工"
+          :limit="50"
+          :disabled="formDisabled"
+        />
+      </el-form-item>
+      <el-form-item label="额外管理员部门">
+        <DirectoryGrantField
+          v-model="form.adminDepartmentIds"
+          kind="department"
+          label="额外管理员部门"
+          :limit="50"
+          :disabled="formDisabled"
+        />
+        <p class="settings-admin-note">
+          所选部门的直接成员拥有系统管理员权限。
+        </p>
       </el-form-item>
       <div class="settings-form-heading">
         <strong>每日补助标准</strong>
@@ -320,6 +313,5 @@ async function save(): Promise<void> {
 </template>
 
 <style scoped>
-.admin-id-editor, .admin-id-list { display: flex; width: 100%; flex-direction: column; gap: 10px; }
-.admin-id-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+.settings-admin-note { color: var(--el-text-color-secondary); margin: 2px 0 0; }
 </style>

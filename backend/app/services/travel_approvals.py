@@ -262,6 +262,7 @@ async def list_current_user_travel_approvals(
     current_user_id: str,
     query_window: TravelApprovalQueryWindow,
     query: str = "",
+    required_cc_user_id: str | None = None,
 ) -> tuple[TravelApprovalCandidate, ...]:
     user_id = _required_text(current_user_id, field="current_user_id")
     _validate_window(query_window)
@@ -271,12 +272,16 @@ async def list_current_user_travel_approvals(
         current_user_id=user_id,
         query_window=query_window,
     )
-    resolved = await _resolve_details(workflow, tuple(listed.values()), catalog)
+    resolved = await _resolve_details(
+        workflow, tuple(listed.values()), catalog, required_cc_user_id=required_cc_user_id
+    )
     eligible = tuple(
         candidate
-        for candidate in resolved
+        for candidate, _reason in resolved
         if candidate is not None and matches_travel_approval_query(candidate, query)
     )
+    if not eligible and any(reason == "CC_UNVERIFIED" for _candidate, reason in resolved):
+        raise _cc_unverified()
     return tuple(
         sorted(
             eligible,
@@ -296,6 +301,7 @@ async def reverify_travel_approval_selection(
     *,
     current_user_id: str,
     selections: tuple[TravelApprovalSelection, ...],
+    required_cc_user_id: str | None = None,
 ) -> VerifiedTravelSelection:
     """Re-prove list membership before trusting selected instance details."""
 
@@ -341,14 +347,25 @@ async def reverify_travel_approval_selection(
                 )
             proven.append(reference)
 
-    resolved = await _resolve_details(workflow, tuple(proven), catalog)
-    if any(item is None for item in resolved):
-        raise ApiError(
-            "TRAVEL_APPROVAL_MEMBERSHIP_CHANGED",
-            "所选出差审批状态或日期已变化，请重新选择",
-            409,
-        )
-    approvals = tuple(item for item in resolved if item is not None)
+    resolved = await _resolve_details(
+        workflow, tuple(proven), catalog, required_cc_user_id=required_cc_user_id
+    )
+    for candidate, reason in resolved:
+        if candidate is None:
+            if reason == "CC_UNVERIFIED":
+                raise _cc_unverified()
+            if reason == "CC_REQUIRED":
+                raise ApiError(
+                    "TRAVEL_APPROVAL_CC_REQUIRED",
+                    "所选出差审批未抄送给当前经办人，请重新选择",
+                    409,
+                )
+            raise ApiError(
+                "TRAVEL_APPROVAL_MEMBERSHIP_CHANGED",
+                "所选出差审批状态或日期已变化，请重新选择",
+                409,
+            )
+    approvals = tuple(item for item, _reason in resolved if item is not None)
     department_ids = {
         _required_text(item.instance.originator_department_id, field="originator_department_id")
         for item in approvals
@@ -523,15 +540,21 @@ async def _resolve_details(
     workflow: DingTalkWorkflowClient,
     listed: tuple[ListedTravelApproval, ...],
     catalog: OaTemplateCatalogLike,
-) -> tuple[TravelApprovalCandidate | None, ...]:
+    *,
+    required_cc_user_id: str | None,
+) -> tuple[tuple[TravelApprovalCandidate | None, str | None], ...]:
     if not listed:
         return ()
     semaphore = asyncio.Semaphore(_DETAIL_CONCURRENCY)
 
-    async def resolve(reference: ListedTravelApproval) -> TravelApprovalCandidate | None:
+    async def resolve(
+        reference: ListedTravelApproval,
+    ) -> tuple[TravelApprovalCandidate | None, str | None]:
         async with semaphore:
             instance = await workflow.get_process_instance(reference.instance_id)
-        return evaluate_travel_approval_candidate(reference, instance, catalog)[0]
+        return evaluate_travel_approval_candidate(
+            reference, instance, catalog, required_cc_user_id=required_cc_user_id
+        )
 
     tasks = [asyncio.create_task(resolve(reference)) for reference in listed]
     try:
@@ -558,6 +581,8 @@ def evaluate_travel_approval_candidate(
     listed: ListedTravelApproval,
     instance: WorkflowProcessInstance,
     catalog: OaTemplateCatalogLike,
+    *,
+    required_cc_user_id: str | None = None,
 ) -> tuple[TravelApprovalCandidate | None, str | None]:
     """One policy for employee candidates and administrator diagnostic explanations."""
     if instance.instance_id != listed.instance_id:
@@ -575,6 +600,11 @@ def evaluate_travel_approval_candidate(
     )
     if dates is None:
         return None, "DATE_FIELDS_INVALID"
+    if required_cc_user_id is not None:
+        if instance.executed_cc_user_ids is None:
+            return None, "CC_UNVERIFIED"
+        if required_cc_user_id not in instance.executed_cc_user_ids:
+            return None, "CC_REQUIRED"
     start_date, end_date = dates
     company, budget, reason = travel_accounting_options(
         instance,
@@ -884,4 +914,12 @@ def _result_limit_error() -> ApiError:
         "TRAVEL_APPROVAL_RESULT_LIMIT_EXCEEDED",
         "出差审批数量过多，请缩小查询日期范围",
         422,
+    )
+
+
+def _cc_unverified() -> ApiError:
+    return ApiError(
+        "TRAVEL_APPROVAL_CC_UNVERIFIED",
+        "暂时无法核实出差审批的抄送记录，请重试",
+        502,
     )

@@ -246,6 +246,7 @@ class SubmissionJob:
     process_instance_id: str | None
     attempt_count: int
     uploads: tuple[SubmissionUpload, ...]
+    operator_user_id: str | None = None
 
 
 class SubmissionStatePort(Protocol):
@@ -611,6 +612,19 @@ class SnapshotSubmissionMaterializer:
                     "所选出差审批状态或日期已变化，请重新选择",
                     409,
                 )
+            if job.operator_user_id is not None:
+                if instance.executed_cc_user_ids is None:
+                    raise ApiError(
+                        "TRAVEL_APPROVAL_CC_UNVERIFIED",
+                        "暂时无法核实出差审批的抄送记录，请重试",
+                        502,
+                    )
+                if job.operator_user_id not in instance.executed_cc_user_ids:
+                    raise ApiError(
+                        "TRAVEL_APPROVAL_CC_REQUIRED",
+                        "所选出差审批未抄送给当前经办人，请重新选择",
+                        409,
+                    )
             if (
                 related.originator_department_id is not None
                 and instance.originator_department_id != related.originator_department_id
@@ -971,6 +985,7 @@ class DatabaseSubmissionState:
                 process_instance_id=submission.process_instance_id,
                 attempt_count=submission.attempt_count,
                 uploads=uploads,
+                operator_user_id=submission.operator_user_id,
             )
 
     def transition(
@@ -2629,6 +2644,8 @@ def _strict_json_value(raw: str) -> object:
 
 
 def _is_retryable_validation_error(error: ApiError) -> bool:
+    if error.code == "TRAVEL_APPROVAL_CC_UNVERIFIED":
+        return True
     if not isinstance(error, DingTalkOpenAPIError):
         return False
     if error.code == "DINGTALK_PERMISSION_MISSING":

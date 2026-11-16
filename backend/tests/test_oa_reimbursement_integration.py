@@ -69,15 +69,19 @@ from app.services.oa_reimbursement import (
 from app.services.oa_reimbursement_payload import (
     ReimbursementSnapshot,
     build_snapshot,
+    collect_snapshot_source,
     parse_snapshot,
+    serialize_snapshot,
+    snapshot_sha256,
 )
 from app.services.oa_template_profiles import (
     TravelProfileConfirmation,
     confirm_template_catalog,
     require_submission_ready_catalog,
 )
-from app.services.reimbursement_drafts import validate_and_calculate_input
+from app.services.reimbursement_drafts import DraftActor, validate_and_calculate_input
 from app.services.reimbursement_staging import StagingArea
+from app.services.reimbursement_submissions import create_submission
 
 REIMBURSEMENT_PROCESS_CODE = "PROC-INTEGRATION-REIMBURSEMENT"
 TRAVEL_PROCESS_CODE = "PROC-INTEGRATION-TRAVEL"
@@ -516,6 +520,7 @@ def _persist_ready_draft(
     excluded_periods: list | None = None,
     subsidy_only: bool = False,
     with_materials: bool = True,
+    operator_user_id: str | None = None,
 ):
     client.app.state.dingtalk_workflow = workflow
     settings = client.app.state.settings
@@ -576,6 +581,7 @@ def _persist_ready_draft(
         draft = ReimbursementDraft(
             corp_id="corp-fixed",
             owner_user_id="mock-user",
+            operator_user_id=operator_user_id,
             status=ReimbursementDraftStatus.REVIEW_READY.value,
             revision=4,
             department_id="100",
@@ -1361,6 +1367,85 @@ def test_worker_rechecks_source_accounting_before_any_upload(
     assert result.json()["data"]["error"]["code"] == "TRAVEL_APPROVAL_ACCOUNTING_CHANGED"
     assert storage.put_files == []
     assert workflow.create_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("recipients", "error", "expected_status"),
+    [
+        (None, "TRAVEL_APPROVAL_CC_UNVERIFIED", "FAILED_RETRYABLE"),
+        (("mock-user", "different-operator"), "TRAVEL_APPROVAL_CC_REQUIRED", "FAILED_FINAL"),
+        (("synthetic-operator",), None, "SUBMITTED"),
+    ],
+)
+def test_worker_checks_executed_copy_for_the_delegate_before_upload(
+    enabled_manual_worker_client, recipients, error, expected_status,
+):
+    reimbursement_schema, travel_schema, travel_type = _schemas()
+
+    class CcWorkflow(LocalWorkflowBoundary):
+        async def get_process_instance(self, instance_id):
+            instance = await super().get_process_instance(instance_id)
+            if instance_id == TRAVEL_INSTANCE_ID:
+                return replace(instance, executed_cc_user_ids=recipients)
+            return instance
+
+    client = enabled_manual_worker_client
+    workflow = CcWorkflow(reimbursement_schema, travel_schema)
+    actor = DraftActor(
+        "corp-fixed", "mock-user", "100", "测试部门", operator_user_id="synthetic-operator"
+    )
+    draft_id, _ = _persist_ready_draft(
+        client, workflow, travel_type, operator_user_id=actor.operator_user_id
+    )
+    settings = client.app.state.settings
+    with client.app.state.database_session_factory() as database:
+        snapshot = build_snapshot(collect_snapshot_source(
+            database,
+            staging=client.app.state.reimbursement_staging,
+            actor=actor,
+            originator_union_id="mock-union-id:mock-user",
+            originator_name="测试员工",
+            draft_id=draft_id,
+            expected_revision=4,
+            microapp_agent_id=settings.dingtalk_agent_id,
+            excel_template_path=settings.excel_template_path,
+            max_items=settings.expense_max_items,
+            ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
+        ))
+        result = create_submission(
+            database,
+            actor=actor,
+            draft_id=draft_id,
+            expected_revision=4,
+            originator_union_id=snapshot.identity.union_id,
+            originator_name=snapshot.identity.name,
+            idempotency_key="77777777-7777-4777-8777-777777777777",
+            snapshot_version=snapshot.snapshot_version,
+            schema_fingerprint=snapshot.template.schema_fingerprint,
+            form_snapshot_json=serialize_snapshot(snapshot),
+            snapshot_sha256=snapshot_sha256(snapshot),
+        )
+    storage = LocalStorageBoundary()
+    tick = [utc_now()]
+    worker = _worker(client, workflow, storage, clock=lambda: tick[0])
+    assert asyncio.run(worker.run_once())
+    with client.app.state.database_session_factory() as database:
+        task = database.get(ReimbursementSubmission, result.submission_id)
+        assert task.operator_user_id == "synthetic-operator"
+        assert task.last_error_code == error
+        assert task.status == expected_status
+    if error:
+        assert storage.put_files == []
+        assert workflow.create_calls == 0
+    else:
+        assert workflow.created_command.originator_user_id == "mock-user"
+    if expected_status == "FAILED_RETRYABLE":
+        recipients = ("synthetic-operator",)
+        tick[0] += timedelta(minutes=2)
+        assert asyncio.run(worker.run_once())
+        assert workflow.create_calls == 1
+        with client.app.state.database_session_factory() as database:
+            assert database.get(ReimbursementSubmission, result.submission_id).status == "SUBMITTED"
 
 
 def test_worker_rechecks_the_saved_travel_approval_department_before_upload(

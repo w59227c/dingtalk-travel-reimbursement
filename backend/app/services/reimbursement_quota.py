@@ -82,6 +82,8 @@ class DraftFileOwner:
     user_id: str
     draft_id: str
     expected_revision: int
+    operator_user_id: str | None = None
+    session_id_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +155,8 @@ class _DeletingDraftFileCleanup:
             file_id=file.id,
             draft_id=draft.id,
             actor=DraftActor(
-                draft.corp_id, draft.owner_user_id, draft.department_id, draft.department_name
+                draft.corp_id, draft.owner_user_id, draft.department_id, draft.department_name,
+                operator_user_id=draft.operator_user_id,
             ),
             draft_revision=draft.revision,
             draft_status=draft.status,
@@ -241,6 +244,8 @@ class ReimbursementQuotaCoordinator:
                         user_id=owner.user_id,
                         department_id=draft.department_id,
                         department_name=draft.department_name,
+                        operator_user_id=owner.operator_user_id,
+                        session_id_hash=owner.session_id_hash,
                     ),
                     expected_revision=owner.expected_revision,
                     now=now,
@@ -401,9 +406,15 @@ class ReimbursementQuotaCoordinator:
         _validate_staged_object(reservation, staged)
         if reservation.kind is not ReservationKind.DRAFT_FILE:
             raise ReimbursementReservationConflict("reservation is not a draft file")
-        if actor.corp_id != owner.corp_id or actor.user_id != owner.user_id:
+        if (
+            actor.corp_id != owner.corp_id
+            or actor.user_id != owner.user_id
+            or actor.operator_user_id != owner.operator_user_id
+            or actor.session_id_hash != owner.session_id_hash
+        ):
             raise ReimbursementReservationConflict("draft file actor does not own reservation")
         with self._write_session() as database:
+            actor.require_current_delegation(database)
             record = self._owned_record(database, owner, reservation, now=utc_now())
             if not isinstance(record, ReimbursementDraftFile):
                 raise ReimbursementReservationConflict("reservation is not a draft file")
@@ -449,6 +460,7 @@ class ReimbursementQuotaCoordinator:
                     ),
                     ReimbursementDraft.corp_id == owner.corp_id,
                     ReimbursementDraft.owner_user_id == owner.user_id,
+                    ReimbursementDraft.operator_user_id == owner.operator_user_id,
                 )
             )
             if record is None:
@@ -569,11 +581,13 @@ class ReimbursementQuotaCoordinator:
 
         with ExitStack() as cleanup_guard:
             with self._write_session() as database:
+                actor.require_current_delegation(database)
                 draft = database.scalar(
                     select(ReimbursementDraft).where(
                         ReimbursementDraft.id == normalized_draft_id,
                         ReimbursementDraft.corp_id == actor.corp_id,
                         ReimbursementDraft.owner_user_id == actor.user_id,
+                        ReimbursementDraft.operator_user_id == actor.operator_user_id,
                     )
                 )
                 if draft is None:
@@ -665,6 +679,7 @@ class ReimbursementQuotaCoordinator:
                         ReimbursementDraft.id == normalized_draft_id,
                         ReimbursementDraft.corp_id == actor.corp_id,
                         ReimbursementDraft.owner_user_id == actor.user_id,
+                        ReimbursementDraft.operator_user_id == actor.operator_user_id,
                         ReimbursementDraft.department_id == actor.department_id,
                         ReimbursementDraft.department_name == actor.department_name,
                         ReimbursementDraft.status == ReimbursementDraftStatus.EXPIRED.value,
@@ -958,6 +973,7 @@ class ReimbursementQuotaCoordinator:
                         user_id=draft.owner_user_id,
                         department_id=draft.department_id,
                         department_name=draft.department_name,
+                        operator_user_id=draft.operator_user_id,
                     ),
                     revision=draft.revision,
                 )
@@ -1158,6 +1174,7 @@ class ReimbursementQuotaCoordinator:
                     ReimbursementDraftFile.sha256 == item.sha256,
                     ReimbursementDraft.corp_id == item.actor.corp_id,
                     ReimbursementDraft.owner_user_id == item.actor.user_id,
+                    ReimbursementDraft.operator_user_id == item.actor.operator_user_id,
                     ReimbursementDraft.department_id == item.actor.department_id,
                     ReimbursementDraft.department_name == item.actor.department_name,
                     ReimbursementDraft.revision == item.draft_revision,
@@ -1241,6 +1258,7 @@ class ReimbursementQuotaCoordinator:
                     ReimbursementDraftFile.reserved_bytes == expected.reserved_bytes,
                     ReimbursementDraft.corp_id == authority.corp_id,
                     ReimbursementDraft.owner_user_id == authority.user_id,
+                    ReimbursementDraft.operator_user_id == authority.operator_user_id,
                     ReimbursementDraft.revision == _draft_operation_revision(authority),
                     ReimbursementDraft.status.in_(_ACTIVE_DRAFT_STATUSES),
                     ReimbursementDraft.locked_at.is_(None),
@@ -1297,6 +1315,7 @@ class ReimbursementQuotaCoordinator:
                     ReimbursementDraftFile.reserved_bytes == expected.reserved_bytes,
                     ReimbursementDraft.corp_id == authority.corp_id,
                     ReimbursementDraft.owner_user_id == authority.user_id,
+                    ReimbursementDraft.operator_user_id == authority.operator_user_id,
                     ReimbursementDraft.revision == _draft_operation_revision(authority),
                     ReimbursementDraft.status.in_(_ACTIVE_DRAFT_STATUSES),
                 )
@@ -1458,6 +1477,7 @@ def _draft_owner_query(owner: DraftFileOwner) -> Select[tuple[ReimbursementDraft
         ReimbursementDraft.id == owner.draft_id,
         ReimbursementDraft.corp_id == owner.corp_id,
         ReimbursementDraft.owner_user_id == owner.user_id,
+        ReimbursementDraft.operator_user_id == owner.operator_user_id,
         ReimbursementDraft.revision == owner.expected_revision,
     )
 

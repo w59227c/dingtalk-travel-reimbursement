@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getMe, selectDepartmentFromTravelApproval } from '@/api/auth'
+import { getMe, getPublicConfig, selectDepartmentFromTravelApproval } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import type { AuthSession, ReimbursementDepartmentResolution } from '@/types/auth'
@@ -38,7 +38,58 @@ function session(userId = 'synthetic-user'): AuthSession {
 describe('authentication request ownership', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    sessionStorage.clear()
     setActivePinia(createPinia())
+  })
+
+  it('restores the selected employee only within the authenticated operator tab', async () => {
+    const own = { ...session(), canDelegateReimbursements: true }
+    const delegate: AuthSession = {
+      ...session('synthetic-beneficiary'), operator: own.user, canDelegateReimbursements: true,
+      reimbursementContext: 'synthetic-signed-context',
+    }
+    vi.mocked(getPublicConfig).mockResolvedValue({
+      corpId: 'synthetic-corp', clientId: 'synthetic-client', authMockEnabled: false, oaSubmissionEnabled: true,
+      uploadLimits: { maxFiles: 8, maxFileBytes: 1000, maxSessionBytes: 2000 },
+      expenseLimits: { maxItems: 8 },
+    })
+    vi.mocked(getMe).mockResolvedValueOnce(own)
+    const auth = useAuthStore()
+    await auth.bootstrap()
+    expect(auth.session?.user).toEqual(own.user)
+    auth.applyReimbursementContext(delegate)
+
+    vi.mocked(getMe).mockResolvedValueOnce(own).mockResolvedValueOnce(delegate)
+    const reloadedTab = useAuthStore(createPinia())
+    await reloadedTab.bootstrap()
+    expect(getMe).toHaveBeenLastCalledWith('synthetic-signed-context')
+    expect(reloadedTab.session?.user).toEqual(delegate.user)
+
+    vi.mocked(getMe).mockResolvedValueOnce({ ...own, canDelegateReimbursements: false })
+    const afterRevocation = useAuthStore(createPinia())
+    await afterRevocation.bootstrap()
+    expect(afterRevocation.session?.user).toEqual(own.user)
+    expect(afterRevocation.reimbursementContextNotice).toContain('已返回本人报销')
+    expect(sessionStorage.length).toBe(0)
+  })
+
+  it('opens the confirmed personal workspace when delegate restoration fails', async () => {
+    const own = { ...session(), canDelegateReimbursements: true }
+    vi.mocked(getPublicConfig).mockResolvedValue({
+      corpId: 'synthetic-corp', clientId: 'synthetic-client', authMockEnabled: false, oaSubmissionEnabled: true,
+      uploadLimits: { maxFiles: 8, maxFileBytes: 1000, maxSessionBytes: 2000 },
+      expenseLimits: { maxItems: 8 },
+    })
+    sessionStorage.setItem('reimbursement.delegation', JSON.stringify({
+      userId: own.user.userId, context: 'synthetic-signed-context',
+    }))
+    vi.mocked(getMe).mockResolvedValueOnce(own).mockRejectedValueOnce(new Error('目录暂时不可用'))
+    const auth = useAuthStore()
+    await auth.bootstrap()
+    expect(getMe).toHaveBeenLastCalledWith('synthetic-signed-context')
+    expect(auth.status).toBe('authenticated')
+    expect(auth.session).toEqual(own)
+    expect(auth.reimbursementContextNotice).toBe('暂时无法恢复代报，已返回本人报销')
   })
 
   it.each(['new-user', 'department-roundtrip'])('rejects a late department resolution after %s', async (change) => {

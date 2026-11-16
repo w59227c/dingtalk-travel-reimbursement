@@ -5,6 +5,7 @@ import ApprovalDiagnosticsCard from '@/components/settings/ApprovalDiagnosticsCa
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
 import OaTemplateSettingsCard from '@/components/settings/OaTemplateSettingsCard.vue'
 import ReceiptKeywordSettingsCard from '@/components/settings/ReceiptKeywordSettingsCard.vue'
+import ReimbursementDelegationSettingsCard from '@/components/settings/ReimbursementDelegationSettingsCard.vue'
 import SubmissionRecoveryCard from '@/components/settings/SubmissionRecoveryCard.vue'
 import SubsidyRateSettingsCard from '@/components/settings/SubsidyRateSettingsCard.vue'
 
@@ -38,6 +39,7 @@ const props = withDefaults(defineProps<{
           >
             系统设置
           </RouterLink>
+          <a href="#reimbursement-delegation">代报权限</a>
           <a href="#approval-diagnostics">审批诊断</a>
           <a href="#receipt-diagnostics">票据诊断</a>
           <a href="#attendance-calendar">节假日与调休</a>
@@ -50,6 +52,7 @@ const props = withDefaults(defineProps<{
 
     <ReceiptKeywordSettingsCard />
     <SubsidyRateSettingsCard />
+    <ReimbursementDelegationSettingsCard />
     <AttendanceCalendarSettingsCard :mobile="props.mobile" />
     <SubmissionRecoveryCard :mobile="props.mobile" />
     <ApprovalDiagnosticsCard :mobile="props.mobile" />

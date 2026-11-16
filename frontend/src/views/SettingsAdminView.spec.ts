@@ -13,7 +13,11 @@ import {
   listReceiptKeywords,
   updateReceiptKeyword,
 } from '@/api/receiptKeywords'
-import { getAdminExpenseSettings, updateExpenseSettings, type AdminExpenseSettings } from '@/api/settings'
+import {
+  getAdminExpenseSettings, getReimbursementDelegationSettings, listAdminDepartments,
+  lookupAdminDirectoryLabels, searchAdminEmployees, updateExpenseSettings, updateReimbursementDelegationSettings,
+  type AdminExpenseSettings,
+} from '@/api/settings'
 import SettingsAdminView from './SettingsAdminView.vue'
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
 import ReceiptKeywordSettingsCard from '@/components/settings/ReceiptKeywordSettingsCard.vue'
@@ -43,11 +47,103 @@ vi.mock('@/api/settings', async (importOriginal) => {
   return {
     ...actual,
     getAdminExpenseSettings: vi.fn(),
+    getReimbursementDelegationSettings: vi.fn(),
+    listAdminDepartments: vi.fn(),
+    lookupAdminDirectoryLabels: vi.fn(),
+    searchAdminEmployees: vi.fn(),
     updateExpenseSettings: vi.fn(),
+    updateReimbursementDelegationSettings: vi.fn(),
   }
 })
 
+beforeEach(() => {
+  vi.mocked(getReimbursementDelegationSettings).mockReset().mockResolvedValue({
+    employeeUserIds: [], departmentIds: [], revision: 'synthetic-delegation-v1',
+  })
+  vi.mocked(updateReimbursementDelegationSettings).mockReset().mockImplementation(async (value) => ({
+    ...value, revision: 'synthetic-delegation-v2',
+  }))
+  vi.mocked(listAdminDepartments).mockReset().mockImplementation(async parentId => parentId === '1'
+    ? [{ id: '201', name: '合成人事部' }] : [{ id: '302', name: '合成行政组' }])
+  vi.mocked(searchAdminEmployees).mockReset().mockResolvedValue([{ id: 'synthetic-user', name: '合成员工' }])
+  vi.mocked(lookupAdminDirectoryLabels).mockReset().mockImplementation(async (_kind, ids) =>
+    ids.map(id => ({ id, name: `已授权 ${id}` })))
+})
+
 describe('SettingsAdminView receipt keywords', () => {
+  it.each([false, true])('configures independent employee and department grants, mobile=%s', async (mobile) => {
+    const pinia = adminPinia()
+    const refresh = vi.spyOn(useAuthStore(pinia), 'refreshMe').mockResolvedValue(undefined)
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile }, global: { plugins: [pinia, ElementPlus], stubs: { RouterLink: true } },
+    })
+    try {
+      await flushPromises()
+      expect(wrapper.get('a[href="#reimbursement-delegation"]').text()).toBe('代报权限')
+      const card = wrapper.get('#reimbursement-delegation')
+      const departments = card.get('[aria-label="允许代报的部门"]')
+      await departments.findAll('button').find(button => button.text() === '选择部门')!.trigger('click')
+      await flushPromises()
+      await departments.get('input[type="checkbox"]').setValue(true)
+      await departments.get('button[aria-label="查看合成人事部的下级部门"]').trigger('click')
+      await flushPromises()
+      await departments.get('input[type="checkbox"]').setValue(true)
+      await departments.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+      const employees = card.get('[aria-label="允许代报的员工"]')
+      await employees.findAll('button').find(button => button.text() === '选择员工')!.trigger('click')
+      await flushPromises()
+      await employees.get('input[aria-label="员工姓名或 userId"]').setValue('合成员工')
+      await employees.findAll('button').find(button => button.text() === '搜索')!.trigger('click')
+      await flushPromises()
+      await employees.get('input[type="checkbox"]').setValue(true)
+      await employees.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+      await card.findAll('button').find(button => button.text() === '保存代报权限')!.trigger('click')
+      await flushPromises()
+      expect(updateReimbursementDelegationSettings).toHaveBeenCalledWith({
+        employeeUserIds: ['synthetic-user'], departmentIds: ['201', '302'], revision: 'synthetic-delegation-v1',
+      }, expect.any(AbortSignal))
+      expect(card.text()).toContain('代报权限已保存')
+      expect(card.text()).toContain('合成行政组')
+      expect(card.text()).toContain('合成员工')
+      expect(refresh).toHaveBeenCalledOnce()
+    } finally { wrapper.unmount(); refresh.mockRestore() }
+  })
+
+  it.each([false, true])('chooses additional admin departments and resolves existing employees, mobile=%s', async (mobile) => {
+    const settings: AdminExpenseSettings = {
+      revision: 'synthetic-settings-v1', appTitle: '报销系统', adminUserIds: ['existing-admin'],
+      adminDepartmentIds: [], environmentAdminUserIds: ['bootstrap-admin'], calculationMode: 'half_day_12',
+      subsidyRates: {
+        business: '100', short_term_project: '100', long_term_project: '100', same_city_project: '100',
+        short_term_internal: '100', long_term_internal: '100', short_term_overseas: '0', long_term_overseas: '0',
+      },
+    }
+    vi.mocked(getAdminExpenseSettings).mockResolvedValue(settings)
+    vi.mocked(updateExpenseSettings).mockImplementation(async value => value)
+    const pinia = adminPinia()
+    const refresh = vi.spyOn(useAuthStore(pinia), 'refreshMe').mockResolvedValue(undefined)
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile }, global: { plugins: [pinia, ElementPlus], stubs: { RouterLink: true } },
+    })
+    try {
+      await flushPromises()
+      expect(wrapper.get('[aria-label="额外管理员员工"]').text()).toContain('已授权 existing-admin')
+      expect(wrapper.get('[aria-label="配置文件管理员"]').find('button').exists()).toBe(false)
+      const field = wrapper.get('[aria-label="额外管理员部门"]')
+      await field.findAll('button').find(button => button.text() === '选择部门')!.trigger('click')
+      await flushPromises()
+      await field.get('input[type="checkbox"]').setValue(true)
+      await field.findAll('button').find(button => button.text() === '确定')!.trigger('click')
+      await wrapper.get('.settings-subsidy-card').findAll('button')
+        .find(button => button.text() === '保存设置')!.trigger('click')
+      await flushPromises()
+      expect(updateExpenseSettings).toHaveBeenCalledWith(expect.objectContaining({
+        adminUserIds: ['existing-admin'], adminDepartmentIds: ['201'], revision: settings.revision,
+      }))
+      expect(refresh).toHaveBeenCalledOnce()
+    } finally { wrapper.unmount(); refresh.mockRestore() }
+  })
+
   it.each([false, true])('locks the keyword editor and preserves queued edits during save, mobile=%s', async (mobile) => {
     vi.mocked(listReceiptKeywords).mockResolvedValue([])
     vi.mocked(updateReceiptKeyword).mockResolvedValue({ id: 1, keyword: '合成较新关键词', categoryId: 'office', categoryName: '办公费' })
@@ -125,6 +221,7 @@ describe('SettingsAdminView receipt keywords', () => {
     expect(getAdminExpenseSettings).not.toHaveBeenCalled()
     expect(listReceiptKeywords).not.toHaveBeenCalled()
     expect(listAttendanceCalendars).not.toHaveBeenCalled()
+    expect(getReimbursementDelegationSettings).not.toHaveBeenCalled()
     wrapper.unmount()
   })
   it.each([false, true])('locks settings during save and preserves any queued newer input, mobile=%s', async (mobile) => {

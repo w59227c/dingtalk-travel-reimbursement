@@ -23,6 +23,7 @@ ADMIN_USER_IDS_KEY = "admin_user_ids"
 DEFAULT_APP_TITLE = "智能差旅费报销申请"
 MAX_APP_TITLE_LENGTH = 40
 MAX_ADDITIONAL_ADMINS = 50
+MAX_ADMIN_DEPARTMENTS = 50
 
 RATE_KEYS: dict[TripType, str] = {
     TripType.BUSINESS: "subsidy_business_per_day",
@@ -70,9 +71,12 @@ class ExpenseSettings:
 class AdminSettingsSnapshot:
     settings: ExpenseSettings
     admin_user_ids: tuple[str, ...]
+    admin_department_ids: tuple[str, ...] = ()
 
     def as_api_dict(self) -> dict[str, object]:
         values = self.settings.as_api_dict() | {"adminUserIds": list(self.admin_user_ids)}
+        if self.admin_department_ids:
+            values["adminDepartmentIds"] = list(self.admin_department_ids)
         revision = hashlib.sha256(
             json.dumps(
                 values,
@@ -81,22 +85,25 @@ class AdminSettingsSnapshot:
                 separators=(",", ":"),
             ).encode()
         ).hexdigest()
-        return values | {"revision": revision}
+        return values | {
+            "adminDepartmentIds": list(self.admin_department_ids), "revision": revision
+        }
 
 
-def get_admin_settings_snapshot(database: Session) -> AdminSettingsSnapshot:
+def get_admin_settings_snapshot(database: Session, corp_id: str) -> AdminSettingsSnapshot:
     ensure_expense_setting_rows(database)
     database.rollback()
     # SQLite's legacy SELECT mode does not itself start a read transaction.
     # Keep the values and their revision in one database snapshot.
     database.connection().exec_driver_sql("BEGIN")
-    return _admin_settings_snapshot(database)
+    return _admin_settings_snapshot(database, corp_id)
 
 
-def _admin_settings_snapshot(database: Session) -> AdminSettingsSnapshot:
+def _admin_settings_snapshot(database: Session, corp_id: str) -> AdminSettingsSnapshot:
     return AdminSettingsSnapshot(
         get_expense_settings(database),
         tuple(sorted(get_additional_admin_ids(database))),
+        tuple(sorted(get_admin_department_ids(database, corp_id))),
     )
 
 
@@ -210,6 +217,35 @@ def get_additional_admin_ids(database: Session) -> frozenset[str]:
         return frozenset()
 
 
+def normalize_admin_departments(values: list[str]) -> tuple[str, ...]:
+    if len(values) > MAX_ADMIN_DEPARTMENTS or any(
+        not isinstance(item, str) or not 1 <= len(item) <= 19
+        or not item.isascii() or not item.isdecimal() or item.startswith("0")
+        or int(item) > 2**63 - 1
+        for item in values
+    ):
+        raise ValueError("invalid administrator department ID")
+    return tuple(sorted(set(values)))
+
+
+def _admin_department_key(corp_id: str) -> str:
+    return f"admin_department_ids:{hashlib.sha256(corp_id.encode()).hexdigest()}"
+
+
+def get_admin_department_ids(database: Session, corp_id: str) -> frozenset[str]:
+    row = database.get(Setting, _admin_department_key(corp_id), populate_existing=True)
+    if row is None:
+        return frozenset()
+    try:
+        values = json.loads(row.value)
+        if not isinstance(values, list):
+            raise ValueError
+        return frozenset(normalize_admin_departments(values))
+    except (ValueError, TypeError):
+        logger.error("Invalid stored administrator department configuration")
+        return frozenset()
+
+
 def get_app_title(database: Session) -> str:
     row = database.get(Setting, APP_TITLE_KEY)
     return DEFAULT_APP_TITLE if row is None else _validated_app_title(row)
@@ -222,15 +258,21 @@ def update_expense_settings(
     calculation_mode: str,
     app_title: str,
     additional_admin_ids: tuple[str, ...],
+    additional_admin_department_ids: tuple[str, ...] | None,
+    corp_id: str,
     expected_revision: str,
 ) -> AdminSettingsSnapshot:
     ensure_expense_setting_rows(database)
     database.rollback()
     database.connection().exec_driver_sql("BEGIN IMMEDIATE")
-    current = _admin_settings_snapshot(database)
+    current = _admin_settings_snapshot(database, corp_id)
     proposed = AdminSettingsSnapshot(
         ExpenseSettings(daily_rates, calculation_mode, app_title),
         tuple(sorted(set(additional_admin_ids))),
+        (
+            current.admin_department_ids if additional_admin_department_ids is None
+            else additional_admin_department_ids
+        ),
     )
     current_revision = current.as_api_dict()["revision"]
     # A response may have been lost after commit. Repeating identical values
@@ -253,5 +295,10 @@ def update_expense_settings(
     rows[ADMIN_USER_IDS_KEY].value = json.dumps(
         sorted(set(additional_admin_ids)), ensure_ascii=False, separators=(",", ":")
     )
+    if proposed.admin_department_ids != current.admin_department_ids:
+        database.merge(Setting(
+            key=_admin_department_key(corp_id),
+            value=json.dumps(proposed.admin_department_ids, separators=(",", ":")),
+        ))
     database.commit()
     return proposed

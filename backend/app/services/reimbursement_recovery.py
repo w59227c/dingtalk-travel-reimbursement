@@ -98,6 +98,7 @@ def workspace_reimbursements(
     actor: DraftActor,
 ) -> dict[str, object]:
     """Return the one current reimbursement, independently of task progress."""
+    actor.require_current_delegation(database)
     draft = database.scalar(
         _department_drafts(actor)
         .where(
@@ -134,6 +135,7 @@ def recover_failed_reimbursement(
         task = database.scalar(
             select(ReimbursementSubmission).where(
                 ReimbursementSubmission.draft_id == source.id,
+                ReimbursementSubmission.operator_user_id == actor.operator_user_id,
             )
         )
         if (
@@ -206,6 +208,7 @@ def recover_failed_reimbursement(
             target = ReimbursementDraft(
                 corp_id=actor.corp_id,
                 owner_user_id=actor.user_id,
+                operator_user_id=actor.operator_user_id,
                 department_id=actor.department_id,
                 department_name=actor.department_name,
                 template_process_code=catalog.reimbursement.process_code,
@@ -222,6 +225,7 @@ def recover_failed_reimbursement(
                 .where(
                     ReimbursementDraft.corp_id == actor.corp_id,
                     ReimbursementDraft.owner_user_id == actor.user_id,
+                    ReimbursementDraft.operator_user_id == actor.operator_user_id,
                     ReimbursementDraft.department_id == actor.department_id,
                     ReimbursementDraft.department_name == actor.department_name,
                 )

@@ -108,6 +108,7 @@ class WorkflowProcessInstance:
     created_at: str
     finished_at: str | None
     form_values: tuple[WorkflowFormValue, ...]
+    executed_cc_user_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,9 +481,34 @@ def normalize_process_instance(
             created_at=_required_bounded_text(result.get("createTime"), max_length=128),
             finished_at=_optional_bounded_text(result.get("finishTime"), max_length=128),
             form_values=tuple(form_values),
+            executed_cc_user_ids=_executed_cc_user_ids(result.get("operationRecords")),
         )
     except ValueError:
         raise _instance_detail_error() from None
+
+
+def _executed_cc_user_ids(operation_records: object) -> tuple[str, ...] | None:
+    """Read exact recipient IDs from executed carbon-copy operations."""
+    if not isinstance(operation_records, list):
+        return None
+    recipients: set[str] = set()
+    for record in operation_records:
+        if not isinstance(record, dict) or not isinstance(record.get("type"), str):
+            return None
+        if record["type"] != "PROCESS_CC":
+            continue
+        raw_recipients = record.get("ccUserIds")
+        if not isinstance(raw_recipients, list):
+            return None
+        for value in raw_recipients:
+            try:
+                user_id = _required_identifier(value, field_name="cc_user_id")
+            except ValueError:
+                return None
+            if user_id != value:
+                return None
+            recipients.add(user_id)
+    return tuple(sorted(recipients))
 
 
 def normalize_created_process_instance(

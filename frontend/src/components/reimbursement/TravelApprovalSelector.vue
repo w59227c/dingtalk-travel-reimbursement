@@ -17,6 +17,7 @@ const props = withDefaults(defineProps<{
   mobile?: boolean
   readonly?: boolean
   busy?: boolean
+  delegated?: boolean
   single?: boolean
   requiredStartDate?: string
   requiredEndDate?: string
@@ -25,6 +26,7 @@ const props = withDefaults(defineProps<{
   mobile: false,
   readonly: false,
   busy: false,
+  delegated: false,
   single: false,
   requiredStartDate: '',
   requiredEndDate: '',
@@ -288,6 +290,9 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
         <p v-else>
           可关联同一部门、公司、预算和出差类别的多张审批，日期可不连续。
         </p>
+        <p v-if="props.delegated">
+          代报时只显示该员工已通过且抄送给你的出差审批。
+        </p>
       </div>
       <el-tag
         class="travel-approval-count"
@@ -400,7 +405,7 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
       v-else-if="rows.length === 0"
       :description="localError || drafts.travelApprovalsError
         ? queryNeedsAdjustment ? '请调整查询日期后重新查询' : '审批查询未完成，请重试'
-        : '当前查询范围内没有已通过的出差审批'"
+        : props.delegated ? '当前查询范围内没有抄送给你的可关联审批' : '当前查询范围内没有已通过的出差审批'"
       :image-size="72"
     >
       <el-button

@@ -22,6 +22,7 @@ class ExcelPreviewTicket:
     expected_revision: int
     session_id_hash: str
     expires_at: datetime
+    reimbursement_context: str | None = None
 
 
 def issue_excel_preview_ticket(
@@ -32,6 +33,7 @@ def issue_excel_preview_ticket(
     secret: str,
     lifetime: timedelta = timedelta(seconds=60),
     now: datetime | None = None,
+    reimbursement_context: str | None = None,
 ) -> str:
     issued_at = _as_utc(now or datetime.now(UTC))
     if not draft_id or len(draft_id) > 128:
@@ -54,6 +56,8 @@ def issue_excel_preview_ticket(
         "e": int((issued_at + lifetime).timestamp()),
         "n": random_token(),
     }
+    if reimbursement_context is not None:
+        payload["c"] = reimbursement_context
     encoded = _encode_payload(payload)
     return f"{encoded}.{token_hash(encoded, secret)}"
 
@@ -77,7 +81,9 @@ def verify_excel_preview_ticket(
         payload = json.loads(_decode_payload(encoded))
     except (UnicodeDecodeError, ValueError):
         raise InvalidExcelPreviewTicket("ticket payload is invalid") from None
-    if not isinstance(payload, dict) or set(payload) != {"v", "d", "r", "s", "e", "n"}:
+    if not isinstance(payload, dict) or set(payload).difference({"c"}) != {
+        "v", "d", "r", "s", "e", "n"
+    }:
         raise InvalidExcelPreviewTicket("ticket claims are invalid")
     version = payload["v"]
     draft_id = payload["d"]
@@ -85,6 +91,11 @@ def verify_excel_preview_ticket(
     session_id_hash = payload["s"]
     expires_at_seconds = payload["e"]
     nonce = payload["n"]
+    reimbursement_context = payload.get("c")
+    if "c" in payload and not (
+        isinstance(reimbursement_context, str) and reimbursement_context
+    ):
+        raise InvalidExcelPreviewTicket("ticket reimbursement context is invalid")
     if version != _TICKET_VERSION:
         raise InvalidExcelPreviewTicket("ticket version is invalid")
     if not isinstance(draft_id, str) or not draft_id or len(draft_id) > 128:
@@ -108,6 +119,7 @@ def verify_excel_preview_ticket(
         expected_revision=revision,
         session_id_hash=session_id_hash,
         expires_at=expires_at,
+        reimbursement_context=reimbursement_context,
     )
 
 

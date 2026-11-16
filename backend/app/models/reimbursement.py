@@ -130,6 +130,8 @@ _RESUMABLE_SUBMISSION_STATUSES = (
 
 class ReimbursementDraft(Base):
     __tablename__ = "reimbursement_drafts"
+    # Keep legacy fixture rows insertable before the deferred operator column exists.
+    __mapper_args__ = {"eager_defaults": False}
     __table_args__ = (
         CheckConstraint(
             f"status IN ({_sql_values(ReimbursementDraftStatus)})",
@@ -171,6 +173,9 @@ class ReimbursementDraft(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     corp_id: Mapped[str] = mapped_column(String(128))
     owner_user_id: Mapped[str] = mapped_column(String(128))
+    operator_user_id: Mapped[str | None] = mapped_column(
+        String(128), server_default=text("NULL"), deferred=True
+    )
     status: Mapped[str] = mapped_column(
         String(32),
         default=ReimbursementDraftStatus.DRAFT.value,
@@ -389,6 +394,8 @@ class ReimbursementDraftFile(Base):
 
 class ReimbursementSubmission(Base):
     __tablename__ = "reimbursement_submissions"
+    # Keep legacy fixture rows insertable before the deferred operator column exists.
+    __mapper_args__ = {"eager_defaults": False}
     __table_args__ = (
         UniqueConstraint("draft_id", name="uq_reimbursement_submissions_draft_id"),
         UniqueConstraint(
@@ -506,6 +513,9 @@ class ReimbursementSubmission(Base):
     draft_id: Mapped[str] = mapped_column(String(36))
     corp_id: Mapped[str] = mapped_column(String(128))
     originator_user_id: Mapped[str] = mapped_column(String(128))
+    operator_user_id: Mapped[str | None] = mapped_column(
+        String(128), server_default=text("NULL"), deferred=True
+    )
     originator_union_id: Mapped[str] = mapped_column(String(128))
     originator_name: Mapped[str] = mapped_column(String(128))
     department_id: Mapped[str] = mapped_column(String(128))

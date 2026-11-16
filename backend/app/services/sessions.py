@@ -17,7 +17,7 @@ from app.core.errors import ApiError
 from app.core.security import random_token, token_hash, tokens_match
 from app.database.session import get_db
 from app.models.session import UserSession, utc_now
-from app.services.application_settings import get_additional_admin_ids
+from app.services.application_settings import get_additional_admin_ids, get_admin_department_ids
 from app.services.dingtalk import DepartmentIdentity, DingTalkIdentity
 
 
@@ -25,6 +25,44 @@ from app.services.dingtalk import DepartmentIdentity, DingTalkIdentity
 class CurrentSession:
     record: UserSession
     departments: tuple[DepartmentIdentity, ...]
+    beneficiary: DingTalkIdentity | None = None
+    beneficiary_department: DepartmentIdentity | None = None
+    reimbursement_context: str | None = None
+    reimbursement_operator_department_ids: tuple[str, ...] = ()
+
+    @property
+    def reimbursement_user_id(self) -> str:
+        return self.beneficiary.user_id if self.beneficiary else self.record.dingtalk_user_id
+
+    @property
+    def reimbursement_union_id(self) -> str:
+        return self.beneficiary.union_id if self.beneficiary else self.record.dingtalk_union_id
+
+    @property
+    def reimbursement_name(self) -> str:
+        return self.beneficiary.name if self.beneficiary else self.record.name
+
+    @property
+    def reimbursement_department_id(self) -> str | None:
+        if self.beneficiary:
+            return self.beneficiary_department.id if self.beneficiary_department else None
+        return self.record.current_department_id
+
+    @property
+    def reimbursement_department_name(self) -> str | None:
+        if self.beneficiary:
+            return self.beneficiary_department.name if self.beneficiary_department else None
+        return self.record.current_department_name
+
+    @property
+    def reimbursement_departments(self) -> tuple[DepartmentIdentity, ...]:
+        if self.beneficiary:
+            return selectable_departments(self.beneficiary.departments)
+        return self.departments
+
+    @property
+    def reimbursement_operator_user_id(self) -> str | None:
+        return self.record.dingtalk_user_id if self.beneficiary else None
 
 
 class SessionCleanupGate:
@@ -89,25 +127,31 @@ def serialize_departments(departments: tuple[DepartmentIdentity, ...]) -> str:
     return json.dumps(
         [
             {"id": item.id, "name": item.name}
-            for item in selectable_departments(departments)
+            for item in departments
         ],
         ensure_ascii=False,
         separators=(",", ":"),
     )
 
 
-def deserialize_departments(raw: str) -> tuple[DepartmentIdentity, ...]:
+def _deserialize_directory_departments(raw: str) -> tuple[DepartmentIdentity, ...]:
     try:
         values = json.loads(raw)
-        return selectable_departments(
-            tuple(
-                DepartmentIdentity(id=str(item["id"]), name=str(item["name"]))
-                for item in values
-                if isinstance(item, dict) and item.get("id") and item.get("name")
-            )
+        return tuple(
+            DepartmentIdentity(id=str(item["id"]).strip(), name=str(item["name"]).strip())
+            for item in values
+            if isinstance(item, dict) and item.get("id") and item.get("name")
         )
     except (TypeError, ValueError, KeyError):
         return ()
+
+
+def deserialize_departments(raw: str) -> tuple[DepartmentIdentity, ...]:
+    return selectable_departments(_deserialize_directory_departments(raw))
+
+
+def session_directory_department_ids(record: UserSession) -> tuple[str, ...]:
+    return tuple(item.id for item in _deserialize_directory_departments(record.departments_json))
 
 
 def purge_expired_sessions(database: Session) -> None:
@@ -173,7 +217,7 @@ def create_session(
         dingtalk_union_id=identity.union_id,
         name=identity.name,
         corp_id=settings.dingtalk_corp_id,
-        departments_json=serialize_departments(departments),
+        departments_json=serialize_departments(identity.departments),
         current_department_id=selected.id if selected else None,
         current_department_name=selected.name if selected else None,
         csrf_token_hash=token_hash(csrf_token, settings.session_secret),
@@ -216,25 +260,36 @@ def get_session_csrf(
     return csrf_token
 
 
-def session_payload(current: CurrentSession, csrf_token: str) -> dict[str, object]:
+def session_payload(
+    current: CurrentSession, csrf_token: str, *, can_delegate: bool = False,
+    is_admin: bool | None = None,
+) -> dict[str, object]:
     record = current.record
-    return {
+    payload = {
         "user": {
-            "userId": record.dingtalk_user_id,
-            "name": record.name,
+            "userId": current.reimbursement_user_id,
+            "name": current.reimbursement_name,
         },
-        "departments": [{"id": item.id, "name": item.name} for item in current.departments],
+        "departments": [
+            {"id": item.id, "name": item.name} for item in current.reimbursement_departments
+        ],
         "selectedDepartment": (
             {
-                "id": record.current_department_id,
-                "name": record.current_department_name,
+                "id": current.reimbursement_department_id,
+                "name": current.reimbursement_department_name,
             }
-            if record.current_department_id and record.current_department_name
+            if current.reimbursement_department_id and current.reimbursement_department_name
             else None
         ),
-        "isAdmin": record.is_admin,
+        "isAdmin": record.is_admin if is_admin is None else is_admin,
         "csrfToken": csrf_token,
     }
+    if can_delegate:
+        payload["canDelegateReimbursements"] = True
+    if current.beneficiary:
+        payload["operator"] = {"userId": record.dingtalk_user_id, "name": record.name}
+        payload["reimbursementContext"] = current.reimbursement_context
+    return payload
 
 
 def get_current_session(
@@ -310,23 +365,61 @@ def require_csrf(
 def require_selected_department(current: CurrentSession) -> str:
     """Return the trusted department name or reject an incomplete reimbursement context."""
 
-    department_name = current.record.current_department_name
-    if not current.record.current_department_id or not department_name:
+    department_name = current.reimbursement_department_name
+    if not current.reimbursement_department_id or not department_name:
         raise ApiError("DEPARTMENT_REQUIRED", "请先选择本次报销部门", 409)
     return department_name
 
 
-def require_admin(
+async def has_admin_access(
+    request: Request, database: Session, current: CurrentSession, *, fresh_directory: bool = False,
+) -> bool:
+    record = current.record
+    settings = _configured_settings(request)
+    user_id = record.dingtalk_user_id
+    if user_id in (settings.admin_ids | get_additional_admin_ids(database)):
+        return True
+    corp_id = record.corp_id
+    department_ids = get_admin_department_ids(database, corp_id)
+    if not department_ids:
+        return False
+    session_id = record.session_id_hash
+    database.rollback()
+    try:
+        employee = await request.app.state.dingtalk_service.get_employee_identity(
+            user_id, fresh=fresh_directory
+        )
+    except ApiError as exc:
+        if exc.code == "REIMBURSEMENT_EMPLOYEE_NOT_FOUND":
+            return False
+        raise
+    database.expire_all()
+    live = get_current_session(request, database)
+    if live.record.session_id_hash != session_id:
+        raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
+    return live.record.is_admin or (
+        live.record.dingtalk_union_id == employee.union_id
+        and not get_admin_department_ids(database, corp_id).isdisjoint(
+            item.id for item in employee.departments
+        )
+    )
+
+
+async def require_admin(
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(get_current_session)],
 ) -> CurrentSession:
-    if not current.record.is_admin:
+    if not await has_admin_access(request, database, current):
         raise ApiError("FORBIDDEN", "仅管理员可以执行此操作", status.HTTP_403_FORBIDDEN)
     return current
 
 
-def require_admin_csrf(
+async def require_admin_csrf(
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(require_csrf)],
 ) -> CurrentSession:
-    if not current.record.is_admin:
+    if not await has_admin_access(request, database, current, fresh_directory=True):
         raise ApiError("FORBIDDEN", "仅管理员可以执行此操作", status.HTTP_403_FORBIDDEN)
     return current

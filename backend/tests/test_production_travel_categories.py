@@ -267,6 +267,7 @@ async def test_worker_rejects_changed_source_even_when_target_is_same(monkeypatc
         process_code=snapshot.template.process_code,
         originator_user_id=snapshot.identity.user_id,
         originator_union_id=snapshot.identity.union_id,
+        operator_user_id=None,
         department_id=int(snapshot.identity.department_id),
         snapshot_json=serialize_snapshot(snapshot),
         snapshot_sha256=snapshot_sha256(snapshot),

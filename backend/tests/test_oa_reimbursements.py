@@ -17,8 +17,9 @@ from app.integrations.dingtalk.workflow import (
     WorkflowInstanceIdPage,
     WorkflowProcessInstance,
 )
+from app.models.session import UserSession
 from app.models.setting import Setting
-from app.services.sessions import get_current_session
+from app.services.sessions import CurrentSession, get_current_session
 
 
 def _profile():
@@ -134,8 +135,9 @@ def _client(monkeypatch, *, catalog=None, workflow=None) -> TestClient:
     Setting.__table__.create(engine)
     database_session_factory = sessionmaker(engine)
     application.state.database_session_factory = database_session_factory
-    application.dependency_overrides[get_current_session] = lambda: SimpleNamespace(
-        record=SimpleNamespace(dingtalk_user_id="employee-1")
+    application.dependency_overrides[get_current_session] = lambda: CurrentSession(
+        record=UserSession(session_id_hash="a" * 64, dingtalk_user_id="employee-1"),
+        departments=(),
     )
 
     async def ready_catalog(received_factory, received_workflow):

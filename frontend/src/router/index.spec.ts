@@ -29,6 +29,21 @@ describe.each([
     await router.push(home!); await router.push(settings!)
     expect(router.currentRoute.value.path).toBe(home)
   })
+
+  it('returns to reimbursement when refreshing a delegated session fails', async () => {
+    const auth = useAuthStore(pinia)
+    auth.session = { user: { userId: 'synthetic-beneficiary', name: '合成报销人' }, operator: { userId: 'synthetic-admin', name: '合成管理员' }, departments: [], selectedDepartment: null, csrfToken: 'synthetic-csrf', isAdmin: true }
+    vi.spyOn(auth, 'bootstrap').mockResolvedValue(undefined)
+    const refresh = vi.spyOn(auth, 'refreshMe').mockResolvedValue(undefined)
+    await router.push(settings!)
+    expect(router.currentRoute.value.path).toBe(settings)
+
+    refresh.mockRejectedValue(new Error('network unavailable'))
+    await router.push(home!)
+
+    expect(refresh).toHaveBeenCalledTimes(2)
+    expect(router.currentRoute.value.path).toBe(home)
+  })
 })
 
 describe('application routes', () => {

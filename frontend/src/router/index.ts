@@ -37,7 +37,7 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach(async (to) => {
+router.beforeEach(async (to, from) => {
   const auth = useAuthStore(pinia)
   const existingSession = !!auth.session
   await auth.bootstrap()
@@ -49,6 +49,11 @@ router.beforeEach(async (to) => {
   }
   if (to.meta.requiresAdmin && !auth.isAdmin) {
     return { name: to.name === 'mobile-admin-settings' ? 'mobile-reimburse' : 'reimburse' }
+  }
+  if (from.meta.requiresAdmin && auth.session?.operator && (to.name === 'reimburse' || to.name === 'mobile-reimburse')) {
+    // Recheck the delegation after settings, including an administrator's own revoked grant.
+    try { await auth.refreshMe() }
+    catch { /* The reimbursement page checks scope when loading the workspace and surfaces failures. */ }
   }
   return true
 })

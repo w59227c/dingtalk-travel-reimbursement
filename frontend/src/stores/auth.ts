@@ -10,7 +10,8 @@ import {
   logout as logoutRequest,
   selectDepartmentFromTravelApproval as selectDepartmentFromTravelApprovalRequest,
 } from '@/api/auth'
-import { setCsrfToken, setUnauthorizedHandler } from '@/api/http'
+import { apiErrorCode } from '@/api/errors'
+import { setCsrfToken, setReimbursementContext, setUnauthorizedHandler } from '@/api/http'
 import type { AuthSession, ReimbursementDepartmentResolution } from '@/types/auth'
 import type { ReimbursementRelatedApprovalSelection } from '@/types/reimbursements'
 import { requestDingTalkAuthCode } from '@/utils/dingtalk'
@@ -27,24 +28,59 @@ export type AuthStatus =
   | 'unauthorized'
   | 'error'
 
+const reimbursementTabKey = 'reimbursement.delegation'
+
+function actualUserId(session: AuthSession | null): string | undefined {
+  return session?.operator?.userId ?? session?.user.userId
+}
+
+function cachedContext(forUser: string): string | null {
+  try {
+    const raw = sessionStorage.getItem(reimbursementTabKey)
+    if (!raw) return null
+    const value = JSON.parse(raw) as { userId?: unknown; context?: unknown } | null
+    return value && typeof value.context === 'string' && value.userId === forUser ? value.context : null
+  } catch { return null }
+}
+
+function rememberContext(session: AuthSession | null): void {
+  try {
+    if (session?.operator && session.reimbursementContext) {
+      sessionStorage.setItem(reimbursementTabKey, JSON.stringify({
+        userId: session.operator.userId,
+        context: session.reimbursementContext,
+      }))
+    } else sessionStorage.removeItem(reimbursementTabKey)
+  } catch { /* A denied storage operation affects only reload restoration. */ }
+}
+
+export function isDelegationContextError(error: unknown): boolean {
+  const code = apiErrorCode(error)
+  return code === 'REIMBURSEMENT_DELEGATION_FORBIDDEN' || code === 'REIMBURSEMENT_CONTEXT_INVALID'
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const status = ref<AuthStatus>('idle')
   const session = ref<AuthSession | null>(null)
   const errorMessage = ref('')
   const appTitle = ref('智能差旅费报销申请')
+  const reimbursementContextNotice = ref('')
   let bootstrapPromise: Promise<void> | null = null
   let scopeGeneration = 0
   let identityReadVersion = 0
   let departmentRequestVersion = 0
-  watch(() => [status.value, session.value?.user.userId, session.value?.selectedDepartment?.id,
-    session.value?.selectedDepartment?.name, session.value?.csrfToken], () => { scopeGeneration++ }, { flush: 'sync' })
+  watch(() => [status.value, actualUserId(session.value), session.value?.user.userId, session.value?.selectedDepartment?.id,
+    session.value?.selectedDepartment?.name, session.value?.csrfToken, session.value?.reimbursementContext],
+  () => { scopeGeneration++ }, { flush: 'sync' })
 
   const initialized = computed(() => status.value !== 'idle' && status.value !== 'loading')
   const isAdmin = computed(() => session.value?.isAdmin === true)
 
   function sameSessionScope(left: AuthSession | null, right: AuthSession): boolean {
     return left?.user.userId === right.user.userId
+      && actualUserId(left) === actualUserId(right)
       && left.selectedDepartment?.id === right.selectedDepartment?.id
+      && left.selectedDepartment?.name === right.selectedDepartment?.name
   }
 
   function applySession(value: AuthSession): void {
@@ -55,10 +91,20 @@ export const useAuthStore = defineStore('auth', () => {
         useReimbursementSubmissionStore().reset()
       }
     }
-    session.value = value
+    setReimbursementContext(value.reimbursementContext ?? null)
     setCsrfToken(value.csrfToken)
+    rememberContext(value)
+    session.value = value
     status.value = value.selectedDepartment ? 'authenticated' : 'department_required'
     errorMessage.value = ''
+  }
+
+  function applyReimbursementContext(value: AuthSession): void {
+    if (!session.value || actualUserId(value) !== actualUserId(session.value)) {
+      throw new Error('登录人已变化，请重新进入报销')
+    }
+    applySession(value)
+    reimbursementContextNotice.value = ''
   }
 
   function clearAsUnauthorized(): void {
@@ -66,7 +112,10 @@ export const useAuthStore = defineStore('auth', () => {
     useReimbursementDraftStore().reset()
     useReimbursementSubmissionStore().reset()
     session.value = null
+    setReimbursementContext(null)
     setCsrfToken(null)
+    rememberContext(null)
+    reimbursementContextNotice.value = ''
     if (status.value !== 'loading') status.value = 'unauthorized'
   }
 
@@ -74,7 +123,16 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function refreshMe(): Promise<void> {
     const generation = scopeGeneration, version = ++identityReadVersion
-    const value = await getMe()
+    let value: AuthSession
+    try {
+      value = await getMe()
+    } catch (error) {
+      if (!session.value?.operator || !isDelegationContextError(error)
+        || generation !== scopeGeneration || version !== identityReadVersion) throw error
+      value = await getMe(null)
+      if (generation !== scopeGeneration || version !== identityReadVersion) return
+      reimbursementContextNotice.value = '代报权限或办理对象已变化，已返回本人报销'
+    }
     if (generation !== scopeGeneration || version !== identityReadVersion) return
     applySession(value)
   }
@@ -94,7 +152,30 @@ export const useAuthStore = defineStore('auth', () => {
     errorMessage.value = ''
     const config = await refreshPublicConfig()
     try {
-      await refreshMe()
+      if (session.value) {
+        await refreshMe()
+        return
+      }
+      setReimbursementContext(null)
+      const ownSession = await getMe()
+      const context = cachedContext(ownSession.user.userId)
+      if (context && ownSession.canDelegateReimbursements) {
+        try {
+          const delegated = await getMe(context)
+          if (delegated.operator?.userId === ownSession.user.userId && delegated.reimbursementContext) {
+            applySession(delegated)
+            return
+          }
+        } catch (error) {
+          if (axios.isAxiosError(error) && error.response?.status === 401) throw error
+          reimbursementContextNotice.value = isDelegationContextError(error)
+            ? '代报权限或办理对象已变化，已返回本人报销'
+            : '暂时无法恢复代报，已返回本人报销'
+        }
+      } else if (context) {
+        reimbursementContextNotice.value = '代报权限已变化，已返回本人报销'
+      }
+      applySession(ownSession)
       return
     } catch (error) {
       if (!axios.isAxiosError(error) || error.response?.status !== 401) throw error
@@ -166,6 +247,11 @@ export const useAuthStore = defineStore('auth', () => {
       throw new Error('登录或部门状态已变化，请在当前页面重新选择审批')
     }
     session.value.departments = resolution.departments
+    if (resolution.reimbursementContext) {
+      setReimbursementContext(resolution.reimbursementContext)
+      session.value.reimbursementContext = resolution.reimbursementContext
+      rememberContext(session.value)
+    }
     if (resolution.selectedDepartment) {
       const scopeChanged = session.value.selectedDepartment?.id !== resolution.selectedDepartment.id
       if (scopeChanged) {
@@ -201,6 +287,8 @@ export const useAuthStore = defineStore('auth', () => {
     initialized,
     isAdmin,
     appTitle,
+    reimbursementContextNotice,
+    applyReimbursementContext,
     bootstrap,
     refreshMe,
     refreshPublicConfig,

@@ -17,6 +17,7 @@ const callbacks = vi.hoisted(() => ({ unauthorized: null as (() => void) | null 
 
 vi.mock('@/api/http', () => ({
   setCsrfToken: vi.fn(),
+  setReimbursementContext: vi.fn(),
   setUnauthorizedHandler: vi.fn((handler: () => void) => {
     callbacks.unauthorized = handler
   }),

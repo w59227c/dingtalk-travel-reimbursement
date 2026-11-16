@@ -14,12 +14,20 @@ export interface AuthSession {
   selectedDepartment: Department | null
   isAdmin: boolean
   csrfToken: string
+  canDelegateReimbursements?: boolean
+  operator?: AuthUser
+  reimbursementContext?: string
+}
+
+export interface ReimbursementEmployee extends AuthUser {
+  departmentNames?: string[]
 }
 
 export interface ReimbursementDepartmentResolution {
   selectedDepartment: Department | null
   selectionRequired: boolean
   departments: Department[]
+  reimbursementContext?: string
 }
 
 export interface PublicConfig {

@@ -7,19 +7,28 @@ import { onBeforeRouteLeave, useRouter } from 'vue-router'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
 import ApprovalAccountingLine from '@/components/reimbursement/ApprovalAccountingLine.vue'
+import ReimbursementEmployeePicker from '@/components/reimbursement/ReimbursementEmployeePicker.vue'
 import ReimbursementReviewOverview from '@/components/reimbursement/ReimbursementReviewOverview.vue'
 import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vue'
 import ReimbursementAttentionNotice from '@/components/reimbursement/ReimbursementAttentionNotice.vue'
 import TravelApprovalSelector from '@/components/reimbursement/TravelApprovalSelector.vue'
 import TripSubsidyCard from '@/components/reimbursement/TripSubsidyCard.vue'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
-import { getReimbursementDraft, listReimbursementSubmissionHistory, listWorkspaceReimbursements } from '@/api/reimbursements'
+import { prepareReimbursementContext } from '@/api/auth'
+import {
+  createReimbursementDraft,
+  getOaReimbursementOptions,
+  getReimbursementDraft,
+  listReimbursementSubmissionHistory,
+  listWorkspaceReimbursements,
+} from '@/api/reimbursements'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useHealthStore } from '@/stores/health'
-import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
+import { readConsistentDraft, useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { useReimbursementSubmissionStore } from '@/stores/reimbursementSubmission'
 import { isForeignExpense, type TripType } from '@/types/expenses'
+import type { AuthSession, ReimbursementEmployee } from '@/types/auth'
 import type {
   ReimbursementDraft,
   ReimbursementDraftInput,
@@ -66,6 +75,10 @@ const selectedRelatedApprovals = ref<ReimbursementRelatedApprovalSelection[]>([]
 const initializingWorkspace = ref(false)
 const initializationError = ref('')
 const departmentBindingError = ref('')
+const employeePickerOpen = ref(false)
+const reimbursementSwitchError = ref('')
+const switchingReimbursement = ref(false)
+let reimbursementSwitchRequest: AbortController | undefined
 const bindingApprovalDepartment = ref(false)
 const pendingDepartmentApproval = ref<ReimbursementRelatedApprovalSelection | null>(null)
 const selectedDepartmentChoiceId = ref('')
@@ -269,9 +282,11 @@ const activeMaterialRecovery = computed(() => Boolean(drafts.currentDraft?.recov
   && !drafts.currentDraft.workspaceRetired && !draftExpired.value && !draftUnavailable.value))
 const canReplaceOutdatedForm = computed(() => templateMismatch.value && Boolean(drafts.currentDraft
   && ['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status))
-  && !trackedSubmission.value && !submitFlowPending.value && !initializingWorkspace.value && !workspaceConfirmationRequired.value)
+  && !trackedSubmission.value && !submitFlowPending.value && !initializingWorkspace.value && !workspaceConfirmationRequired.value
+  && !switchingReimbursement.value)
 const formReadOnly = computed(() => !drafts.currentDraft || submitFlowPending.value
   || Boolean(initializationError.value)
+  || switchingReimbursement.value
   || bindingApprovalDepartment.value
   || workspaceConfirmationRequired.value
   || draftUnavailable.value
@@ -281,6 +296,7 @@ const formReadOnly = computed(() => !drafts.currentDraft || submitFlowPending.va
 const formReadOnlyReason = computed(() => {
   if (!drafts.currentDraft) return '正在准备报销表单'
   if (initializationError.value) return '请先重新加载当前报销'
+  if (switchingReimbursement.value) return '正在切换报销人，请稍候'
   if (bindingApprovalDepartment.value) return '正在确认报销部门，请稍候'
   if (workspaceConfirmationRequired.value) return '请先核对当前报销，确认新开结果后继续'
   if (drafts.currentDraft.workspaceRetired) return '已新开另一笔报销，请重新进入当前报销'
@@ -395,6 +411,23 @@ const excelOnlySubmission = computed(() => !expense.items.length
   && hasValidSubsidy.value && !hasActiveMaterials.value)
 const awaitingMaterialUpload = computed(() => drafts.pendingUploads.length > 0
   || drafts.files.some((file) => file.status === 'RESERVED' || file.status === 'WRITING'))
+const reimbursementSubject = computed(() => JSON.stringify([
+  auth.session?.operator?.userId, auth.session?.user.userId,
+]))
+const reimbursementSwitchBlock = computed(() => {
+  if (switchingReimbursement.value || initializingWorkspace.value || bindingApprovalDepartment.value
+    || pendingDepartmentApproval.value || verifyingRelatedApprovals.value || submitFlowPending.value
+    || submission.submitting || recoveringReimbursement.value || replacingTemplate.value
+    || confirmingDraftReload.value || workspaceConfirmationRequired.value) return '请等待当前操作完成'
+  if (expenseItemsCard.value?.hasUnpersistedFailedUploads) return '请先重试或移除尚未上传成功的文件'
+  if (awaitingMaterialUpload.value || drafts.processingFiles || drafts.files.some(
+    (file) => file.status === 'ACTIVE' && file.ocrStatus === 'RUNNING' && file.ocrStale !== true,
+  )) return '请等待本批文件上传和识别完成'
+  if (expenseItemsCard.value?.hasOpenMaterialEditor) return '请先完成材料编辑'
+  if (drafts.busy || saving.value || refreshingMaterialStatus.value) return '请等待当前报销操作完成'
+  if (saveRequiresReload.value) return '请先核对最新报销内容'
+  return ''
+})
 const attachmentNames = computed(() => {
   const draft = drafts.currentDraft
   if (draft?.status === 'LOCKED') {
@@ -460,7 +493,7 @@ const hasRestartableReimbursement = computed(() => Boolean(drafts.currentDraft
     || expense.includeSubsidy)))
 const canStartNewReimbursement = computed(() => Boolean(drafts.currentDraft && !historyOrigin.value
   && hasRestartableReimbursement.value && !initializingWorkspace.value && !drafts.currentDraft.workspaceRetired
-  && !bindingApprovalDepartment.value && !verifyingRelatedApprovals.value && !pendingDepartmentApproval.value
+  && !switchingReimbursement.value && !bindingApprovalDepartment.value && !verifyingRelatedApprovals.value && !pendingDepartmentApproval.value
   && !workspaceConfirmationRequired.value && !recoveringReimbursement.value && !submitFlowPending.value && !submission.submitting))
 const submittedResult = computed(() => trackedSubmission.value && submission.succeeded
   ? submission.submission : null)
@@ -468,6 +501,7 @@ const submittedReimbursement = computed(() => drafts.currentDraft?.status === 'L
   && hydratedLockedDraftId.value === drafts.currentDraft.id ? submittedResult.value : null)
 const receiptDetails = computed(() => drafts.currentDraft?.submittedDetails)
 const canOpenHistory = computed(() => Boolean(drafts.currentDraft && !historyOrigin.value
+  && !switchingReimbursement.value
   && !bindingApprovalDepartment.value && !verifyingRelatedApprovals.value && !pendingDepartmentApproval.value
   && !workspaceConfirmationRequired.value && !submitFlowPending.value && !submission.submitting && !recoveringReimbursement.value))
 const showHeaderNewReimbursement = computed(() => auth.status === 'authenticated' && drafts.currentDraft
@@ -600,7 +634,7 @@ function sessionIdentity(): string {
   const user = auth.session?.user.userId
   const department = auth.session?.selectedDepartment
   return auth.status === 'authenticated' && user && department
-    ? JSON.stringify([user, department.id, department.name]) : ''
+    ? JSON.stringify([user, auth.session?.operator?.userId, department.id, department.name]) : ''
 }
 function sessionScope(): string {
   const identity = sessionIdentity()
@@ -878,6 +912,26 @@ async function confirmCurrentWorkspace(): Promise<void> {
     if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
+function emptyReimbursementInput(): ReimbursementDraftInput {
+  return {
+    ocrDispositionVersion: 1,
+    companyValue: '',
+    budgetCodeValue: '',
+    trip: null,
+    trips: [],
+    editingState: {
+      includeSubsidy: false,
+      trip: {
+        tripType: 'business', startDate: '', startTime: '09:00', endDate: '', endTime: '18:00',
+        policyConfirmed: false, confirmedEffectiveDays: '', noSubsidyException: false,
+      },
+      trips: [],
+    },
+    items: [],
+    dismissedOcrFileIds: [],
+  }
+}
+
 async function openEditableReimbursement(
   replaceCurrent = false,
   context = beginWorkspaceRead(),
@@ -886,23 +940,7 @@ async function openEditableReimbursement(
     ? { id: drafts.currentDraft.id, revision: drafts.currentDraft.revision } : undefined
   let created: ReimbursementDraft
   try {
-    created = await drafts.createDraft({
-      ocrDispositionVersion: 1,
-      companyValue: '',
-      budgetCodeValue: '',
-      trip: null,
-      trips: [],
-      editingState: {
-        includeSubsidy: false,
-        trip: {
-          tripType: 'business', startDate: '', startTime: '09:00', endDate: '', endTime: '18:00',
-          policyConfirmed: false, confirmedEffectiveDays: '', noSubsidyException: false,
-        },
-        trips: [],
-      },
-      items: [],
-      dismissedOcrFileIds: [],
-    }, true, auth.session?.selectedDepartment ?? undefined, previous)
+    created = await drafts.createDraft(emptyReimbursementInput(), true, auth.session?.selectedDepartment ?? undefined, previous)
   } catch (error) {
     if (!acceptsWorkspaceRead(context)) return false
     if (!previous || drafts.currentDraft?.id !== previous.id) throw error
@@ -923,6 +961,92 @@ async function openEditableReimbursement(
   if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== created.id) return false
   if (templateMismatch.value) await drafts.loadReimbursementOptions()
   return acceptsWorkspaceRead(context) && drafts.currentDraft?.id === created.id
+}
+
+async function prepareReimbursementWorkspace(target: AuthSession, signal: AbortSignal) {
+  if (!target.selectedDepartment) return null
+  const request = { signal, reimbursementContext: target.reimbursementContext ?? null }
+  const expectedDepartment = target.selectedDepartment
+  const [workspace, options] = await Promise.all([
+    listWorkspaceReimbursements({ ...request, expectedDepartment }),
+    getOaReimbursementOptions(request),
+  ])
+  const recent = workspace.items[0] ?? await createReimbursementDraft(emptyReimbursementInput(), {
+    ...request, reuseExisting: true, expectedDepartment,
+  })
+  const read = await readConsistentDraft(recent.id, request)
+  if (read.draft.workspaceRetired || read.draft.department.id !== expectedDepartment.id
+    || read.draft.department.name !== expectedDepartment.name) {
+    throw new Error('目标报销已发生变化，请重新选择报销人')
+  }
+  return { read, options }
+}
+
+async function switchReimbursementEmployee(userId: string | null): Promise<void> {
+  const origin = auth.session
+  if (!origin || (!origin.canDelegateReimbursements && !origin.operator) || reimbursementSwitchBlock.value) return
+  if (userId === origin.user.userId || (userId === null && !origin.operator)) {
+    employeePickerOpen.value = false
+    return
+  }
+  const formWasReadOnly = formReadOnly.value
+  const oldScope = sessionScope()
+  const draftId = drafts.currentDraft?.id
+  const request = new AbortController()
+  const accepts = () => !disposed && !request.signal.aborted && auth.session === origin
+    && oldScope === sessionScope() && draftId === drafts.currentDraft?.id
+  reimbursementSwitchRequest = request
+  reimbursementSwitchError.value = ''
+  switchingReimbursement.value = true
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  try {
+    if (draftId && hasUnsavedUserChanges.value && formWasReadOnly) throw new Error('本页还有未保存的内容，请处理后再切换报销人')
+    if (!formWasReadOnly && (formDirty.value || savePromise)) await flushAutosave()
+    if (!accepts()) return
+    if (draftId && hasUnsavedUserChanges.value) throw new Error('当前报销还有未保存的内容，请确认保存后再切换')
+    const target = await prepareReimbursementContext(userId, request.signal)
+    if (!accepts()) return
+    if (userId === null ? Boolean(target.operator || target.reimbursementContext)
+      : target.user.userId !== userId || !target.operator || !target.reimbursementContext) {
+      throw new Error('返回的报销人不匹配，请重新选择')
+    }
+    const workspace = await prepareReimbursementWorkspace(target, request.signal)
+    if (!accepts()) return
+    if (draftId && hasUnsavedUserChanges.value) throw new Error('当前报销还有未保存的内容，请确认保存后再切换')
+    auth.applyReimbursementContext(target)
+    employeePickerOpen.value = false
+    mobileStep.value = 0
+    if (workspace) {
+      drafts.restoreWorkspace(workspace.read, workspace.options)
+      initializedScope = sessionScope()
+      void showWorkspaceReimbursement(workspace.read.draft)
+    } else {
+      initializationError.value = ''
+      companyValue.value = ''
+      budgetCodeValue.value = ''
+      selectedRelatedApprovals.value = []
+      savedInputSignature.value = ''
+      savedRelatedSignature.value = ''
+      editableInputBaseline.value = ''
+    }
+  } catch (error) {
+    if (accepts()) reimbursementSwitchError.value = apiErrorMessage(error, '无法切换报销人，请重试')
+  } finally {
+    if (reimbursementSwitchRequest === request) {
+      reimbursementSwitchRequest = undefined
+      switchingReimbursement.value = false
+      if (!saveError.value) scheduleAutosave()
+    }
+  }
+}
+
+function openReimbursementEmployeePicker(): void {
+  reimbursementSwitchError.value = ''
+  employeePickerOpen.value = true
+}
+
+function chooseReimbursementEmployee(employee: ReimbursementEmployee): void {
+  void switchReimbursementEmployee(employee.userId === auth.session?.operator?.userId ? null : employee.userId)
 }
 async function runWorkspaceInitialization(scope: string): Promise<void> {
   const context = beginWorkspaceRead()
@@ -1048,7 +1172,7 @@ async function flushAutosave(options: { includeRelated?: boolean } = {}): Promis
   })
 }
 onBeforeRouteLeave(async (to) => {
-  if (recoveringReimbursement.value || submitFlowPending.value || bindingApprovalDepartment.value || replacingTemplate.value
+  if (switchingReimbursement.value || recoveringReimbursement.value || submitFlowPending.value || bindingApprovalDepartment.value || replacingTemplate.value
     || initializingWorkspace.value || verifyingRelatedApprovals.value || pendingDepartmentApproval.value) {
     ElMessage.warning('请等待当前操作完成，或先完成部门选择')
     return false
@@ -1154,10 +1278,12 @@ async function confirmAndSubmit(): Promise<void> {
   let failureTarget: AttentionKind | undefined
   submitFlowPending.value = true
   try {
+    const subject = auth.session?.operator
+      ? `报销人：${auth.session.user.name}（${auth.session.selectedDepartment?.name ?? ''}）。` : ''
     await ElMessageBox.confirm(
-      excelOnlySubmission.value
+      subject + (excelOnlySubmission.value
         ? '核对无误后将生成报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。'
-        : '核对无误后将生成票据汇总 PDF 和报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。',
+        : '核对无误后将生成票据汇总 PDF 和报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。'),
       '提交报销申请', { confirmButtonText: '确认提交', cancelButtonText: '返回检查', type: 'warning' },
     )
     if (!acceptsSubmit()) return
@@ -1827,6 +1953,7 @@ onMounted(() => window.addEventListener('beforeunload', warnBeforeUnload))
 onBeforeUnmount(() => {
   if (recoveryRefreshTimer) clearTimeout(recoveryRefreshTimer)
   disposed = true
+  reimbursementSwitchRequest?.abort()
   historyRequest?.abort()
   if (calculationTimer) clearTimeout(calculationTimer)
   if (autosaveTimer) clearTimeout(autosaveTimer)
@@ -1875,7 +2002,7 @@ onBeforeUnmount(() => {
               class="hero-link hero-return-link"
               :icon="ArrowLeft"
               :loading="initializingWorkspace"
-              :disabled="submission.submitting || refreshingServiceStatus"
+              :disabled="submission.submitting || refreshingServiceStatus || switchingReimbursement"
               @click="returnFromHistory"
             >
               返回当前报销
@@ -1923,6 +2050,46 @@ onBeforeUnmount(() => {
           {{ props.mobile
             ? '关联审批、核对补助、整理材料，最后统一提交 OA。'
             : '关联审批、核对补助和费用，自动生成报销单并提交 OA。' }}
+        </p>
+        <div
+          v-if="(auth.session?.canDelegateReimbursements || auth.session?.operator)
+            && ['authenticated', 'department_required'].includes(auth.status)"
+          class="reimbursement-subject"
+          aria-label="为谁报销"
+        >
+          <strong data-testid="reimbursement-subject-name">{{ auth.session?.operator
+            ? `正在为${auth.session.user.name}报销` : '为本人报销' }}</strong>
+          <el-button
+            v-if="auth.session?.canDelegateReimbursements"
+            type="primary"
+            link
+            :disabled="Boolean(reimbursementSwitchBlock)"
+            data-testid="select-reimbursement-employee"
+            @click="openReimbursementEmployeePicker"
+          >
+            {{ auth.session.operator ? '更换报销人' : '帮同事报销' }}
+          </el-button>
+          <el-button
+            v-if="auth.session?.operator"
+            link
+            :disabled="Boolean(reimbursementSwitchBlock)"
+            data-testid="return-to-personal-reimbursement"
+            @click="switchReimbursementEmployee(null)"
+          >
+            返回本人报销
+          </el-button>
+          <small
+            v-if="reimbursementSwitchBlock"
+            class="reimbursement-switch-note"
+            role="status"
+          >{{ switchingReimbursement ? '正在切换报销人…' : reimbursementSwitchBlock }}</small>
+        </div>
+        <p
+          v-if="auth.reimbursementContextNotice || (!employeePickerOpen && reimbursementSwitchError)"
+          class="reimbursement-switch-note"
+          role="alert"
+        >
+          {{ reimbursementSwitchError || auth.reimbursementContextNotice }}
         </p>
       </div>
       <div
@@ -1988,9 +2155,11 @@ onBeforeUnmount(() => {
         请选择本次报销对应的已通过出差审批。系统优先匹配审批的发起部门，无法匹配当前部门时再请你确认。
       </p>
       <TravelApprovalSelector
+        :key="reimbursementSubject"
         :model-value="selectedRelatedApprovals"
         :mobile="props.mobile"
-        :busy="bindingApprovalDepartment"
+        :busy="bindingApprovalDepartment || switchingReimbursement"
+        :delegated="Boolean(auth.session?.operator)"
         single
         @update:model-value="chooseTravelApprovalForDepartment"
       />
@@ -2606,7 +2775,9 @@ onBeforeUnmount(() => {
               </el-descriptions>
 
               <TravelApprovalSelector
+                :key="reimbursementSubject"
                 ref="approvalSelector"
+                :delegated="Boolean(auth.session?.operator)"
                 :model-value="selectedRelatedApprovals"
                 :mobile="props.mobile"
                 :linked-approvals="drafts.currentDraft.relatedApprovals"
@@ -3089,6 +3260,12 @@ onBeforeUnmount(() => {
         </el-button>
       </template>
     </el-dialog>
+    <ReimbursementEmployeePicker
+      v-model="employeePickerOpen"
+      :switching="switchingReimbursement"
+      :switch-error="reimbursementSwitchError"
+      @choose="chooseReimbursementEmployee"
+    />
   </main>
 </template>
 
@@ -3098,6 +3275,10 @@ onBeforeUnmount(() => {
 .hero-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .hero-links { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
 .hero-links .el-button { margin: 0; }
+.reimbursement-subject { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; margin-top: 9px; }
+.reimbursement-subject > .el-button { margin: 0; }
+.reimbursement-switch-note { color: var(--el-text-color-secondary); margin: 0; }
+p.reimbursement-switch-note { margin: 8px 0 0; }
 .hero-link {
   display: inline-flex;
   flex: none;

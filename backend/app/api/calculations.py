@@ -11,10 +11,12 @@ from app.domain.categories import EXPENSE_CATEGORIES
 from app.domain.expenses import calculate_expense_totals
 from app.schemas.common import success
 from app.schemas.expenses import TotalsRequest
+from app.services.reimbursement_context import (
+    get_reimbursement_session,
+    require_reimbursement_csrf,
+)
 from app.services.sessions import (
     CurrentSession,
-    get_current_session,
-    require_csrf,
     require_selected_department,
 )
 from app.services.subsidy_calculation import calculate_trip_subsidies, request_trips
@@ -24,7 +26,7 @@ router = APIRouter(tags=["reimbursement"])
 
 @router.get("/expense-categories")
 def expense_categories(
-    _current: Annotated[CurrentSession, Depends(get_current_session)],
+    _current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
 ) -> dict[str, object]:
     return success([item.as_api_dict() for item in EXPENSE_CATEGORIES])
 
@@ -34,7 +36,7 @@ def totals(
     body: TotalsRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
     require_selected_department(current)
     max_items = request.app.state.settings.expense_max_items

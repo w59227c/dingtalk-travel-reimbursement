@@ -247,13 +247,16 @@ def test_generated_reservation_is_owned_by_the_active_submission_lease(
     engine.dispose()
 
 
+@pytest.mark.parametrize("operator_user_id", [None, "synthetic-operator"])
 def test_draft_file_reservation_moves_to_writing_and_finalizes_with_cas(
     tmp_path: Path,
+    operator_user_id: str | None,
 ) -> None:
     engine = create_database_engine(f"sqlite:///{tmp_path / 'quota.db'}")
     Base.metadata.create_all(engine)
     with Session(engine) as database:
         draft = _new_draft()
+        draft.operator_user_id = operator_user_id
         database.add(draft)
         database.commit()
         draft_id = draft.id
@@ -263,7 +266,7 @@ def test_draft_file_reservation_moves_to_writing_and_finalizes_with_cas(
     )
     staging.prepare()
     coordinator = ReimbursementQuotaCoordinator(engine, staging, max_bytes=100)
-    owner = DraftFileOwner("corp-test", "employee-1", draft_id, 1)
+    owner = DraftFileOwner("corp-test", "employee-1", draft_id, 1, operator_user_id)
     reservation = coordinator.reserve_draft_file(
         owner,
         sort_order=0,
@@ -282,7 +285,17 @@ def test_draft_file_reservation_moves_to_writing_and_finalizes_with_cas(
         assert row.file_status == "WRITING"
 
     staged = staging.write_bytes(reservation.staging, b"verified-content")
-    coordinator.finalize(owner, reservation, staged)
+    if operator_user_id is None:
+        coordinator.finalize(owner, reservation, staged)
+    else:
+        wrong_owner = DraftFileOwner("corp-test", "employee-1", draft_id, 1)
+        with pytest.raises(ReimbursementReservationConflict):
+            coordinator.finalize(wrong_owner, reservation, staged)
+        actor = DraftActor(
+            "corp-test", "employee-1", "department-1", "测试部门",
+            operator_user_id=operator_user_id,
+        )
+        assert coordinator.finalize_draft_file(owner, reservation, staged, actor=actor) == 2
 
     with Session(engine) as database:
         row = database.get(ReimbursementDraftFile, reservation.record_id)

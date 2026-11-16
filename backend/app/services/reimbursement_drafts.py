@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import Select, delete, func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import Select, and_, delete, func, or_, select, update
+from sqlalchemy.orm import Session, undefer
 
 from app.core.config import Settings
 from app.core.errors import ApiError
@@ -28,6 +28,7 @@ from app.models.reimbursement import (
     ReimbursementSubmissionStatus,
     utc_now,
 )
+from app.models.session import UserSession
 from app.schemas.excel import ExcelExpenseItemInput
 from app.schemas.expenses import TripInput
 from app.schemas.reimbursements import (
@@ -41,8 +42,9 @@ from app.services.oa_template_profiles import (
     OaTemplateCatalogContract,
     require_submission_ready_catalog,
 )
+from app.services.reimbursement_delegation_policy import require_delegation_permission_for_session
 from app.services.reimbursement_ocr_state import recover_stale_running_ocr
-from app.services.sessions import CurrentSession, require_selected_department
+from app.services.sessions import CurrentSession
 from app.services.subsidy_calculation import (
     calculate_trip_subsidies,
     request_trips,
@@ -68,6 +70,28 @@ class DraftActor:
     department_id: str
     department_name: str
     available_department_ids: tuple[str, ...] = ()
+    operator_user_id: str | None = None
+    session_id_hash: str | None = None
+    operator_department_ids: tuple[str, ...] = ()
+
+    def require_current_delegation(self, database: Session) -> None:
+        # Recheck after remote or filesystem work using the caller's transaction.
+        # Internal maintenance actors are reconstructed from an existing draft.
+        if self.operator_user_id is None or self.session_id_hash is None:
+            return
+        session = database.scalar(
+            select(UserSession)
+            .where(
+                UserSession.session_id_hash == self.session_id_hash,
+                UserSession.corp_id == self.corp_id,
+                UserSession.dingtalk_user_id == self.operator_user_id,
+                UserSession.expires_at > utc_now(),
+            )
+            .execution_options(populate_existing=True)
+        )
+        if session is None:
+            raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
+        require_delegation_permission_for_session(database, session, self.operator_department_ids)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,11 +119,13 @@ class CatalogBinding:
 
 
 def draft_actor(current: CurrentSession) -> DraftActor:
-    department_name = require_selected_department(current)
-    department_id = str(current.record.current_department_id)
+    department_name = current.reimbursement_department_name
+    department_id = current.reimbursement_department_id
+    if not department_id or not department_name:
+        raise ApiError("DEPARTMENT_REQUIRED", "请先选择本次报销部门", 409)
     if not any(
         department.id == department_id and department.name == department_name
-        for department in current.departments
+        for department in current.reimbursement_departments
     ):
         raise ApiError(
             "INVALID_DEPARTMENT_CONTEXT",
@@ -107,7 +133,7 @@ def draft_actor(current: CurrentSession) -> DraftActor:
             409,
         )
     corp_id = str(current.record.corp_id or "").strip()
-    user_id = str(current.record.dingtalk_user_id or "").strip()
+    user_id = str(current.reimbursement_user_id or "").strip()
     if not corp_id or not user_id:
         raise ApiError("UNAUTHORIZED", "登录身份数据无效，请重新进入", 401)
     return DraftActor(
@@ -115,7 +141,15 @@ def draft_actor(current: CurrentSession) -> DraftActor:
         user_id=user_id,
         department_id=department_id,
         department_name=department_name,
-        available_department_ids=tuple(department.id for department in current.departments),
+        available_department_ids=tuple(
+            department.id for department in current.reimbursement_departments
+        ),
+        operator_user_id=current.reimbursement_operator_user_id,
+        session_id_hash=(
+            current.record.session_id_hash
+            if current.reimbursement_operator_user_id is not None else None
+        ),
+        operator_department_ids=current.reimbursement_operator_department_ids,
     )
 
 
@@ -125,13 +159,33 @@ def require_owned_draft(
     draft_id: str,
     actor: DraftActor,
     mutable: bool = False,
+    allow_submitted_beneficiary: bool = False,
     now: datetime | None = None,
 ) -> ReimbursementDraft:
+    actor.require_current_delegation(database)
+    operator = ReimbursementDraft.operator_user_id == actor.operator_user_id
+    if allow_submitted_beneficiary and not mutable and actor.operator_user_id is None:
+        operator = or_(
+            operator,
+            and_(
+                ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
+                select(ReimbursementSubmission.id)
+                .where(
+                    ReimbursementSubmission.draft_id == ReimbursementDraft.id,
+                    ReimbursementSubmission.corp_id == ReimbursementDraft.corp_id,
+                    ReimbursementSubmission.originator_user_id == ReimbursementDraft.owner_user_id,
+                    ReimbursementSubmission.operator_user_id == ReimbursementDraft.operator_user_id,
+                    ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
+                )
+                .exists(),
+            ),
+        )
     draft = database.scalar(
         select(ReimbursementDraft).where(
             ReimbursementDraft.id == draft_id,
             ReimbursementDraft.corp_id == actor.corp_id,
             ReimbursementDraft.owner_user_id == actor.user_id,
+            operator,
         )
     )
     if draft is None:
@@ -149,7 +203,9 @@ def require_previewable_draft(
     actor: DraftActor,
     expected_revision: int | None = None,
 ) -> ReimbursementDraft:
-    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    draft = require_owned_draft(
+        database, draft_id=draft_id, actor=actor, allow_submitted_beneficiary=True
+    )
     if expected_revision is not None and draft.revision != expected_revision:
         raise _revision_conflict_error()
     # Historical locked snapshots remain previewable after workspace retirement.
@@ -180,12 +236,14 @@ def bump_owned_draft_revision(
     ):
         raise ValueError("expected_revision must be a positive integer")
     changed_at = now or utc_now()
+    actor.require_current_delegation(database)
     result = database.execute(
         update(ReimbursementDraft)
         .where(
             ReimbursementDraft.id == draft_id,
             ReimbursementDraft.corp_id == actor.corp_id,
             ReimbursementDraft.owner_user_id == actor.user_id,
+            ReimbursementDraft.operator_user_id == actor.operator_user_id,
             ReimbursementDraft.department_id == actor.department_id,
             ReimbursementDraft.department_name == actor.department_name,
             ReimbursementDraft.revision == expected_revision,
@@ -260,6 +318,7 @@ def create_reimbursement_draft(
     try:
         # Serialize current-record selection, retirement and creation across tabs.
         database.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        actor.require_current_delegation(database)
         catalog = require_submission_ready_catalog(database)
         created_at = now or utc_now()
         binding = CatalogBinding.from_catalog(catalog)
@@ -303,6 +362,7 @@ def create_reimbursement_draft(
                 .where(
                     ReimbursementDraft.corp_id == actor.corp_id,
                     ReimbursementDraft.owner_user_id == actor.user_id,
+                    ReimbursementDraft.operator_user_id == actor.operator_user_id,
                     ReimbursementDraft.department_id == actor.department_id,
                     ReimbursementDraft.department_name == actor.department_name,
                 )
@@ -311,6 +371,7 @@ def create_reimbursement_draft(
         draft = ReimbursementDraft(
             corp_id=actor.corp_id,
             owner_user_id=actor.user_id,
+            operator_user_id=actor.operator_user_id,
             status=ReimbursementDraftStatus.DRAFT.value,
             revision=1,
             department_id=actor.department_id,
@@ -341,6 +402,7 @@ def list_reimbursement_drafts(
     limit: int,
     now: datetime | None = None,
 ) -> dict[str, object]:
+    actor.require_current_delegation(database)
     statement = _department_drafts(actor)
     total = database.scalar(select(func.count()).select_from(statement.subquery())) or 0
     drafts = database.scalars(
@@ -367,15 +429,23 @@ def list_reimbursement_submission_history(
 ) -> list[dict[str, object]]:
     from app.services.oa_reimbursement_payload import parse_locked_submission_snapshot
 
+    actor.require_current_delegation(database)
     rows = database.execute(
-        _department_drafts(actor)
+        _department_drafts(actor, include_beneficiary_history=actor.operator_user_id is None)
         .add_columns(ReimbursementSubmission)
+        .options(
+            undefer(ReimbursementDraft.operator_user_id),
+            undefer(ReimbursementSubmission.operator_user_id),
+        )
         .join(ReimbursementSubmission, ReimbursementSubmission.draft_id == ReimbursementDraft.id)
         .where(
             ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
             ReimbursementDraft.locked_at.is_not(None),
             ReimbursementSubmission.corp_id == actor.corp_id,
             ReimbursementSubmission.originator_user_id == actor.user_id,
+            ReimbursementSubmission.operator_user_id.is_not_distinct_from(
+                ReimbursementDraft.operator_user_id
+            ),
             ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
         )
         .order_by(ReimbursementDraft.locked_at.desc(), ReimbursementDraft.id.desc())
@@ -395,13 +465,18 @@ def list_reimbursement_submission_history(
     return results
 
 
-def _department_drafts(actor: DraftActor) -> Select[tuple[ReimbursementDraft]]:
-    return select(ReimbursementDraft).where(
+def _department_drafts(
+    actor: DraftActor, *, include_beneficiary_history: bool = False
+) -> Select[tuple[ReimbursementDraft]]:
+    statement = select(ReimbursementDraft).where(
         ReimbursementDraft.corp_id == actor.corp_id,
         ReimbursementDraft.owner_user_id == actor.user_id,
         ReimbursementDraft.department_id == actor.department_id,
         ReimbursementDraft.department_name == actor.department_name,
     )
+    if include_beneficiary_history:
+        return statement
+    return statement.where(ReimbursementDraft.operator_user_id == actor.operator_user_id)
 
 
 def get_reimbursement_draft(
@@ -411,7 +486,9 @@ def get_reimbursement_draft(
     draft_id: str,
     now: datetime | None = None,
 ) -> dict[str, object]:
-    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    draft = require_owned_draft(
+        database, draft_id=draft_id, actor=actor, allow_submitted_beneficiary=True
+    )
     return draft_data(database, draft, now=now)
 
 
@@ -547,6 +624,7 @@ def mark_reimbursement_draft_review_ready(
                 ReimbursementDraft.id == draft_id,
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
+                ReimbursementDraft.operator_user_id == actor.operator_user_id,
                 ReimbursementDraft.department_id == actor.department_id,
                 ReimbursementDraft.department_name == actor.department_name,
                 ReimbursementDraft.revision == expected_revision,
@@ -627,6 +705,7 @@ async def replace_related_approvals(
             catalog,
             current_user_id=actor.user_id,
             selections=domain_selections,
+            required_cc_user_id=actor.operator_user_id,
         )
         if domain_selections
         else None

@@ -16,7 +16,59 @@ export interface ExpenseSettings {
 export interface AdminExpenseSettings extends ExpenseSettings {
   revision: string
   adminUserIds: string[]
+  adminDepartmentIds?: string[]
   environmentAdminUserIds: string[]
+}
+
+export type DirectoryKind = 'department' | 'employee'
+
+export interface DirectoryEntry {
+  id: string
+  name: string
+}
+
+export async function listAdminDepartments(parentId: string, signal?: AbortSignal): Promise<DirectoryEntry[]> {
+  const response = await http.get<ApiEnvelope<{ items: DirectoryEntry[] }>>('/admin/directory/departments', {
+    params: { parentId }, signal,
+  })
+  return response.data.data.items
+}
+
+export async function searchAdminEmployees(q: string, signal?: AbortSignal): Promise<DirectoryEntry[]> {
+  const response = await http.get<ApiEnvelope<{ items: DirectoryEntry[] }>>('/admin/directory/employees', {
+    params: { q }, signal,
+  })
+  return response.data.data.items
+}
+
+export async function lookupAdminDirectoryLabels(kind: DirectoryKind, ids: string[], signal?: AbortSignal): Promise<DirectoryEntry[]> {
+  const response = await http.get<ApiEnvelope<{ items: DirectoryEntry[] }>>('/admin/directory/labels', {
+    params: { kind, ids }, paramsSerializer: { indexes: null }, signal,
+  })
+  return response.data.data.items
+}
+
+export interface ReimbursementDelegationSettings {
+  employeeUserIds: string[]
+  departmentIds: string[]
+  revision: string
+}
+
+export async function getReimbursementDelegationSettings(signal?: AbortSignal): Promise<ReimbursementDelegationSettings> {
+  const response = await http.get<ApiEnvelope<ReimbursementDelegationSettings>>('/admin/reimbursement-delegation', { signal })
+  return response.data.data
+}
+
+export async function updateReimbursementDelegationSettings(
+  value: ReimbursementDelegationSettings,
+  signal?: AbortSignal,
+): Promise<ReimbursementDelegationSettings> {
+  const response = await http.put<ApiEnvelope<ReimbursementDelegationSettings>>('/admin/reimbursement-delegation', {
+    employeeUserIds: value.employeeUserIds,
+    departmentIds: value.departmentIds,
+    expectedRevision: value.revision,
+  }, { signal })
+  return response.data.data
 }
 
 export async function getAdminExpenseSettings(): Promise<AdminExpenseSettings> {
@@ -51,6 +103,7 @@ export async function updateExpenseSettings(
     expectedRevision: input.revision,
     appTitle: input.appTitle,
     adminUserIds: input.adminUserIds,
+    adminDepartmentIds: input.adminDepartmentIds,
     subsidyRates: normalizedRates,
     calculationMode: input.calculationMode,
   })

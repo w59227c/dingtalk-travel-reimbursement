@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, delete, exists, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
+from sqlalchemy.sql import ColumnElement
 
 from app.core.errors import ApiError
 from app.models.reimbursement import (
@@ -502,6 +503,7 @@ def create_submission(
     """
 
     _require_actor(actor)
+    actor.require_current_delegation(database)
     normalized_draft_id = _required_text(draft_id, maximum=36)
     idempotency_hash = _idempotency_hash(idempotency_key)
 
@@ -534,6 +536,7 @@ def create_submission(
             ReimbursementDraft.id == normalized_draft_id,
             ReimbursementDraft.corp_id == actor.corp_id,
             ReimbursementDraft.owner_user_id == actor.user_id,
+            ReimbursementDraft.operator_user_id == actor.operator_user_id,
         )
     )
     if draft is None:
@@ -596,6 +599,7 @@ def create_submission(
                 ReimbursementDraft.id == draft.id,
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
+                ReimbursementDraft.operator_user_id == actor.operator_user_id,
                 ReimbursementDraft.department_id == actor.department_id,
                 ReimbursementDraft.department_name == actor.department_name,
                 ReimbursementDraft.revision == expected_revision,
@@ -639,11 +643,13 @@ def create_submission(
                 now=created_at,
             )
 
+        actor.require_current_delegation(database)
         submission = ReimbursementSubmission(
             id=submission_id,
             draft_id=draft.id,
             corp_id=actor.corp_id,
             originator_user_id=actor.user_id,
+            operator_user_id=actor.operator_user_id,
             originator_union_id=normalized_union_id,
             originator_name=normalized_name,
             department_id=draft.department_id,
@@ -703,14 +709,19 @@ def require_owned_submission(
     *,
     actor: DraftActor,
     submission_id: str,
+    allow_submitted_beneficiary: bool = False,
 ) -> ReimbursementSubmission:
     _require_actor(actor)
+    actor.require_current_delegation(database)
     normalized_id = _required_text(submission_id, maximum=36)
     submission = database.scalar(
         select(ReimbursementSubmission).where(
             ReimbursementSubmission.id == normalized_id,
             ReimbursementSubmission.corp_id == actor.corp_id,
             ReimbursementSubmission.originator_user_id == actor.user_id,
+            _submission_operator_scope(
+                actor, allow_submitted_beneficiary=allow_submitted_beneficiary
+            ),
         )
     )
     if submission is None:
@@ -732,15 +743,18 @@ def find_owned_submission_for_draft(
     *,
     actor: DraftActor,
     draft_id: str,
+    allow_submitted_beneficiary: bool = False,
 ) -> ReimbursementSubmission | None:
     """Find the one-shot submission before rebuilding a now-locked snapshot."""
 
     _require_actor(actor)
+    actor.require_current_delegation(database)
     normalized_draft_id = _required_text(draft_id, maximum=36)
     return _owned_submission_for_draft(
         database,
         actor=actor,
         draft_id=normalized_draft_id,
+        allow_submitted_beneficiary=allow_submitted_beneficiary,
     )
 
 
@@ -2464,6 +2478,7 @@ def _leased_submission_update(
             "id",
             "corp_id",
             "originator_user_id",
+            "operator_user_id",
             "status_version",
             "lease_owner",
             "lease_token",
@@ -2627,16 +2642,31 @@ def _owned_submission_for_draft(
     *,
     actor: DraftActor,
     draft_id: str,
+    allow_submitted_beneficiary: bool = False,
 ) -> ReimbursementSubmission | None:
     return database.scalar(
         select(ReimbursementSubmission).where(
             ReimbursementSubmission.draft_id == draft_id,
             ReimbursementSubmission.corp_id == actor.corp_id,
             ReimbursementSubmission.originator_user_id == actor.user_id,
+            _submission_operator_scope(
+                actor, allow_submitted_beneficiary=allow_submitted_beneficiary
+            ),
             ReimbursementSubmission.department_id == actor.department_id,
             ReimbursementSubmission.department_name == actor.department_name,
         )
     )
+
+
+def _submission_operator_scope(
+    actor: DraftActor, *, allow_submitted_beneficiary: bool
+) -> ColumnElement[bool]:
+    operator = ReimbursementSubmission.operator_user_id == actor.operator_user_id
+    if allow_submitted_beneficiary and actor.operator_user_id is None:
+        return operator | (
+            ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value
+        )
+    return operator
 
 
 def _create_result(
@@ -2694,6 +2724,7 @@ def _raise_current_draft_conflict(
             ReimbursementDraft.id == draft_id,
             ReimbursementDraft.corp_id == actor.corp_id,
             ReimbursementDraft.owner_user_id == actor.user_id,
+            ReimbursementDraft.operator_user_id == actor.operator_user_id,
         )
     )
     if current is None:
@@ -2721,6 +2752,8 @@ def _require_actor(actor: DraftActor) -> None:
         raise ValueError("draft actor is required")
     _required_text(actor.corp_id, maximum=128)
     _required_text(actor.user_id, maximum=128)
+    if actor.operator_user_id is not None:
+        _required_text(actor.operator_user_id, maximum=128)
     _required_text(actor.department_id, maximum=128)
     _required_text(actor.department_name, maximum=255)
 

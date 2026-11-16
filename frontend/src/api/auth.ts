@@ -1,9 +1,10 @@
-import { http } from './http'
+import { http, reimbursementContextHeaders } from './http'
 import type {
   ApiEnvelope,
   AuthSession,
   PublicConfig,
   ReimbursementDepartmentResolution,
+  ReimbursementEmployee,
 } from '@/types/auth'
 import type { ReimbursementRelatedApprovalSelection } from '@/types/reimbursements'
 
@@ -22,9 +23,25 @@ export async function loginWithMock(): Promise<AuthSession> {
   return response.data.data
 }
 
-export async function getMe(): Promise<AuthSession> {
-  const response = await http.get<ApiEnvelope<AuthSession>>('/me')
+export async function getMe(reimbursementContext?: string | null): Promise<AuthSession> {
+  const response = await http.get<ApiEnvelope<AuthSession>>('/me', {
+    headers: reimbursementContextHeaders(reimbursementContext),
+  })
   return response.data.data
+}
+
+export async function prepareReimbursementContext(userId: string | null, signal?: AbortSignal): Promise<AuthSession> {
+  const response = await http.post<ApiEnvelope<AuthSession>>(
+    '/me/reimbursement-context', { userId }, { signal, timeout: 30_000 },
+  )
+  return response.data.data
+}
+
+export async function listReimbursementEmployees(query: string, signal?: AbortSignal): Promise<ReimbursementEmployee[]> {
+  const response = await http.get<ApiEnvelope<{ items: ReimbursementEmployee[] }>>(
+    '/me/reimbursement-employees', { params: { q: query }, signal, timeout: 30_000 },
+  )
+  return response.data.data.items
 }
 
 export async function selectDepartmentFromTravelApproval(

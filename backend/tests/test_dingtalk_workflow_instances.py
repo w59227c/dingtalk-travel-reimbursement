@@ -13,6 +13,7 @@ from app.integrations.dingtalk.workflow import (
     DingTalkProcessInstanceCreateOutcomeUnknown,
     DingTalkProcessInstanceCreateRejected,
     DingTalkWorkflowClient,
+    normalize_process_instance,
 )
 
 LIST_PATH = "/v1.0/workflow/processes/instanceIds/query"
@@ -380,7 +381,41 @@ async def test_get_process_instance_uses_query_and_normalizes_documented_fields(
     assert instance.form_values[0].component_id == "start-date-id"
     assert instance.form_values[0].value == "2026-09-01"
     assert instance.form_values[0].ext_value == "2026年9月1日"
+    assert instance.executed_cc_user_ids is None
     assert not hasattr(instance, "process_code")
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        (
+            [
+                {"type": "START_PROCESS", "userId": "employee-1", "ccUserIds": ["ignored"]},
+                {"type": "PROCESS_CC", "ccUserIds": ["hr-2", "hr-1"]},
+                {"type": "PROCESS_CC", "ccUserIds": ["hr-1"]},
+            ],
+            ("hr-1", "hr-2"),
+        ),
+        ([{"type": "FINISH_PROCESS", "ccUserIds": ["hr-1"]}], ()),
+        (None, None),
+        ({"type": "PROCESS_CC", "ccUserIds": ["hr-1"]}, None),
+        ([{"type": "PROCESS_CC"}], None),
+        ([{"type": "PROCESS_CC", "ccUserIds": "hr-1"}], None),
+        ([{"type": "PROCESS_CC", "ccUserIds": ["hr-1", 15]}], None),
+        ([{"type": "PROCESS_CC", "ccUserIds": [" hr-1 "]}], None),
+    ],
+)
+def test_process_instance_uses_only_executed_cc_operations_as_recipient_evidence(
+    records: object,
+    expected: tuple[str, ...] | None,
+) -> None:
+    instance = normalize_process_instance(
+        "instance-1",
+        process_instance_payload(operationRecords=records, ccUserIds=["top-level-only"]),
+    )
+
+    assert instance.executed_cc_user_ids == expected
+    assert instance.originator_user_id == "employee-1"
 
 
 @pytest.mark.asyncio

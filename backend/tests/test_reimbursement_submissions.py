@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -80,6 +81,7 @@ def _new_ready_draft(
     draft = ReimbursementDraft(
         corp_id=actor.corp_id,
         owner_user_id=actor.user_id,
+        operator_user_id=actor.operator_user_id,
         status=ReimbursementDraftStatus.REVIEW_READY.value,
         revision=4,
         department_id=actor.department_id,
@@ -136,6 +138,27 @@ def _create(
         snapshot_sha256=hashlib.sha256(snapshot.encode()).hexdigest(),
         now=now,
     )
+
+
+def test_delegated_submission_records_operator_and_isolates_pending_status(database):
+    delegate = replace(_ACTOR, operator_user_id="hr-one")
+    another_delegate = replace(_ACTOR, operator_user_id="hr-two")
+    draft, _ = _new_ready_draft(database, actor=delegate)
+    for actor in (_ACTOR, another_delegate):
+        with pytest.raises(ApiError) as exc:
+            _create(database, draft, actor=actor)
+        assert exc.value.status_code == 404
+    result = _create(database, draft, actor=delegate)
+    task = require_owned_submission(database, actor=delegate, submission_id=result.submission_id)
+    assert task.originator_user_id == _ACTOR.user_id
+    assert task.operator_user_id == delegate.operator_user_id
+    assert _create(database, draft, actor=delegate).submission_id == task.id
+    for actor in (_ACTOR, another_delegate):
+        with pytest.raises(ApiError) as exc:
+            require_owned_submission(
+                database, actor=actor, submission_id=task.id, allow_submitted_beneficiary=True
+            )
+        assert exc.value.status_code == 404
 
 
 def _claim_to_uploading(database: Session, draft: ReimbursementDraft, *, now):

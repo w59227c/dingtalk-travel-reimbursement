@@ -4,12 +4,18 @@ from datetime import date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy.orm import Session
 
+from app.database.session import get_db
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
 from app.schemas.common import success
 from app.services.attendance_calendar import attendance_calendar
 from app.services.oa_template_profiles import load_fresh_submission_catalog
-from app.services.sessions import CurrentSession, get_current_session
+from app.services.reimbursement_context import (
+    get_reimbursement_session,
+    require_live_reimbursement_actor,
+)
+from app.services.sessions import CurrentSession
 from app.services.travel_approvals import (
     list_current_user_travel_approvals,
     requested_query_window,
@@ -22,7 +28,7 @@ router = APIRouter(tags=["oa-reimbursements"])
 @router.get("/oa/reimbursements/options")
 async def get_reimbursement_options(
     request: Request,
-    _current: Annotated[CurrentSession, Depends(get_current_session)],
+    _current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
 ) -> dict[str, object]:
     catalog = await load_fresh_submission_catalog(
         request.app.state.database_session_factory,
@@ -36,25 +42,31 @@ async def get_reimbursement_options(
 @router.get("/oa/travel-approvals")
 async def get_current_user_travel_approvals(
     request: Request,
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
     from_date: Annotated[date | None, Query(alias="from")] = None,
     to_date: Annotated[date | None, Query(alias="to")] = None,
     query: Annotated[str, Query(alias="q", max_length=100)] = "",
 ) -> dict[str, object]:
     query_window = requested_query_window(from_date, to_date)
+    session_id_hash = current.record.session_id_hash
+    current_user_id = current.reimbursement_user_id
+    operator_id = current.reimbursement_operator_user_id
+    database.rollback()
     catalog = await load_fresh_submission_catalog(
         request.app.state.database_session_factory,
         request.app.state.dingtalk_workflow,
     )
     workflow: DingTalkWorkflowClient = request.app.state.dingtalk_workflow
-    current_user_id = current.record.dingtalk_user_id
     candidates = await list_current_user_travel_approvals(
         workflow,
         catalog,
         current_user_id=current_user_id,
         query_window=query_window,
         query=query,
+        required_cc_user_id=operator_id,
     )
+    require_live_reimbursement_actor(database, current, session_id_hash)
     return success(
         {
             "templateConfigVersion": catalog.config_version,

@@ -837,6 +837,7 @@ def parse_locked_submission_snapshot(
         or submission.draft_id != draft.id
         or submission.corp_id != draft.corp_id
         or submission.originator_user_id != draft.owner_user_id
+        or submission.operator_user_id != draft.operator_user_id
         or snapshot.draft_id != draft.id
         or snapshot.draft_revision + 1 != draft.revision
         or snapshot.identity.corp_id != draft.corp_id

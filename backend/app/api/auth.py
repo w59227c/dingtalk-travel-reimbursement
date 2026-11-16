@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -13,7 +13,7 @@ from app.database.session import get_db
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
 from app.schemas.common import success
 from app.schemas.reimbursements import RelatedApprovalSelectionInput
-from app.services.application_settings import get_app_title
+from app.services.application_settings import get_admin_department_ids, get_app_title
 from app.services.dingtalk import DepartmentIdentity, DingTalkIdentity, DingTalkService
 from app.services.file_coordination import (
     FileOperationBusy,
@@ -21,11 +21,27 @@ from app.services.file_coordination import (
     SessionFilesRetired,
 )
 from app.services.oa_template_profiles import require_submission_ready_catalog
+from app.services.reimbursement_context import (
+    REIMBURSEMENT_CONTEXT_HEADER,
+    begin_reimbursement_context,
+    can_delegate_reimbursements,
+    get_reimbursement_session,
+    require_live_reimbursement_actor,
+    require_reimbursement_csrf,
+    restore_reimbursement_context,
+    validate_reimbursement_operator,
+    with_reimbursement_department,
+)
+from app.services.reimbursement_delegation_policy import (
+    normalize_directory_id,
+    require_delegation_permission_for_session,
+)
 from app.services.sessions import (
     CurrentSession,
     create_session,
     get_current_session,
     get_session_csrf,
+    has_admin_access,
     require_csrf,
     selectable_departments,
     session_payload,
@@ -61,6 +77,18 @@ class DepartmentFromTravelApprovalRequest(RelatedApprovalSelectionInput):
         return value.strip() if isinstance(value, str) else value
 
 
+class ReimbursementContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str | None = Field(alias="userId", max_length=128)
+    department_id: str | None = Field(default=None, alias="departmentId", max_length=128)
+
+    @field_validator("user_id", "department_id")
+    @classmethod
+    def normalize_id(cls, value: str | None) -> str | None:
+        return normalize_directory_id(value) if value is not None else None
+
+
 def _set_session_cookie(response: Response, settings: Settings, token: str) -> None:
     response.set_cookie(
         key=settings.session_cookie_name,
@@ -94,6 +122,10 @@ def _login_response(
                 departments=selectable_departments(identity.departments),
             ),
             csrf_token,
+            can_delegate=can_delegate_reimbursements(database, record),
+            is_admin=record.is_admin or not get_admin_department_ids(
+                database, record.corp_id
+            ).isdisjoint(item.id for item in identity.departments),
         )
     )
 
@@ -161,10 +193,16 @@ def mock_login(
 
 
 @router.get("/me")
-def me(
+async def me(
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
+) -> dict[str, object]:
+    return await _me_response(request, database, current)
+
+
+async def _me_response(
+    request: Request, database: Session, current: CurrentSession
 ) -> dict[str, object]:
     settings: Settings = request.app.state.settings
     session_token = request.cookies.get(settings.session_cookie_name)
@@ -176,7 +214,68 @@ def me(
         current.record,
         session_token,
     )
-    return success(session_payload(current, csrf_token))
+    try:
+        is_admin = await has_admin_access(request, database, current)
+    except ApiError as exc:
+        if exc.status_code < 500:
+            raise
+        is_admin = False
+    can_delegate = False
+    try:
+        if current.beneficiary is None:
+            await validate_reimbursement_operator(request, database, current)
+        else:
+            require_live_reimbursement_actor(database, current, current.record.session_id_hash)
+        can_delegate = True
+    except ApiError as exc:
+        if current.beneficiary is not None or (
+            exc.code != "REIMBURSEMENT_DELEGATION_FORBIDDEN" and exc.status_code < 500
+        ):
+            raise
+    return success(
+        session_payload(
+            current, csrf_token, can_delegate=can_delegate,
+            is_admin=is_admin,
+        )
+    )
+
+
+@router.post("/me/reimbursement-context")
+async def select_reimbursement_context(
+    body: ReimbursementContextRequest,
+    request: Request,
+    response: Response,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_csrf)],
+) -> dict[str, object]:
+    scoped = await begin_reimbursement_context(
+        request, database, current, body.user_id, body.department_id
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return await _me_response(request, database, scoped)
+
+
+@router.get("/me/reimbursement-employees")
+async def get_reimbursement_employees(
+    request: Request,
+    response: Response,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(get_current_session)],
+    q: Annotated[str, Query(min_length=1, max_length=128)],
+) -> dict[str, object]:
+    session_id_hash = current.record.session_id_hash
+    operator_id = current.record.dingtalk_user_id
+    department_ids = await validate_reimbursement_operator(request, database, current)
+    database.rollback()
+    query = q.strip()
+    directory: DingTalkService = request.app.state.dingtalk_service
+    items = await directory.search_employee_entries(query) if query else []
+    fresh = get_current_session(request, database)
+    if fresh.record.session_id_hash != session_id_hash:
+        raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
+    require_delegation_permission_for_session(database, fresh.record, department_ids)
+    response.headers["Cache-Control"] = "no-store"
+    return success({"items": [item for item in items if item["userId"] != operator_id]})
 
 
 @router.post("/me/department/from-travel-approval")
@@ -184,7 +283,7 @@ async def select_department_from_travel_approval(
     body: DepartmentFromTravelApprovalRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
     """Resolve the current reimbursement department from a verified travel OA."""
 
@@ -199,22 +298,29 @@ async def select_department_from_travel_approval(
         ),
     )
     session_id_hash = current.record.session_id_hash
-    current_user_id = current.record.dingtalk_user_id
+    current_user_id = current.reimbursement_user_id
+    operator_id = current.reimbursement_operator_user_id
     database.rollback()
     verified = await reverify_travel_approval_selection(
         workflow,
         catalog,
         current_user_id=current_user_id,
         selections=(selection,),
+        required_cc_user_id=operator_id,
     )
     # Approval verification is a remote request. The employee may have logged in
     # again while it was in flight, so do not resolve or persist a department
     # from the session snapshot captured by the request dependency.
     database.expire_all()
-    fresh_current = get_current_session(request, database)
+    fresh_current = await restore_reimbursement_context(
+        request,
+        database,
+        get_current_session(request, database),
+        request.headers.get(REIMBURSEMENT_CONTEXT_HEADER),
+    )
     if fresh_current.record.session_id_hash != session_id_hash:
         raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
-    departments = selectable_departments(fresh_current.departments)
+    departments = fresh_current.reimbursement_departments
     source_department = next(
         (item for item in departments if item.id == verified.department_id),
         None,
@@ -253,10 +359,13 @@ async def select_department_from_travel_approval(
             }
         )
 
-    record = fresh_current.record
-    record.current_department_id = selected.id
-    record.current_department_name = selected.name
-    database.commit()
+    if fresh_current.beneficiary is None:
+        record = fresh_current.record
+        record.current_department_id = selected.id
+        record.current_department_name = selected.name
+        database.commit()
+    else:
+        fresh_current = with_reimbursement_department(fresh_current, selected, request)
     return success(
         {
             "selectedDepartment": {"id": selected.id, "name": selected.name},
@@ -264,6 +373,10 @@ async def select_department_from_travel_approval(
             "departments": [
                 {"id": item.id, "name": item.name} for item in departments
             ],
+            **(
+                {"reimbursementContext": fresh_current.reimbursement_context}
+                if fresh_current.reimbursement_context else {}
+            ),
         }
     )
 

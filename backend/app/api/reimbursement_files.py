@@ -36,6 +36,12 @@ from app.services.process_jobs import (
     ProcessJobResourceLimit,
     ProcessJobTimeout,
 )
+from app.services.reimbursement_approval_scope import verify_delegated_saved_approvals
+from app.services.reimbursement_context import (
+    get_reimbursement_session,
+    require_reimbursement_csrf,
+    restore_reimbursement_context,
+)
 from app.services.reimbursement_drafts import (
     draft_actor,
     require_owned_draft,
@@ -67,8 +73,6 @@ from app.services.reimbursement_staging import (
 from app.services.sessions import (
     CurrentSession,
     deserialize_departments,
-    get_current_session,
-    require_csrf,
     require_fresh_active_file_session,
 )
 from app.services.temp_files import close_upload_file, new_upload_budget
@@ -112,7 +116,7 @@ def get_files(
     draft_id: str,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
 ) -> dict[str, object]:
     revision, files, pending_uploads = list_draft_files(
         database,
@@ -145,7 +149,7 @@ async def upload_file(
     draft_id: str,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
     expected_revision: Annotated[int, Query(alias="expectedRevision", ge=1)],
     role: Annotated[
         ReimbursementDraftFileRole,
@@ -230,12 +234,13 @@ def preview_file(
     file_id: str,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
 ) -> Response:
+    actor = draft_actor(current)
     try:
         file, content = read_draft_file_content(
             database,
-            actor=draft_actor(current),
+            actor=actor,
             draft_id=draft_id,
             file_id=file_id,
             staging=request.app.state.reimbursement_staging,
@@ -264,12 +269,13 @@ async def preview_pdf_page(
     page_number: Annotated[int, Path(ge=1, le=30)],
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
 ) -> Response:
+    actor = draft_actor(current)
     try:
         file, content = read_draft_file_content(
             database,
-            actor=draft_actor(current),
+            actor=actor,
             draft_id=draft_id,
             file_id=file_id,
             staging=request.app.state.reimbursement_staging,
@@ -300,6 +306,7 @@ async def preview_pdf_page(
             "PDF 兼容预览进程暂时失败，可返回快速预览或稍后再试",
             422,
         ) from exc
+    actor.require_current_delegation(database)
 
     if not isinstance(result, dict) or not result.get("ok"):
         if isinstance(result, dict):
@@ -340,7 +347,7 @@ async def patch_file(
     body: UpdateDraftFileRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
     if body.role is ReimbursementDraftFileRole.EXPENSE_SOURCE:
         await validate_expense_source_conversion(
@@ -379,7 +386,7 @@ async def delete_file(
     file_id: str,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
     expected_revision: Annotated[int, Query(alias="expectedRevision", ge=1)],
 ) -> dict[str, object]:
     actor = draft_actor(current)
@@ -415,7 +422,7 @@ async def clear_files(
     body: DraftRevisionRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
     actor = draft_actor(current)
     revision, deletions = begin_draft_files_clear(
@@ -450,7 +457,7 @@ async def recognize_file(
     body: DraftFileOcrRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
     actor = draft_actor(current)
     # The durable OCR service opens short transactions around state changes;
@@ -485,7 +492,7 @@ async def preview_excel(
     body: DraftRevisionRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> StreamingResponse:
     return await _excel_preview_response(
         draft_id=draft_id,
@@ -501,7 +508,7 @@ async def open_excel_preview(
     draft_id: str,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(get_current_session)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
     expected_revision: Annotated[int, Query(alias="expectedRevision", ge=1)],
 ) -> StreamingResponse:
     return await _excel_preview_response(
@@ -519,7 +526,7 @@ def create_excel_preview_ticket(
     body: DraftRevisionRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_csrf)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
     actor = draft_actor(current)
     require_previewable_draft(
@@ -531,6 +538,7 @@ def create_excel_preview_ticket(
         session_id_hash=current.record.session_id_hash,
         secret=request.app.state.settings.session_secret,
         lifetime=_EXCEL_PREVIEW_TICKET_LIFETIME,
+        reimbursement_context=current.reimbursement_context,
     )
     return success(
         {
@@ -587,6 +595,9 @@ async def download_native_excel_preview(
         record=record,
         departments=deserialize_departments(record.departments_json),
     )
+    current = await restore_reimbursement_context(
+        request, database, current, ticket.reimbursement_context
+    )
     return await _excel_preview_response(
         draft_id=draft_id,
         expected_revision=ticket.expected_revision,
@@ -605,7 +616,14 @@ async def _excel_preview_response(
     current: CurrentSession,
 ) -> StreamingResponse:
     actor = draft_actor(current)
-    employee_name = current.record.name
+    employee_name = current.reimbursement_name
+    await verify_delegated_saved_approvals(
+        database,
+        request.app.state.dingtalk_workflow,
+        actor=actor,
+        draft_id=draft_id,
+        expected_revision=expected_revision,
+    )
     database.rollback()
     result = await generate_draft_excel_preview(
         actor=actor,

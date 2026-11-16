@@ -33,6 +33,9 @@ from app.models.reimbursement import (
 )
 from app.schemas.reimbursements import ReimbursementDraftInput, RelatedApprovalSelectionInput
 from app.services import reimbursement_drafts
+from app.services.reimbursement_files import list_draft_files, require_previewable_draft_file
+from app.services.reimbursement_recovery import workspace_reimbursements
+from app.services.reimbursement_submissions import find_owned_submission_for_draft
 
 
 def _catalog():
@@ -545,6 +548,7 @@ def _add_history_submission(database, draft, *, status="QUEUED", resume_status=N
         draft_id=draft.id,
         corp_id=draft.corp_id,
         originator_user_id=draft.owner_user_id,
+        operator_user_id=draft.operator_user_id,
         originator_union_id="synthetic-union",
         originator_name="测试员工",
         department_id=draft.department_id,
@@ -617,6 +621,137 @@ def _add_history_submission(database, draft, *, status="QUEUED", resume_status=N
         submission.business_id = f"synthetic-business-{draft.id}"
         submission.approval_url = "https://example.invalid/approval"
         database.flush()
+
+
+def test_delegation_workspaces_and_materials_are_isolated(client_factory, monkeypatch):
+    _install_catalog(monkeypatch)
+    client = client_factory(auth_mock_enabled=True)
+    beneficiary = reimbursement_drafts.DraftActor(
+        client.app.state.settings.dingtalk_corp_id, "employee", "100", "示例部门",
+    )
+    delegate = replace(beneficiary, operator_user_id="hr-one")
+    another_delegate = replace(beneficiary, operator_user_id="hr-two")
+    with client.app.state.database_session_factory() as database:
+        def open_workspace(actor, **options):
+            database.rollback()
+            return reimbursement_drafts.create_reimbursement_draft(
+                database,
+                actor=actor,
+                draft_input=ReimbursementDraftInput.model_validate(_input()),
+                ttl_days=30,
+                max_items=50,
+                **options,
+            )
+
+        personal = open_workspace(beneficiary)
+        delegated = open_workspace(delegate)
+        other = open_workspace(another_delegate)
+        assert len({personal["id"], delegated["id"], other["id"]}) == 3
+        for actor, draft in (
+            (beneficiary, personal), (delegate, delegated), (another_delegate, other),
+        ):
+            assert [
+                record["id"] for record in workspace_reimbursements(database, actor=actor)["items"]
+            ] == [draft["id"]]
+
+        file = ReimbursementDraftFile(
+            draft_id=delegated["id"],
+            processing_role=ReimbursementDraftFileRole.EXPENSE_SOURCE.value,
+            file_status=ReimbursementDraftFileStatus.ACTIVE.value,
+            sort_order=0,
+            storage_key="drafts/synthetic/test.pdf",
+            reserved_bytes=100,
+            original_name="synthetic.pdf",
+            extension="pdf",
+            media_type="application/pdf",
+            size_bytes=100,
+            sha256="d" * 64,
+        )
+        database.add(file)
+        database.commit()
+        reopened = open_workspace(delegate, reuse_existing=True)
+        assert reopened["id"] == delegated["id"]
+        _, files, _ = list_draft_files(database, draft_id=delegated["id"], actor=delegate)
+        assert [item.id for item in files] == [file.id]
+        for actor in (beneficiary, another_delegate):
+            with pytest.raises(ApiError) as exc:
+                list_draft_files(database, draft_id=delegated["id"], actor=actor)
+            assert exc.value.status_code == 404
+            with pytest.raises(ApiError) as exc:
+                open_workspace(
+                    actor, replaces_draft_id=delegated["id"],
+                    replaces_draft_revision=delegated["revision"],
+                )
+            assert exc.value.status_code == 404
+
+        replacement = open_workspace(
+            delegate, replaces_draft_id=delegated["id"],
+            replaces_draft_revision=delegated["revision"],
+        )
+        assert replacement["id"] != delegated["id"]
+        assert database.get(ReimbursementDraft, delegated["id"]).workspace_retired
+        assert not database.get(ReimbursementDraft, personal["id"]).workspace_retired
+        assert not database.get(ReimbursementDraft, other["id"]).workspace_retired
+
+
+def test_beneficiary_may_read_completed_delegation_but_not_pending_or_originals(client_factory):
+    client = client_factory(auth_mock_enabled=True)
+    beneficiary = reimbursement_drafts.DraftActor(
+        client.app.state.settings.dingtalk_corp_id, "employee", "100", "示例部门",
+    )
+    delegate = replace(beneficiary, operator_user_id="hr-one")
+    other_delegate = replace(beneficiary, operator_user_id="hr-two")
+    with client.app.state.database_session_factory() as database:
+        now = utc_now()
+        records = {}
+        for status in ("QUEUED", "SUBMITTED"):
+            draft = ReimbursementDraft(
+                corp_id=beneficiary.corp_id,
+                owner_user_id=beneficiary.user_id,
+                operator_user_id=delegate.operator_user_id,
+                department_id=beneficiary.department_id,
+                department_name=beneficiary.department_name,
+                template_process_code="PROC-REIMBURSEMENT",
+                template_config_version=1,
+                schema_fingerprint="a" * 64,
+                input_json=json.dumps(_input()),
+                expires_at=now + timedelta(days=1),
+                status="LOCKED",
+                locked_at=now,
+            )
+            _add_history_submission(database, draft, status=status)
+            records[status] = draft.id
+        database.commit()
+        for actor in (beneficiary, delegate):
+            assert [
+                record["id"]
+                for record in reimbursement_drafts.list_reimbursement_submission_history(
+                    database, actor=actor
+                )
+            ] == [records["SUBMITTED"]]
+        assert reimbursement_drafts.list_reimbursement_submission_history(
+            database, actor=other_delegate
+        ) == []
+        assert find_owned_submission_for_draft(
+            database, draft_id=records["QUEUED"], actor=beneficiary,
+            allow_submitted_beneficiary=True,
+        ) is None
+        assert find_owned_submission_for_draft(
+            database, draft_id=records["SUBMITTED"], actor=beneficiary,
+        ) is None
+        assert find_owned_submission_for_draft(
+            database, draft_id=records["SUBMITTED"], actor=beneficiary,
+            allow_submitted_beneficiary=True,
+        ).status == "SUBMITTED"
+        assert reimbursement_drafts.get_reimbursement_draft(
+            database, draft_id=records["SUBMITTED"], actor=beneficiary,
+        )["id"] == records["SUBMITTED"]
+        with pytest.raises(ApiError) as exc:
+            require_previewable_draft_file(
+                database, draft_id=records["SUBMITTED"], file_id="synthetic-original",
+                actor=beneficiary,
+            )
+        assert exc.value.status_code == 404
 
 
 def test_submission_history_only_returns_ten_latest_submissions_in_current_scope(

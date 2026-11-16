@@ -6,7 +6,7 @@ import logging
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -229,7 +229,10 @@ def list_draft_files(
     draft_id: str,
     actor: DraftActor,
 ) -> tuple[int, list[DraftFileSnapshot], list[dict[str, str]]]:
-    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    draft = require_owned_draft(
+        database, draft_id=draft_id, actor=actor, allow_submitted_beneficiary=True
+    )
+    beneficiary_history = actor.operator_user_id is None and draft.operator_user_id is not None
     pending_statuses = {
         ReimbursementDraftFileStatus.RESERVED.value,
         ReimbursementDraftFileStatus.WRITING.value,
@@ -262,7 +265,9 @@ def list_draft_files(
                 )
                 if file_id is not None
             }
-        if referenced_file_ids:
+        if beneficiary_history:
+            visible_file_status = ReimbursementDraftFile.id.in_(referenced_file_ids)
+        elif referenced_file_ids:
             visible_file_status = or_(
                 visible_file_status,
                 (ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.PURGED.value)
@@ -282,7 +287,10 @@ def list_draft_files(
         if file.file_status in pending_statuses:
             pending.append({"id": file.id, "name": file.original_name, "status": file.file_status})
         else:
-            complete.append(_snapshot(file))
+            snapshot = _snapshot(file)
+            complete.append(
+                replace(snapshot, ocr_result_json=None) if beneficiary_history else snapshot
+            )
     return draft.revision, complete, pending
 
 
@@ -427,6 +435,8 @@ async def persist_draft_upload(
         user_id=actor.user_id,
         draft_id=draft_id,
         expected_revision=expected_revision,
+        operator_user_id=actor.operator_user_id,
+        session_id_hash=actor.session_id_hash,
     )
     reservation: QuotaReservation | None = None
     finalized = False
@@ -477,6 +487,7 @@ async def persist_draft_upload(
         raise
 
     with session_factory() as database:
+        actor.require_current_delegation(database)
         file = _require_active_file(database, draft_id=draft_id, file_id=reservation.record_id)
         return DraftFileMutationResult(revision=new_revision, file=_snapshot(file))
 
@@ -1338,6 +1349,7 @@ def _delete_file_and_release_quota(
                 ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.DELETING.value,
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
+                ReimbursementDraft.operator_user_id == actor.operator_user_id,
                 ReimbursementDraft.department_id == actor.department_id,
                 ReimbursementDraft.department_name == actor.department_name,
                 ReimbursementDraft.revision == deletion.revision,
@@ -1522,6 +1534,7 @@ def _set_ocr_failed_without_revision(
                 ReimbursementDraftFile.ocr_result_json == marker,
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
+                ReimbursementDraft.operator_user_id == actor.operator_user_id,
                 ReimbursementDraft.department_id == actor.department_id,
                 ReimbursementDraft.department_name == actor.department_name,
             )
@@ -1549,6 +1562,7 @@ def _set_ocr_failed_without_revision(
                     select(ReimbursementDraft.id).where(
                         ReimbursementDraft.corp_id == actor.corp_id,
                         ReimbursementDraft.owner_user_id == actor.user_id,
+                        ReimbursementDraft.operator_user_id == actor.operator_user_id,
                         ReimbursementDraft.department_id == actor.department_id,
                         ReimbursementDraft.department_name == actor.department_name,
                     )
@@ -1721,6 +1735,7 @@ def _guard_ocr_draft(
             ReimbursementDraft.id == draft.id,
             ReimbursementDraft.corp_id == actor.corp_id,
             ReimbursementDraft.owner_user_id == actor.user_id,
+            ReimbursementDraft.operator_user_id == actor.operator_user_id,
             ReimbursementDraft.department_id == actor.department_id,
             ReimbursementDraft.department_name == actor.department_name,
             ReimbursementDraft.revision == expected_revision
@@ -1743,7 +1758,9 @@ def _guard_ocr_draft(
     # reserved upload to advance the global revision. Read the locked row's
     # latest value instead of returning the pre-UPDATE ORM snapshot.
     database.refresh(draft)
-    if session_id_hash is not None:
+    if actor.operator_user_id is not None:
+        actor.require_current_delegation(database)
+    elif session_id_hash is not None:
         active_session = database.scalar(
             select(UserSession.session_id_hash).where(
                 UserSession.session_id_hash == session_id_hash,
