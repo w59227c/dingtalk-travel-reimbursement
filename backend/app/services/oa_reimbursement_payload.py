@@ -173,6 +173,9 @@ class SnapshotTravelProfile(_SnapshotModel):
         default=None,
         exclude_if=lambda value: value is None,
     )
+    schema_contract_version: Literal[2] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     start_date_component_id: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     end_date_component_id: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     travel_type_option: SnapshotOption
@@ -184,6 +187,12 @@ class SnapshotTravelProfile(_SnapshotModel):
     travel_type_mappings: dict[str, SnapshotOption] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @model_validator(mode="after")
+    def validate_contract_version(self) -> SnapshotTravelProfile:
+        if self.schema_contract_version is not None and self.schema_contract_fingerprint is None:
+            raise ValueError("versioned travel contract requires a structural fingerprint")
+        return self
 
 
 class SnapshotTemplate(_SnapshotModel):
@@ -1258,7 +1267,9 @@ def _snapshot_travel_profile(item: TravelTemplateContract) -> SnapshotTravelProf
         schema_contract_fingerprint=schema_contract_fingerprint(
             item.schema,
             mapped_component_ids=mapped_component_ids,
+            include_publication_identity=False,
         ),
+        schema_contract_version=2,
         start_date_component_id=item.start_date_component_id,
         end_date_component_id=item.end_date_component_id,
         travel_type_option=_snapshot_option(item.travel_type_option),

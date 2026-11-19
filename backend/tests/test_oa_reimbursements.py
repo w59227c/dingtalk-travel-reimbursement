@@ -204,6 +204,10 @@ def test_travel_list_ignores_claimed_identity_and_process_code(monkeypatch) -> N
 
     assert response.status_code == 200
     assert len(workflow.list_calls) == 1
+    assert response.json()["data"]["reimbursementOptions"]["templateConfigVersion"] == (
+        response.json()["data"]["templateConfigVersion"]
+    )
+    assert response.json()["data"]["reimbursementOptions"]["budgetCodeOptions"]
     assert workflow.list_calls[0]["process_code"] == "PROC-DOMESTIC"
     assert workflow.list_calls[0]["user_ids"] == ("employee-1",)
     assert workflow.list_calls[0]["statuses"] == ("COMPLETED",)

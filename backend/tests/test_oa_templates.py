@@ -421,11 +421,11 @@ def test_additive_delegation_mappings_preserve_only_compatible_draft_bindings_an
             client, headers, fingerprint, mappings, **confirmation
         )
         assert saved.status_code == 200, saved.text
-        assert saved.json()["data"]["configVersion"] == admin_version + 1
+        assert saved.json()["data"]["configVersion"] == min(admin_version + 1, 3)
         stale = confirm(
             client, headers, fingerprint, mappings, **confirmation
         )
-        assert stale.status_code == 409, stale.text
+        assert stale.status_code == (200 if admin_version == 3 else 409), stale.text
         options = client.get("/api/oa/reimbursements/options")
         assert options.status_code == 200, options.text
         assert options.json()["data"]["templateConfigVersion"] == (
@@ -434,13 +434,13 @@ def test_additive_delegation_mappings_preserve_only_compatible_draft_bindings_an
 
     changed_core_mappings = {**with_department, "description": "alternate-description"}
     changed = confirm(
-        client, headers, fingerprint, changed_core_mappings, expected_config_version=4,
+        client, headers, fingerprint, changed_core_mappings, expected_config_version=3,
         travel_schema_fingerprints=travel_fingerprints,
     )
     assert changed.status_code == 200, changed.text
     options = client.get("/api/oa/reimbursements/options")
     assert options.status_code == 200, options.text
-    assert options.json()["data"]["templateConfigVersion"] == 5
+    assert options.json()["data"]["templateConfigVersion"] == 4
 
 
 def test_travel_accounting_mappings_survive_catalog_api_confirmation(client_factory) -> None:
@@ -1926,6 +1926,119 @@ def test_option_catalog_drift_auto_syncs_without_new_config_version(client_facto
 
     assert changed_fingerprint != original_fingerprint
     assert current.json()["data"]["catalog"]["schemaFingerprint"] == changed_fingerprint
+
+
+@pytest.mark.parametrize("target", [PROCESS_CODE, *TRAVEL_PROCESS_CODES, "all"])
+@pytest.mark.parametrize("change", ["add", "rename", "replace", "remove", "publish", "structure"])
+def test_three_templates_sync_budget_republication_without_admin_confirmation(
+    client_factory, target, change,
+) -> None:
+    payloads = {PROCESS_CODE: schema_payload()}
+    for code in TRAVEL_PROCESS_CODES:
+        payloads[code] = travel_schema_payload(code)
+        payloads[code]["result"]["schemaContent"]["items"].extend([
+            component("DDSelectField", f"{code}-company", "所属公司", options=["北京"]),
+            component("DDSelectField", f"{code}-budget", "预算代码", options=["10000"]),
+        ])
+    selected_code = PROCESS_CODE if target == "all" else target
+    budget = next(
+        item for item in payloads[selected_code]["result"]["schemaContent"]["items"]
+        if item["props"]["label"] == "预算代码"
+    )
+    budget["props"]["options"] = ["10000", "11000"]
+    transport, _calls = transport_for_schema(
+        lambda _number, _request: httpx.Response(200, json=payloads[PROCESS_CODE]),
+        travel_response_factory=lambda code, _request: httpx.Response(200, json=payloads[code]),
+    )
+    client, headers = admin_client(client_factory, transport)
+    inspected = inspect(client, headers).json()["data"]
+    assert confirm(
+        client, headers, inspected["reimbursement"]["schema"]["schemaFingerprint"],
+        travel_schema_fingerprints={
+            item["processCode"]: item["schema"]["schemaFingerprint"]
+            for item in inspected["travelProfiles"]
+        },
+        travel_mappings={code: {
+            "startDate": "travel-start-id", "endDate": "travel-end-id",
+            "company": f"{code}-company", "budgetCode": f"{code}-budget",
+        } for code in TRAVEL_PROCESS_CODES},
+    ).status_code == 200
+    if change == "add":
+        budget["props"]["options"].append("12000")
+    elif change == "rename":
+        budget["props"]["options"][1] = {"value": "11000", "label": "示例新名称"}
+    elif change == "replace":
+        budget["props"]["options"][1] = "13000"
+    elif change == "remove":
+        budget["props"]["options"].pop()
+    elif change == "structure":
+        budget["props"]["label"] = "预算项目字段新版"
+    # Live reads showed all three forms change publication identity while
+    # retaining their mapped controls. No administrator inspect/save follows.
+    changed_codes = [PROCESS_CODE, *TRAVEL_PROCESS_CODES] if target == "all" else [target]
+    for code in changed_codes:
+        if code != selected_code:
+            other_budget = next(
+                item for item in payloads[code]["result"]["schemaContent"]["items"]
+                if item["props"]["label"] == "预算代码"
+            )
+            other_budget["props"]["options"] = copy.deepcopy(budget["props"]["options"])
+        payloads[code]["result"]["formUuid"] += "-republished"
+        payloads[code]["result"]["gmtModified"] = "2026-11-19T10:00:00+08:00"
+    options = client.get("/api/oa/reimbursements/options")
+    if change == "structure":
+        assert options.status_code == 409
+        assert options.json()["error"]["code"] == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
+        assert "结构已变化" in options.json()["error"]["message"]
+        return
+    assert options.status_code == 200, options.text
+    current = client.get("/api/admin/oa/templates/catalog").json()["data"]
+    assert current["configVersion"] == 1
+    assert current["compatibilityStatus"] == "COMPATIBLE"
+    assert current["requiresConfirmation"] is False
+    schemas = [current["catalog"]["reimbursement"]["schema"], *[
+        item["schema"] for item in current["catalog"]["travelProfiles"]
+    ]]
+    for code in changed_codes:
+        refreshed = next(item for item in schemas if item["processCode"] == code)
+        assert refreshed["formUuid"] == payloads[code]["result"]["formUuid"]
+        assert refreshed["schemaFingerprint"] == normalize_form_schema(
+            code, payloads[code]
+        ).fingerprint
+
+
+def test_reconfirming_unchanged_catalog_preserves_version_and_draft_binding(client_factory) -> None:
+    transport, _calls = transport_for_schema(
+        lambda _number, _request: httpx.Response(200, json=schema_payload())
+    )
+    client, headers = admin_client(client_factory, transport)
+    fingerprint = inspect(client, headers).json()["data"]["reimbursement"]["schema"][
+        "schemaFingerprint"
+    ]
+    assert confirm(client, headers, fingerprint).status_code == 200
+    saved = confirm(client, headers, fingerprint, expected_config_version=1)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["data"]["configVersion"] == 1
+    assert client.get("/api/oa/reimbursements/options").json()["data"]["templateConfigVersion"] == 1
+
+
+def test_removed_configured_travel_type_reports_reason_without_guessing_a_replacement(
+    client_factory,
+):
+    payload = schema_payload()
+    transport, _calls = transport_for_schema(
+        lambda _number, _request: httpx.Response(200, json=payload)
+    )
+    client, headers = admin_client(client_factory, transport)
+    fingerprint = inspect(client, headers).json()["data"]["reimbursement"]["schema"][
+        "schemaFingerprint"
+    ]
+    assert confirm(client, headers, fingerprint).status_code == 200
+    payload["result"]["schemaContent"]["items"][2]["props"]["options"] = ["其他合成出差类别"]
+    response = client.get("/api/oa/reimbursements/options")
+    assert response.status_code == 409
+    assert "已配置的出差类别选项已失效" in response.json()["error"]["message"]
+    assert client.get("/api/admin/oa/templates/catalog").json()["data"]["configVersion"] == 1
 
 
 def test_stale_compatible_refresh_cannot_clear_a_newer_drift_marker(client_factory) -> None:

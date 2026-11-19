@@ -39,6 +39,16 @@ from app.services.reimbursement_staging import StagingLayoutError
 from app.services.sessions import require_fresh_active_file_session
 
 
+@pytest.fixture
+def synthetic_preview_catalog(monkeypatch):
+    from test_reimbursement_drafts import _catalog
+
+    async def fresh_catalog(_session_factory, _workflow):
+        return _catalog()
+
+    monkeypatch.setattr(reimbursement_files_api, "load_fresh_submission_catalog", fresh_catalog)
+
+
 def _image_bytes(
     image_format: str = "PNG",
     color: str | tuple[int, int, int] = "white",
@@ -1168,6 +1178,7 @@ def test_ocr_failure_and_symlink_are_persisted_without_content_or_path_leak(
 def test_excel_preview_recalculates_from_saved_draft_without_submission_side_effects(
     client_factory,
     monkeypatch,
+    synthetic_preview_catalog,
 ) -> None:
     from test_reimbursement_drafts import _catalog
 
@@ -1205,6 +1216,7 @@ def test_excel_preview_recalculates_from_saved_draft_without_submission_side_eff
 def test_excel_preview_recovers_stale_ocr_and_requires_explicit_disposition(
     client_factory,
     monkeypatch,
+    synthetic_preview_catalog,
 ) -> None:
     from test_reimbursement_drafts import _catalog
 
@@ -1256,7 +1268,7 @@ def test_excel_preview_recovers_stale_ocr_and_requires_explicit_disposition(
 
 @pytest.mark.parametrize("grant", ("employee", "department"))
 def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_policy(
-    client_factory, monkeypatch, grant,
+    client_factory, monkeypatch, grant, synthetic_preview_catalog,
 ) -> None:
     client = client_factory(auth_mock_enabled=True, admin_user_ids="mock-user")
     csrf = str(mock_login(client)["csrfToken"])
@@ -1374,6 +1386,7 @@ def test_delegated_workspace_restores_its_files_and_native_ticket_rechecks_polic
 def test_excel_preview_native_ticket_survives_external_download_without_session_cookie(
     client_factory,
     monkeypatch,
+    synthetic_preview_catalog,
 ) -> None:
     from test_reimbursement_drafts import _catalog
 
@@ -1436,6 +1449,7 @@ def test_excel_preview_native_ticket_rejects_tampering_without_session_cookie(
 def test_excel_preview_releases_sync_session_before_generation(
     client_factory,
     monkeypatch,
+    synthetic_preview_catalog,
 ) -> None:
     client = client_factory(auth_mock_enabled=True)
     csrf = str(mock_login(client)["csrfToken"])

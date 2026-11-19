@@ -32,7 +32,6 @@ def classify_schema_change(
     if (
         configured.process_code != observed.process_code
         or configured.form_code != observed.form_code
-        or configured.form_uuid != observed.form_uuid
         or configured.status != observed.status
     ):
         return SchemaChangeKind.INCOMPATIBLE
@@ -40,9 +39,11 @@ def classify_schema_change(
     if schema_contract_fingerprint(
         configured,
         mapped_component_ids=mapped_component_ids,
+        include_publication_identity=False,
     ) != schema_contract_fingerprint(
         observed,
         mapped_component_ids=mapped_component_ids,
+        include_publication_identity=False,
     ):
         return SchemaChangeKind.INCOMPATIBLE
     return SchemaChangeKind.COMPATIBLE
@@ -52,19 +53,19 @@ def schema_contract_fingerprint(
     schema: FormSchema,
     *,
     mapped_component_ids: set[str],
+    include_publication_identity: bool = True,
 ) -> str:
     """Return the compact structural contract used by locked submissions.
 
-    Option labels/catalogs and the remote ``modifiedAt`` value intentionally do
-    not participate.  Field labels and business aliases do: they are sent to OA
-    and checked during strict readback, so changing either requires a new lock.
+    The legacy default preserves frozen snapshot hashes. New contracts exclude
+    ``formUuid``: DingTalk changes this publication identity even when mapped
+    controls are unchanged. Process identity and all field contracts still apply.
     """
 
     components = {item.component_id: item for item in schema.components}
     payload = {
         "processCode": schema.process_code,
         "formCode": schema.form_code,
-        "formUuid": schema.form_uuid,
         "status": schema.status,
         "mappedComponents": [
             {
@@ -81,6 +82,8 @@ def schema_contract_fingerprint(
             _unmapped_required_ids(schema, mapped_component_ids)
         ),
     }
+    if include_publication_identity:
+        payload["formUuid"] = schema.form_uuid
     canonical = json.dumps(
         payload,
         ensure_ascii=False,

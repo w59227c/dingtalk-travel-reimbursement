@@ -327,6 +327,123 @@ describe('persistent reimbursement draft store', () => {
     expect(store.loadingReimbursementOptions).toBe(false)
   })
 
+  it.each([
+    { code: null, status: undefined, preserve: true },
+    { code: null, status: 502, preserve: true },
+    { code: null, status: 429, preserve: true },
+    { code: 'DINGTALK_OPENAPI_FAILED', status: 502, preserve: true },
+    { code: 'DINGTALK_RATE_LIMITED', status: 503, preserve: true },
+    { code: 'INTERNAL_ERROR', status: 500, preserve: true },
+    { code: null, status: 401, preserve: false },
+    { code: null, status: 403, preserve: false },
+    { code: 'DINGTALK_OPENAPI_FAILED', status: 401, preserve: false },
+    { code: 'DINGTALK_OPENAPI_FAILED', status: 403, preserve: false },
+    { code: 'OA_TEMPLATE_CONFIRMATION_REQUIRED', status: 409, preserve: false },
+    { code: 'DINGTALK_PERMISSION_MISSING', status: 403, preserve: false },
+    { code: 'OA_TEMPLATE_PROCESS_CODE_INVALID', status: 400, preserve: false },
+    { code: 'INVALID_SYSTEM_CONFIGURATION', status: 500, preserve: false },
+  ])('preserves known options only across passive transient failures, $code/$status', async ({ code, status, preserve }) => {
+    const store = useReimbursementDraftStore()
+    const current = { templateConfigVersion: 12, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+      companyOptions: [], budgetCodeOptions: [], travelProfiles: [] }
+    store.reimbursementOptions = current
+    const error = code ? responseError(code, '合成选项读取错误', status)
+      : status ? Object.assign(new Error('Synthetic gateway error'), { isAxiosError: true, response: { status } })
+        : new Error('Synthetic network timeout')
+    vi.mocked(getOaReimbursementOptions).mockRejectedValueOnce(error)
+    await store.loadReimbursementOptions({ background: true })
+    expect(store.reimbursementOptions).toEqual(current)
+    expect(store.reimbursementOptionsError === '').toBe(preserve)
+    expect(store.loadingReimbursementOptions).toBe(false)
+    expect(store.busy).toBe(false)
+  })
+
+  it.each([false, true])('reports transient read failures for explicit loading or missing options, background=%s', async (background) => {
+    const store = useReimbursementDraftStore()
+    if (!background) store.reimbursementOptions = {
+      templateConfigVersion: 12, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+      companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+    }
+    vi.mocked(getOaReimbursementOptions).mockRejectedValueOnce(new Error('Synthetic network timeout'))
+    await store.loadReimbursementOptions({ background })
+    expect(store.reimbursementOptionsError).toBe('Synthetic network timeout')
+  })
+
+  it('adopts budget options from the approval query without changing saved input or files', async () => {
+    const store = useReimbursementDraftStore()
+    store.currentDraft = structuredClone(draft())
+    store.files = [serverFile()]
+    const latestOptions = {
+      templateConfigVersion: 12, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+      companyOptions: [], travelProfiles: [],
+      budgetCodeOptions: [{ value: 'DEMO-NEW', label: '新的合成预算', key: null }],
+    }
+    vi.mocked(listOaTravelApprovals).mockResolvedValueOnce({
+      templateConfigVersion: 12, queryWindow: { from: '2026-08-01', to: '2026-09-04' },
+      items: [], reimbursementOptions: latestOptions,
+    })
+    await store.loadTravelApprovals()
+    expect(store.reimbursementOptions).toEqual(latestOptions)
+    expect(store.currentDraft).toEqual(draft())
+    expect(store.files).toEqual([serverFile()])
+    expect(getOaReimbursementOptions).not.toHaveBeenCalled()
+  })
+
+  it('does not let an older options response overwrite budgets from a newer approval query', async () => {
+    const store = useReimbursementDraftStore()
+    const pending = deferred<Awaited<ReturnType<typeof getOaReimbursementOptions>>>()
+    vi.mocked(getOaReimbursementOptions).mockReturnValueOnce(pending.promise)
+    const stale = store.loadReimbursementOptions()
+    const latest = {
+      templateConfigVersion: 12, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+      companyOptions: [], travelProfiles: [], budgetCodeOptions: [{ value: 'NEW', label: '新预算', key: null }],
+    }
+    vi.mocked(listOaTravelApprovals).mockResolvedValueOnce({
+      templateConfigVersion: 12, queryWindow: { from: '2026-08-01', to: '2026-09-04' },
+      items: [], reimbursementOptions: latest,
+    })
+    await store.loadTravelApprovals()
+    pending.resolve({ ...latest, budgetCodeOptions: [] })
+    await stale
+    expect(store.reimbursementOptions).toEqual(latest)
+    expect(store.loadingReimbursementOptions).toBe(false)
+  })
+
+  it('does not clear a newer template rejection with an older successful approval response', async () => {
+    const store = useReimbursementDraftStore()
+    const pending = deferred<Awaited<ReturnType<typeof listOaTravelApprovals>>>()
+    vi.mocked(listOaTravelApprovals).mockReturnValueOnce(pending.promise)
+    const query = store.loadTravelApprovals()
+    vi.mocked(getOaReimbursementOptions).mockRejectedValueOnce(
+      responseError('OA_TEMPLATE_CONFIRMATION_REQUIRED', '模板字段结构已变化', 409),
+    )
+    await store.loadReimbursementOptions()
+    pending.resolve({
+      templateConfigVersion: 12, queryWindow: { from: '2026-08-01', to: '2026-09-04' }, items: [],
+      reimbursementOptions: {
+        templateConfigVersion: 12, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+        companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+      },
+    })
+    await query
+    expect(store.reimbursementOptionsErrorCode).toBe('OA_TEMPLATE_CONFIRMATION_REQUIRED')
+    expect(store.reimbursementOptions).toBeNull()
+  })
+
+  it('rejects approval/options version mismatches without replacing the current options', async () => {
+    const store = useReimbursementDraftStore()
+    vi.mocked(listOaTravelApprovals).mockResolvedValueOnce({
+      templateConfigVersion: 12, queryWindow: { from: '2026-08-01', to: '2026-09-04' }, items: [],
+      reimbursementOptions: {
+        templateConfigVersion: 13, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+        companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+      },
+    })
+    await store.loadTravelApprovals()
+    expect(store.reimbursementOptions).toBeNull()
+    expect(store.travelApprovalsErrorCode).toBe('OA_TEMPLATE_CONFIGURATION_CHANGED')
+  })
+
   it('keeps only the newest cancellable travel approval search', async () => {
     const first = deferred<Awaited<ReturnType<typeof listOaTravelApprovals>>>()
     const second = deferred<Awaited<ReturnType<typeof listOaTravelApprovals>>>()

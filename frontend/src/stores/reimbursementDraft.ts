@@ -195,6 +195,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   let listRequestVersion = 0
   let detailRequestVersion = 0
   let reimbursementOptionsRequestVersion = 0
+  let optionObservationVersion = 0
+  let appliedOptionObservationVersion = 0
   let travelApprovalsRequestVersion = 0
   let previewRequestVersion = 0
   let uploadRequestVersion = 0
@@ -537,12 +539,28 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     travelApprovalTemplateConfigVersion.value = null
   }
 
-  async function loadReimbursementOptions(): Promise<void> {
+  function applyReimbursementOptions(result: OaReimbursementOptions, observation: number): boolean {
+    if (observation < appliedOptionObservationVersion) return false
+    appliedOptionObservationVersion = observation
+    if (travelApprovalTemplateConfigVersion.value !== null
+      && travelApprovalTemplateConfigVersion.value !== result.templateConfigVersion) clearTravelApprovals()
+    reimbursementOptions.value = result
+    reimbursementOptionsError.value = ''
+    reimbursementOptionsErrorCode.value = ''
+    return true
+  }
+
+  async function loadReimbursementOptions(
+    { background = false }: { background?: boolean } = {},
+  ): Promise<void> {
     const requestVersion = ++reimbursementOptionsRequestVersion
+    const observation = ++optionObservationVersion
     activeReimbursementOptionsController?.abort()
     const context = requestContext()
     activeReimbursementOptionsController = context.controller
-    loadingReimbursementOptions.value = true
+    // Native pickers can foreground the page before dispatching their files.
+    // Passive reads must not make that pending selection look like a busy write.
+    loadingReimbursementOptions.value = !background
     try {
       const result = await getOaReimbursementOptions({
         signal: context.controller.signal,
@@ -551,20 +569,25 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         !accepts(context)
         || requestVersion !== reimbursementOptionsRequestVersion
       ) return
-      if (
-        travelApprovalTemplateConfigVersion.value !== null
-        && travelApprovalTemplateConfigVersion.value !== result.templateConfigVersion
-      ) clearTravelApprovals()
-      reimbursementOptions.value = result
-      reimbursementOptionsError.value = ''
-      reimbursementOptionsErrorCode.value = ''
+      applyReimbursementOptions(result, observation)
     } catch (error) {
       if (
         accepts(context)
         && requestVersion === reimbursementOptionsRequestVersion
+        && observation >= appliedOptionObservationVersion
         && !isCancellation(error)
       ) {
-        reimbursementOptionsErrorCode.value = apiErrorCode(error) ?? ''
+        const code = apiErrorCode(error)
+        const status = axios.isAxiosError(error) ? error.response?.status : undefined
+        const transient = status !== 401 && status !== 403 && (code
+          ? ['DINGTALK_OPENAPI_FAILED', 'DINGTALK_RATE_LIMITED', 'INTERNAL_ERROR'].includes(code)
+          : status === undefined || status === 429 || status >= 500)
+        // A passive outage is not evidence that the last validated options are
+        // invalid. Keep resumed editors/pickers intact; explicit reads and the
+        // server's preview/submission checks still report any failure normally.
+        if (background && reimbursementOptions.value && !reimbursementOptionsError.value && transient) return
+        appliedOptionObservationVersion = observation
+        reimbursementOptionsErrorCode.value = code ?? ''
         reimbursementOptionsError.value = apiErrorMessage(
           error,
           '报销选项加载失败，请重试',
@@ -585,6 +608,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     query: Omit<ListOaTravelApprovalsOptions, 'signal'> = {},
   ): Promise<void> {
     const requestVersion = ++travelApprovalsRequestVersion
+    const observation = ++optionObservationVersion
     activeTravelApprovalsController?.abort()
     const context = requestContext()
     activeTravelApprovalsController = context.controller
@@ -600,6 +624,16 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         !accepts(context)
         || requestVersion !== travelApprovalsRequestVersion
       ) return
+      if (result.reimbursementOptions) {
+        if (observation < appliedOptionObservationVersion) return
+        if (result.reimbursementOptions.templateConfigVersion !== result.templateConfigVersion) {
+          appliedOptionObservationVersion = Math.max(appliedOptionObservationVersion, observation)
+          travelApprovalsErrorCode.value = 'OA_TEMPLATE_CONFIGURATION_CHANGED'
+          travelApprovalsError.value = '审批与报销选项不一致，请重新查询'
+          return
+        }
+        if (!applyReimbursementOptions(result.reimbursementOptions, observation)) return
+      }
       if (
         reimbursementOptions.value !== null
         && result.templateConfigVersion !== reimbursementOptions.value.templateConfigVersion
@@ -616,8 +650,10 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       if (
         accepts(context)
         && requestVersion === travelApprovalsRequestVersion
+        && observation >= appliedOptionObservationVersion
         && !isCancellation(error)
       ) {
+        appliedOptionObservationVersion = observation
         travelApprovalsErrorCode.value = apiErrorCode(error) ?? ''
         travelApprovalsError.value = apiErrorMessage(
           error,

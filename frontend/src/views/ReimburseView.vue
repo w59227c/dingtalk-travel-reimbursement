@@ -1988,6 +1988,16 @@ function warnBeforeUnload(event: BeforeUnloadEvent): void {
     event.returnValue = ''
   }
 }
+let lastBackgroundOptionsRefreshAt = 0
+function refreshOptionsOnForeground(): void {
+  if (document.visibilityState !== 'visible' || !sessionScope() || disposed
+    || initializingWorkspace.value || switchingReimbursement.value || drafts.busy
+    || saving.value || submitFlowPending.value || trackedSubmission.value
+    || drafts.currentDraft?.status === 'LOCKED'
+    || Date.now() - lastBackgroundOptionsRefreshAt < 30_000) return
+  lastBackgroundOptionsRefreshAt = Date.now()
+  void drafts.loadReimbursementOptions({ background: true })
+}
 function updateMobileFooterHeight(): void {
   const height = Math.ceil(mobileFooterDock.value?.getBoundingClientRect().height ?? 0)
   if (height > 0) mobileFooterHeight.value = height
@@ -2002,7 +2012,11 @@ watch(mobileFooterDock, (footer) => {
   mobileFooterResizeObserver = new ResizeObserver(updateMobileFooterHeight)
   mobileFooterResizeObserver.observe(footer)
 }, { flush: 'post' })
-onMounted(() => window.addEventListener('beforeunload', warnBeforeUnload))
+onMounted(() => {
+  window.addEventListener('beforeunload', warnBeforeUnload)
+  window.addEventListener('focus', refreshOptionsOnForeground)
+  document.addEventListener('visibilitychange', refreshOptionsOnForeground)
+})
 onBeforeUnmount(() => {
   if (recoveryRefreshTimer) clearTimeout(recoveryRefreshTimer)
   disposed = true
@@ -2012,6 +2026,8 @@ onBeforeUnmount(() => {
   if (autosaveTimer) clearTimeout(autosaveTimer)
   mobileFooterResizeObserver?.disconnect()
   window.removeEventListener('beforeunload', warnBeforeUnload)
+  window.removeEventListener('focus', refreshOptionsOnForeground)
+  document.removeEventListener('visibilitychange', refreshOptionsOnForeground)
   submission.abort()
 })
 </script>

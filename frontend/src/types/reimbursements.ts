@@ -171,6 +171,7 @@ export interface OaTravelApproval {
 
 export interface OaTravelApprovalList {
   templateConfigVersion: number
+  reimbursementOptions?: OaReimbursementOptions
   queryWindow: OaTravelApprovalQueryWindow
   items: OaTravelApproval[]
 }

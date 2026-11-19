@@ -100,7 +100,7 @@ const statusView = computed(() => {
       label: '结构已变化',
       tagType: 'danger',
       alertType: 'error',
-      detail: '钉钉模板结构已变化，请检查映射和选项后重新确认。',
+      detail: '钉钉模板字段或已配置的出差类别已变化，请检查映射和选项后重新确认。',
     },
   }
   return values[compatibilityStatus.value]
@@ -702,7 +702,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
       <div class="oa-template-heading">
         <div>
           <h2>钉钉 OA 模板目录</h2>
-          <p>配置报销模板和可关联的出差模板。先读取钉钉当前结构，再一次性保存整个目录。</p>
+          <p>预算选项在报销时自动同步，无需重新保存目录。修改模板或字段映射时，先读取检查，再保存整个目录。</p>
         </div>
         <div class="oa-template-status">
           <el-tag :type="statusView.tagType">

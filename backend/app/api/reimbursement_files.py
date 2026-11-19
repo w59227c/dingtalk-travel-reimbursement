@@ -28,6 +28,7 @@ from app.services.file_coordination import (
     UploadBusy,
 )
 from app.services.multipart_uploads import parse_upload_files
+from app.services.oa_template_profiles import load_fresh_submission_catalog
 from app.services.ocr_service import OcrService
 from app.services.pdf_preview import render_pdf_preview_page_worker
 from app.services.process_jobs import (
@@ -617,6 +618,16 @@ async def _excel_preview_response(
 ) -> StreamingResponse:
     actor = draft_actor(current)
     employee_name = current.reimbursement_name
+    draft = require_previewable_draft(
+        database, draft_id=draft_id, actor=actor, expected_revision=expected_revision,
+    )
+    locked = draft.status == "LOCKED"
+    database.rollback()
+    if not locked:
+        await load_fresh_submission_catalog(
+            request.app.state.database_session_factory,
+            request.app.state.dingtalk_workflow,
+        )
     await verify_delegated_saved_approvals(
         database,
         request.app.state.dingtalk_workflow,

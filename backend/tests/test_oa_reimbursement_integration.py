@@ -1337,6 +1337,101 @@ def test_submit_detects_live_template_drift_before_locking_draft(
         assert caught.value.code == "OA_TEMPLATE_CONFIRMATION_REQUIRED"
 
 
+@pytest.mark.parametrize("target", [REIMBURSEMENT_PROCESS_CODE, TRAVEL_PROCESS_CODE])
+@pytest.mark.parametrize("already_locked", [False, True])
+def test_budget_republication_preserves_draft_preview_and_submission(
+    enabled_manual_worker_client, target, already_locked,
+) -> None:
+    reimbursement, travel, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement, travel)
+    client = enabled_manual_worker_client
+    headers = {"X-CSRF-Token": str(mock_login(client)["csrfToken"])}
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+
+    def submit():
+        return client.post(
+            f"/api/oa/reimbursements/{draft_id}/submit",
+            json={"expectedRevision": 4},
+            headers={**headers, "Idempotency-Key": "96969696-9696-4969-8969-969696969697"},
+        )
+
+    submitted = submit() if already_locked else None
+    with client.app.state.database_session_factory() as database:
+        original_input = database.get(ReimbursementDraft, draft_id).input_json
+        original_file_count = (
+            database.query(ReimbursementDraftFile).filter_by(draft_id=draft_id).count()
+        )
+        submission = database.scalar(select(ReimbursementSubmission))
+        frozen = submission.form_snapshot_json if submission else None
+    original = workflow.schemas[target]
+    components = tuple(
+        replace(component, options=(*component.options, FormOption("NEW-002", "NEW-002", None)))
+        if component.component_id == "budget-id" else component
+        for component in original.components
+    )
+    publication = f"{original.form_uuid}-new-publication"
+    workflow.schemas[target] = replace(
+        original, components=components, form_uuid=publication,
+        fingerprint=schema_fingerprint(
+            original.process_code, original.form_code, publication,
+            original.modified_at, original.status, components,
+        ),
+    )
+    if not already_locked:
+        preview = client.post(
+            f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+            json={"expectedRevision": 4}, headers=headers,
+        )
+        assert preview.status_code == 200, preview.text
+        with client.app.state.database_session_factory() as database:
+            draft = database.get(ReimbursementDraft, draft_id)
+            assert draft.revision == 4
+            assert draft.input_json == original_input
+            assert (
+                database.query(ReimbursementDraftFile).filter_by(draft_id=draft_id).count()
+                == original_file_count
+            )
+            assert database.get(OaTemplateProfile, "reimbursement").config_version == 1
+        submitted = submit()
+    assert submitted.status_code == 202, submitted.text
+    assert asyncio.run(_worker(client, workflow, LocalStorageBoundary()).run_once()) is True
+    submission_id = submitted.json()["data"]["submissionId"]
+    polled = client.get(f"/api/oa/reimbursements/submissions/{submission_id}")
+    assert polled.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value
+    assert workflow.create_calls == 1
+    if frozen is not None:
+        with client.app.state.database_session_factory() as database:
+            assert database.scalar(select(ReimbursementSubmission)).form_snapshot_json == frozen
+
+
+def test_removed_selected_budget_blocks_only_the_draft_without_admin_confirmation(
+    enabled_manual_worker_client,
+) -> None:
+    reimbursement, travel, travel_type = _schemas()
+    workflow = LocalWorkflowBoundary(reimbursement, travel)
+    client = enabled_manual_worker_client
+    headers = {"X-CSRF-Token": str(mock_login(client)["csrfToken"])}
+    draft_id, _ = _persist_ready_draft(client, workflow, travel_type)
+    components = tuple(
+        replace(component, options=(FormOption("NEW-002", "NEW-002", None),))
+        if component.component_id == "budget-id" else component
+        for component in reimbursement.components
+    )
+    workflow.schemas[REIMBURSEMENT_PROCESS_CODE] = _schema(REIMBURSEMENT_PROCESS_CODE, components)
+    preview = client.post(
+        f"/api/reimbursements/drafts/{draft_id}/excel-preview",
+        json={"expectedRevision": 4}, headers=headers,
+    )
+    assert preview.status_code == 422, preview.text
+    assert preview.json()["error"]["code"] == "REIMBURSEMENT_BUDGET_OPTION_INVALID"
+    assert client.get("/api/oa/reimbursements/options").status_code == 200
+    with client.app.state.database_session_factory() as database:
+        assert database.get(OaTemplateProfile, "reimbursement").compatibility_status == "COMPATIBLE"
+        draft = database.get(ReimbursementDraft, draft_id)
+        assert draft.revision == 4
+        assert draft.locked_at is None
+
+
 def test_submit_auto_syncs_budget_option_label_without_reconfirming_catalog(
     enabled_manual_worker_client,
 ) -> None:

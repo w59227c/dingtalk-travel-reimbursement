@@ -67,9 +67,11 @@ async def get_current_user_travel_approvals(
         required_cc_user_id=operator_id,
     )
     require_live_reimbursement_actor(database, current, session_id_hash)
+    calendar = attendance_calendar(database)
     return success(
         {
             "templateConfigVersion": catalog.config_version,
+            "reimbursementOptions": {**runtime_options(catalog), "attendanceCalendar": calendar},
             "queryWindow": query_window.as_dict(),
             "items": [candidate.as_dict() for candidate in candidates],
         }

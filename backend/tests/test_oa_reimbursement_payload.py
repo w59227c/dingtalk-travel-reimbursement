@@ -297,6 +297,37 @@ def _attachments(snapshot) -> tuple[ApprovalAttachment, ...]:
     )
 
 
+def test_legacy_travel_contract_roundtrips_without_adding_new_metadata() -> None:
+    source = _source()
+    snapshot = build_snapshot(source)
+    profile = snapshot.template.travel_profiles[0].model_copy(update={
+        "schema_contract_version": None,
+        "schema_contract_fingerprint": payloads.schema_contract_fingerprint(
+            source.catalog.travel_profiles[0].schema,
+            mapped_component_ids={
+                component_id for component_id in (
+                    snapshot.template.travel_profiles[0].start_date_component_id,
+                    snapshot.template.travel_profiles[0].end_date_component_id,
+                    snapshot.template.travel_profiles[0].company_component_id,
+                    snapshot.template.travel_profiles[0].budget_code_component_id,
+                    snapshot.template.travel_profiles[0].travel_type_component_id,
+                ) if component_id is not None
+            },
+        ),
+    })
+    legacy = snapshot.model_copy(update={
+        "template": snapshot.template.model_copy(update={"travel_profiles": (profile,)}),
+    })
+    serialized = serialize_snapshot(legacy)
+    assert "schemaContractVersion" not in serialized
+    assert serialize_snapshot(parse_snapshot(serialized)) == serialized
+    raw = profile.model_dump(by_alias=True)
+    raw["schemaContractVersion"] = 2
+    raw.pop("schemaContractFingerprint")
+    with pytest.raises(ValidationError, match="structural fingerprint"):
+        payloads.SnapshotTravelProfile.model_validate(raw)
+
+
 def test_snapshot_is_versioned_canonical_immutable_and_hash_verified() -> None:
     first = build_snapshot(_source())
     second = build_snapshot(_source())
@@ -309,6 +340,7 @@ def test_snapshot_is_versioned_canonical_immutable_and_hash_verified() -> None:
     assert first.template.schema_fingerprint in first.template.schema_canonical_json
     travel_profile = json.loads(serialized)["template"]["travelProfiles"][0]
     assert "schemaContractFingerprint" in travel_profile
+    assert travel_profile["schemaContractVersion"] == 2
     assert "schemaCanonicalJson" not in travel_profile
     assert [item.draft_file_id for item in first.original_files] == [
         "source-file-0",

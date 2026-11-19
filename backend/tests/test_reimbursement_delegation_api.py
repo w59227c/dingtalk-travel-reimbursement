@@ -13,7 +13,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api import oa_reimbursements, reimbursement_submissions
+from app.api import oa_reimbursements, reimbursement_files, reimbursement_submissions
 from app.integrations.dingtalk.workflow import FormOption
 from app.services import dingtalk, reimbursement_approval_scope, reimbursement_drafts
 
@@ -530,6 +530,7 @@ def test_delegated_list_and_save_require_executed_cc_to_current_operator(
         return catalog
 
     monkeypatch.setattr(oa_reimbursements, "load_fresh_submission_catalog", verified_catalog)
+    monkeypatch.setattr(reimbursement_files, "load_fresh_submission_catalog", verified_catalog)
     monkeypatch.setattr(
         reimbursement_submissions, "load_fresh_submission_catalog", verified_catalog
     )

@@ -527,6 +527,7 @@ class SnapshotSubmissionMaterializer:
                         schema_contract_fingerprint(
                             travel_schema,
                             mapped_component_ids=set(travel_mapping.values()),
+                            include_publication_identity=profile.schema_contract_version != 2,
                         )
                         != profile.schema_contract_fingerprint
                     ):

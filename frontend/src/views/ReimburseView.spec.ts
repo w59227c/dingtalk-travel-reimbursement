@@ -1522,6 +1522,101 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('silently updates queried budgets while retaining unsaved expenses, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ input: canonicalNoSubsidyInput() })
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    try {
+      expense.items[0]!.description = '本页尚未保存的合成说明'
+      const latest = {
+        ...structuredClone(options),
+        budgetCodeOptions: [{ value: 'DEMO-001', label: 'DEMO-001 · 更新后的预算名称', key: null }],
+      }
+      vi.mocked(listOaTravelApprovals).mockResolvedValueOnce({
+        templateConfigVersion: 12, queryWindow: selection.queryWindow, items: [],
+        reimbursementOptions: latest,
+      })
+      const id = drafts.currentDraft!.id
+      await drafts.loadTravelApprovals()
+      await nextTick()
+      expect(wrapper.get('[data-testid="reimbursement-basics-card"]').text()).toContain('更新后的预算名称')
+      expect(expense.items[0]!.description).toBe('本页尚未保存的合成说明')
+      expect(drafts.currentDraft!.id).toBe(id)
+      expect(drafts.files).toEqual([activeFile])
+      expect(wrapper.text()).not.toContain('请前往系统设置确认 OA 表单')
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('refreshes options once when returning to the foreground and stops after leaving, mobile=%s', async (mobile) => {
+    const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+    const initialCalls = vi.mocked(getOaReimbursementOptions).mock.calls.length
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    try {
+      const latest = { ...structuredClone(options), budgetCodeOptions: [{ value: 'DEMO-001', label: '返回前台后的预算名称', key: null }] }
+      vi.mocked(getOaReimbursementOptions).mockResolvedValue(latest)
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushPromises()
+      expect(getOaReimbursementOptions).toHaveBeenCalledTimes(initialCalls + 1)
+      expect(drafts.reimbursementOptions).toEqual(latest)
+      expect(expense.items).toHaveLength(1)
+      wrapper.unmount()
+      window.dispatchEvent(new Event('focus'))
+      await flushPromises()
+      expect(getOaReimbursementOptions).toHaveBeenCalledTimes(initialCalls + 1)
+    } finally {
+      if (originalVisibility) Object.defineProperty(document, 'visibilityState', originalVisibility)
+      else Reflect.deleteProperty(document, 'visibilityState')
+    }
+  })
+
+  it.each([false, true].flatMap((mobile) => (['attachment', 'payment_proof'] as const).flatMap((kind) => [false, true].map((timeout) => ({ mobile, kind, timeout })))))(
+    'keeps native file selection and proof target during budget refresh, mobile=$mobile kind=$kind timeout=$timeout', async ({ mobile, kind, timeout }) => {
+    serverDraft = makeDraft({ input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: true },
+      relatedApprovals: [linkedApproval], relatedApprovalCount: 1 })
+    if (kind === 'payment_proof') serverDraft.input.items[0]!.amount = '600.00'
+    const { wrapper, drafts, expense } = await mountView(undefined, true, mobile)
+    const pendingOptions = deferred<Awaited<ReturnType<typeof getOaReimbursementOptions>>>()
+    const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    const selectedFile = new File(['synthetic-proof'], 'native-selected.pdf', { type: 'application/pdf' })
+    vi.mocked(getOaReimbursementOptions).mockReturnValueOnce(pendingOptions.promise)
+    vi.mocked(uploadReimbursementDraftFile).mockImplementationOnce(async (id, revision) => {
+      const file = { ...activeFile, id: 'native-selected', name: selectedFile.name,
+        role: 'ATTACHMENT_ONLY' as const, ocrStatus: 'NOT_REQUESTED' as const,
+        attachmentKind: kind === 'payment_proof' ? 'payment_proof' as const : 'other' as const }
+      serverDraft = { ...serverDraft, revision: revision + 1 }
+      serverFiles = [...serverFiles, file]
+      return { draftId: id, revision: revision + 1, file }
+    })
+    try {
+      if (kind === 'payment_proof') {
+        await wrapper.findAll('button').find((button) => button.text().includes('添加付款凭证'))!.trigger('click')
+      }
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      if (timeout) {
+        pendingOptions.reject(new Error('Synthetic background network timeout'))
+        await flushPromises()
+      }
+      const input = wrapper.get<HTMLInputElement>(kind === 'payment_proof'
+        ? '[data-testid="durable-payment-proof-input"]' : '[data-testid="durable-attachment-input"]')
+      Object.defineProperty(input.element, 'files', { configurable: true, value: [selectedFile] })
+      await input.trigger('change')
+      await flushPromises()
+      expect(uploadReimbursementDraftFile).toHaveBeenCalledOnce()
+      expect(drafts.files.some((file) => file.name === selectedFile.name)).toBe(true)
+      if (kind === 'payment_proof') expect(expense.items[0]!.paymentProofFileIds).toEqual(['native-selected'])
+    } finally {
+      pendingOptions.resolve(options)
+      await flushPromises()
+      wrapper.unmount()
+      if (originalVisibility) Object.defineProperty(document, 'visibilityState', originalVisibility)
+      else Reflect.deleteProperty(document, 'visibilityState')
+    }
+  })
+
   it('automatically provisions an empty form before company, budget or receipts are entered', async () => {
     vi.mocked(listReimbursementDrafts).mockResolvedValue({ items: [], offset: 0, limit: 50, total: 0 })
     const { wrapper, drafts } = await mountView()

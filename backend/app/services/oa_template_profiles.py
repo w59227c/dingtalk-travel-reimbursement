@@ -52,6 +52,14 @@ _TRAVEL_PROFILE_JSON_KEYS = frozenset(
 )
 
 
+class _CatalogMismatch(Exception):
+    """A safe, actionable configuration reason, distinct from upstream outages."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True, slots=True)
 class LogicalFieldSpec:
     key: str
@@ -465,6 +473,10 @@ async def confirm_template_catalog(
         draft_binding_version = _preserved_draft_binding(
             profile, reimbursement_schema, normalized_reimbursement_mapping, contracts,
         )
+        unchanged = (
+            draft_binding_version is not None
+            and normalized_reimbursement_mapping == _deserialize_mapping(profile.mapping_json)
+        )
         result = database.execute(
             update(OaTemplateProfile)
             .where(
@@ -475,8 +487,12 @@ async def confirm_template_catalog(
                 OaTemplateProfile.compatibility_status == profile.compatibility_status,
             )
             .values(
-                config_version=expected_config_version + 1,
-                draft_binding_version=draft_binding_version,
+                config_version=(
+                    expected_config_version if unchanged else expected_config_version + 1
+                ),
+                draft_binding_version=(
+                    profile.draft_binding_version if unchanged else draft_binding_version
+                ),
                 **values,
             ),
             execution_options={"synchronize_session": False},
@@ -507,8 +523,7 @@ def _preserved_draft_binding(
     identity_fields = {spec.key for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS if not spec.required}
     # Reconfirming an unchanged catalog must keep a binding already preserved.
     if (
-        (not additions and profile.draft_binding_version is None)
-        or additions - identity_fields
+        additions - identity_fields
         or any(mappings.get(key) != component_id for key, component_id in existing.items())
     ):
         return None
@@ -598,7 +613,12 @@ async def load_fresh_submission_catalog(
                 profile.process_code for profile in contract.travel_profiles
             )
 
-        refreshed = await _observe_submission_catalog(contract, workflow)
+        reason = None
+        try:
+            refreshed = await _observe_submission_catalog(contract, workflow)
+        except _CatalogMismatch as error:
+            refreshed = None
+            reason = error.reason
         compatible = refreshed is not None
         with database_session_factory() as observation_database:
             observed = (
@@ -617,7 +637,7 @@ async def load_fresh_submission_catalog(
         if not observed:
             continue
         if not compatible:
-            raise _confirmation_required_error()
+            raise _confirmation_required_error(reason)
 
         with database_session_factory() as final_database:
             current = require_submission_ready_catalog(final_database)
@@ -649,7 +669,10 @@ async def load_readonly_submission_catalog(
         except ApiError:
             raise _confirmation_required_error() from None
         expected_state = _catalog_cas_state(profile)
-    refreshed = await _observe_submission_catalog(contract, workflow)
+    try:
+        refreshed = await _observe_submission_catalog(contract, workflow)
+    except _CatalogMismatch as error:
+        raise _confirmation_required_error(error.reason) from None
     if refreshed is None:
         raise _confirmation_required_error()
     with database_session_factory() as database:
@@ -667,7 +690,7 @@ async def _observe_submission_catalog(
     travel_schemas = [
         await workflow.get_form_schema(profile.process_code) for profile in contract.travel_profiles
     ]
-    return _compatible_refreshed_catalog(
+    return _refresh_compatible_catalog(
         contract,
         reimbursement_schema=reimbursement_schema,
         travel_schemas=travel_schemas,
@@ -680,8 +703,22 @@ def _compatible_refreshed_catalog(
     reimbursement_schema: FormSchema,
     travel_schemas: list[FormSchema],
 ) -> OaTemplateCatalogContract | None:
-    if len(travel_schemas) != len(configured.travel_profiles):
+    try:
+        return _refresh_compatible_catalog(
+            configured, reimbursement_schema=reimbursement_schema, travel_schemas=travel_schemas,
+        )
+    except _CatalogMismatch:
         return None
+
+
+def _refresh_compatible_catalog(
+    configured: OaTemplateCatalogContract,
+    *,
+    reimbursement_schema: FormSchema,
+    travel_schemas: list[FormSchema],
+) -> OaTemplateCatalogContract:
+    if len(travel_schemas) != len(configured.travel_profiles):
+        raise _CatalogMismatch("出差模板目录已变化，请管理员检查模板范围并确认")
     reimbursement = configured.reimbursement
     if (
         classify_schema_change(
@@ -691,7 +728,7 @@ def _compatible_refreshed_catalog(
         )
         is SchemaChangeKind.INCOMPATIBLE
     ):
-        return None
+        raise _CatalogMismatch("报销模板字段结构已变化，请管理员检查字段映射并确认")
     try:
         reimbursement_mapping = validate_template_mapping(
             reimbursement_schema,
@@ -716,8 +753,8 @@ def _compatible_refreshed_catalog(
             reimbursement_process_code=reimbursement.process_code,
             allowed_travel_process_codes=[item.process_code for item in refreshed_profiles],
         )
-    except ApiError:
-        return None
+    except ApiError as error:
+        raise _CatalogMismatch(error.message) from None
     return OaTemplateCatalogContract(
         config_version=configured.config_version,
         reimbursement=ReimbursementTemplateContract(
@@ -1585,10 +1622,10 @@ def _configuration_error() -> ApiError:
     )
 
 
-def _confirmation_required_error() -> ApiError:
+def _confirmation_required_error(reason: str | None = None) -> ApiError:
     return ApiError(
         "OA_TEMPLATE_CONFIRMATION_REQUIRED",
-        "审批模板目录已经变化，请管理员重新检查并确认",
+        reason or "审批模板目录已经变化，请管理员重新检查并确认",
         409,
     )
 
