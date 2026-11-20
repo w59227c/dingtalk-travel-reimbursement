@@ -13,6 +13,7 @@ smoke_id="expense-smoke-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])'
 backend_container="$smoke_id-backend"
 web_container="$smoke_id-web"
 offline_container="$smoke_id-offline"
+migration_container="$smoke_id-migration"
 network="$smoke_id-network"
 
 cleanup() {
@@ -22,8 +23,9 @@ cleanup() {
     # The script creates only synthetic credentials; never run on production containers.
     docker logs --tail 100 "$backend_container" >&2 2>/dev/null || true
     docker logs --tail 100 "$web_container" >&2 2>/dev/null || true
+    docker logs --tail 100 "$migration_container" >&2 2>/dev/null || true
   fi
-  docker rm -f "$offline_container" "$web_container" "$backend_container" >/dev/null 2>&1 || true
+  docker rm -f "$offline_container" "$web_container" "$backend_container" "$migration_container" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   exit "$status"
 }
@@ -207,4 +209,25 @@ if docker logs "$web_container" 2>&1 | grep -F "$privacy_marker" >/dev/null; the
   exit 1
 fi
 echo 'Nginx proxy failures preserve HTTP errors without logging request query values'
+
+# A populated file table spills SQLite statement journals to disk during a
+# rebuild. Empty-schema checks cannot detect a missing writable temp directory.
+docker run --detach --name "$migration_container" --network none "${backend_options[@]}" \
+  --env PYTHONPATH=/app --env ATTENDANCE_CALENDAR_SYNC_ENABLED=false \
+  --mount "type=bind,src=$repository_root/backend/scripts/check-populated-migration.py,dst=/migration-smoke.py,readonly" \
+  --entrypoint sh "$backend_image" -ec '
+    python /migration-smoke.py seed
+    exec /app/docker-entrypoint.sh uvicorn app.main:app --host 0.0.0.0 --port 8000 --no-access-log
+  ' >/dev/null
+migration_ready=false
+for ((attempt = 0; attempt < 90; attempt++)); do
+  if docker exec "$migration_container" python -c "$probe" >/dev/null 2>&1; then
+    migration_ready=true
+    break
+  fi
+  [[ $(docker inspect --format '{{.State.Running}}' "$migration_container") == true ]] || break
+  sleep 2
+done
+[[ "$migration_ready" == true ]] || { echo 'Populated database upgrade did not become ready' >&2; exit 1; }
+docker exec "$migration_container" python /migration-smoke.py verify
 echo 'Final images passed offline OCR, migrations, production readiness and Web/API checks'

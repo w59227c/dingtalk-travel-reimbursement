@@ -58,6 +58,8 @@ docker compose up -d --wait --wait-timeout 300
 
 如果早期 0029 升级因 I/O 等异常中断，重启时报 `duplicate column name: kind`，先保留并一致性备份现状，不要手工修改 `alembic_version` 或删除列／表。包含恢复补丁的新镜像会核验已添加列的完整定义，再安全续跑；不一致的结构仍拒绝启动。新版 0029 失败时整体回滚，持续的存储 I/O 故障仍需先排查存储，不能靠反复重启绕过。
 
+镜像入口在迁移前准备 `TEMP_DIR/.spool` 私有目录，并把它传给 SQLite 作为临时目录。只读根文件系统下，`/tmp/expense` 的 tmpfs 挂载会遮住镜像内预建的 `.spool`；有数据的材料表重建可能需要磁盘临时文件，因此不能等应用启动时再创建。旧镜像因 `SQLITE_IOERR_GETTEMPPATH`（6410，表面报 `disk I/O error`）失败时，使用本目录 `env_file` 配置可暂在 `.env` 设置 `TMPDIR=/tmp/expense` 后重新创建容器；只用于 Compose 插值、没有传入容器的变量不会生效。新镜像自动准备目录，无需这项临时设置。
+
 OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX Runtime CPU。旧 `.env` 的 `OCR_ENGINE=paddle_static` 由新版映射到默认引擎，镜像内模型路径保持兼容。`OCR_CPU_THREADS` 控制每个模型的算子线程数，使用目标服务器的批量样本决定线程配置。
 
 ## 回滚

@@ -44,6 +44,7 @@ ghcr.io/<owner>/<repository>-web
 - 镜像以非 root 用户运行，且不包含 `.env` 或测试凭据标记；
 - 后端在断网、只读根文件系统下使用默认 ONNX Runtime CPU 引擎识别合成出租车票和扫描行程单，检查金额、日期、类型和路线；
 - 后端完成迁移并通过 production readiness；
+- 在相同只读根与局部 tmpfs 下，额外从带较大材料元数据及部分 0029 列的合成旧库启动，验证迁移前已准备私有临时目录、材料记录完整保留并通过 production readiness；
 - Web 镜像通过 Nginx 配置检查，并能代理 `/api/ready`；
 - 推送后的 registry digest 对应刚刚通过测试的本地镜像。
 
