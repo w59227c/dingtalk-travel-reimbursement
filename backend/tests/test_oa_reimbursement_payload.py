@@ -666,7 +666,8 @@ def test_snapshot_counts_discontinuous_days_and_merges_overlapping_subsidies() -
     assert values["durationDays"] == "10"
 
 
-def test_snapshot_allows_expenses_in_one_of_several_discontinuous_approval_periods() -> None:
+@pytest.mark.parametrize("second_department", ["100", "200"])
+def test_snapshot_allows_expenses_in_discontinuous_approval_periods(second_department) -> None:
     base = _source()
     draft_input = _draft_input(trip=False)
     totals = calculate_expense_totals(draft_input.items, None)
@@ -682,6 +683,7 @@ def test_snapshot_allows_expenses_in_one_of_several_discontinuous_approval_perio
         base.related_approvals[0],
         sort_order=1,
         process_instance_id="travel-instance-2",
+        originator_department_id=second_department,
         start_date=date(2026, 9, 1),
         end_date=date(2026, 9, 3),
     )
@@ -858,9 +860,11 @@ async def test_workflow_transmits_the_same_json_contract_that_is_hashed(settings
     assert seen[0].decode("utf-8") == expected
 
 
+@pytest.mark.parametrize("session_department", ["100", "200", ""])
 def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
     client_factory,
     monkeypatch,
+    session_department,
 ) -> None:
     client = client_factory()
     catalog = _catalog()
@@ -978,6 +982,7 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
             )
         draft.input_json = calculation.canonical_json
         database.commit()
+        actor = replace(actor, department_id=session_department, department_name="会话部门")
         source = collect_snapshot_source(
             database,
             staging=staging,
@@ -993,6 +998,8 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
         )
 
         assert source.draft_revision == 5
+        assert source.identity.department_id == "100"
+        assert source.identity.department_name == "示例业务部门"
         assert source.related_approvals[0].process_instance_id == "travel-instance-1"
         assert source.original_files[0].storage_key == staged.storage_key
         assert source.original_files[0].sort_order == 0

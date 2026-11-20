@@ -344,6 +344,9 @@ def test_failed_cleanup_does_not_starve_older_pending_work(
     client, headers, first_id, first_file_id, first_path = setup_workspace(
         client_factory, monkeypatch
     )
+    with client.app.state.database_session_factory() as database:
+        database.get(ReimbursementDraft, first_id).workspace_retired = True
+        database.commit()
     second_id = _insert_draft(client)
     second = _upload(client, headers["X-CSRF-Token"], second_id, revision=1).json()["data"]["file"]
     with client.app.state.database_session_factory() as database:

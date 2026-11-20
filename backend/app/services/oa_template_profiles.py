@@ -122,6 +122,7 @@ class OaTemplateCatalogContract:
     reimbursement: ReimbursementTemplateContract
     travel_profiles: tuple[TravelTemplateContract, ...]
     catalog_revision: int | None = None
+    is_general: bool = False
 
     @property
     def allowed_travel_process_codes(self) -> tuple[str, ...]:
@@ -186,7 +187,10 @@ REIMBURSEMENT_LOGICAL_FIELD_SPECS: Final[tuple[LogicalFieldSpec, ...]] = (
     LogicalFieldSpec("attachments", "附件", frozenset({"DDAttachment"})),
     LogicalFieldSpec("reimbursementEmployee", "报销人", frozenset({"TextField"}), required=False),
     LogicalFieldSpec(
-        "reimbursementDepartment", "报销部门", frozenset({"TextField"}), required=False,
+        "reimbursementDepartment",
+        "报销部门",
+        frozenset({"TextField"}),
+        required=False,
     ),
 )
 TRAVEL_LOGICAL_FIELD_SPECS: Final[tuple[LogicalFieldSpec, ...]] = (
@@ -471,7 +475,10 @@ async def confirm_template_catalog(
         if profile is None or profile.config_version != expected_config_version:
             raise _configuration_changed_error()
         draft_binding_version = _preserved_draft_binding(
-            profile, reimbursement_schema, normalized_reimbursement_mapping, contracts,
+            profile,
+            reimbursement_schema,
+            normalized_reimbursement_mapping,
+            contracts,
         )
         unchanged = (
             draft_binding_version is not None
@@ -522,9 +529,8 @@ def _preserved_draft_binding(
     additions = mappings.keys() - existing.keys()
     identity_fields = {spec.key for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS if not spec.required}
     # Reconfirming an unchanged catalog must keep a binding already preserved.
-    if (
-        additions - identity_fields
-        or any(mappings.get(key) != component_id for key, component_id in existing.items())
+    if additions - identity_fields or any(
+        mappings.get(key) != component_id for key, component_id in existing.items()
     ):
         return None
     refreshed = _compatible_refreshed_catalog(
@@ -532,9 +538,11 @@ def _preserved_draft_binding(
         reimbursement_schema=reimbursement_schema,
         travel_schemas=[item.schema for item in travel_profiles],
     )
-    if refreshed is None or [
-        replace(item, confirmed_schema_fingerprint=None) for item in refreshed.travel_profiles
-    ] != travel_profiles:
+    if (
+        refreshed is None
+        or [replace(item, confirmed_schema_fingerprint=None) for item in refreshed.travel_profiles]
+        != travel_profiles
+    ):
         return None
     return current.config_version
 
@@ -705,7 +713,9 @@ def _compatible_refreshed_catalog(
 ) -> OaTemplateCatalogContract | None:
     try:
         return _refresh_compatible_catalog(
-            configured, reimbursement_schema=reimbursement_schema, travel_schemas=travel_schemas,
+            configured,
+            reimbursement_schema=reimbursement_schema,
+            travel_schemas=travel_schemas,
         )
     except _CatalogMismatch:
         return None
@@ -784,9 +794,8 @@ def _refresh_travel_contract(
         travel_source_component_id(configured, field) for field in accounting_fields
     )
     if (
-        accounting_sources != tuple(
-            travel_source_component_id(observed_profile, field) for field in accounting_fields
-        )
+        accounting_sources
+        != tuple(travel_source_component_id(observed_profile, field) for field in accounting_fields)
         or classify_schema_change(
             configured.schema,
             observed,
@@ -869,7 +878,8 @@ def validate_template_mapping(schema: FormSchema, mappings: dict[str, str]) -> d
         schema,
         mappings,
         specs=tuple(
-            spec for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS
+            spec
+            for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS
             if spec.required or spec.key in mappings
         ),
         reject_unmapped_required=True,

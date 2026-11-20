@@ -49,6 +49,11 @@ class ReimbursementDraftStatus(StrEnum):
     EXPIRED = "EXPIRED"
 
 
+class ReimbursementKind(StrEnum):
+    TRAVEL = "travel"
+    GENERAL = "general"
+
+
 class ReimbursementDraftFileRole(StrEnum):
     EXPENSE_SOURCE = "EXPENSE_SOURCE"
     ATTACHMENT_ONLY = "ATTACHMENT_ONLY"
@@ -58,6 +63,7 @@ class ReimbursementAttachmentKind(StrEnum):
     ITINERARY = "itinerary"
     PAYMENT_PROOF = "payment_proof"
     HOTEL_BILL = "hotel_bill"
+    WAYBILL = "waybill"
     OTHER = "other"
 
 
@@ -133,6 +139,7 @@ class ReimbursementDraft(Base):
     # Keep legacy fixture rows insertable before the deferred operator column exists.
     __mapper_args__ = {"eager_defaults": False}
     __table_args__ = (
+        CheckConstraint("kind IN ('travel', 'general')", name="ck_reimbursement_drafts_kind"),
         CheckConstraint(
             f"status IN ({_sql_values(ReimbursementDraftStatus)})",
             name="ck_reimbursement_drafts_status",
@@ -173,6 +180,7 @@ class ReimbursementDraft(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     corp_id: Mapped[str] = mapped_column(String(128))
     owner_user_id: Mapped[str] = mapped_column(String(128))
+    kind: Mapped[str] = mapped_column(String(16), server_default="travel", deferred=True)
     operator_user_id: Mapped[str | None] = mapped_column(
         String(128), server_default=text("NULL"), deferred=True
     )
@@ -1226,11 +1234,12 @@ _SQLITE_BUNDLE_MANIFEST_TRIGGERS = tuple(
                      WHERE submission_id = NEW.id AND role = 'GENERATED_EXCEL'
                        AND sort_order = 1 AND upload_status = 'LINKED'
                  )
-             WHEN NEW.snapshot_version IN (10, 11) AND json_valid(NEW.form_snapshot_json) THEN
+             WHEN NEW.snapshot_version IN (10, 11, 12) AND json_valid(NEW.form_snapshot_json) THEN
                  json_extract(NEW.form_snapshot_json, '$.snapshotVersion') = NEW.snapshot_version
                  AND CASE json_extract(NEW.form_snapshot_json, '$.attachmentMode')
                  WHEN 'excel_only' THEN
-                     json_type(NEW.form_snapshot_json, '$.originalFiles') = 'array'
+                     NEW.snapshot_version < 12
+                     AND json_type(NEW.form_snapshot_json, '$.originalFiles') = 'array'
                      AND json_array_length(NEW.form_snapshot_json, '$.originalFiles') = 0
                      AND json_type(NEW.form_snapshot_json, '$.input.items') = 'array'
                      AND json_array_length(NEW.form_snapshot_json, '$.input.items') = 0

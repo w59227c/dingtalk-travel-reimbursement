@@ -2,6 +2,7 @@ import { http, reimbursementContextHeaders } from './http'
 import type {
   ApiEnvelope,
   AuthSession,
+  Department,
   PublicConfig,
   ReimbursementDepartmentResolution,
   ReimbursementEmployee,
@@ -48,12 +49,16 @@ export async function listReimbursementEmployees(query: string, signal?: AbortSi
 export async function selectDepartmentFromTravelApproval(
   selection: ReimbursementRelatedApprovalSelection,
   selectedDepartmentId?: string,
+  keepCurrentWorkspace?: boolean,
+  currentDepartmentId?: string,
 ): Promise<ReimbursementDepartmentResolution> {
   const response = await http.post<ApiEnvelope<ReimbursementDepartmentResolution>>(
     '/me/department/from-travel-approval',
     {
       ...selection,
       ...(selectedDepartmentId ? { selectedDepartmentId } : {}),
+      ...(keepCurrentWorkspace ? { keepCurrentWorkspace: true } : {}),
+      ...(currentDepartmentId ? { currentDepartmentId } : {}),
     },
     { timeout: 60_000 },
   )
@@ -62,4 +67,11 @@ export async function selectDepartmentFromTravelApproval(
 
 export async function logout(): Promise<void> {
   await http.post('/auth/logout')
+}
+
+export async function selectDepartmentForGeneralReimbursement(departmentId: string): Promise<Department> {
+  const response = await http.post<ApiEnvelope<{ selectedDepartment: Department }>>(
+    '/me/department/for-general-reimbursement', { departmentId },
+  )
+  return response.data.data.selectedDepartment
 }

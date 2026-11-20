@@ -187,3 +187,36 @@ def test_transport_keyword_groups_are_editable_and_control_recognition(client_fa
     )
     with admin.app.state.database_session_factory() as database:
         assert load_receipt_keyword_rules(database) == ()
+
+
+def test_welfare_express_and_other_keywords_can_be_managed_independently(client_factory):
+    admin = client_factory(auth_mock_enabled=True, auth_mock_user_id="bootstrap-admin")
+    headers = {"X-CSRF-Token": mock_login(admin)["csrfToken"]}
+    path = "/api/admin/receipt-keywords"
+    for keyword, group in (("示例寄递", "express"), ("示例员工礼盒", "other")):
+        response = admin.post(
+            path,
+            headers=headers,
+            json={
+                "keyword": keyword,
+                "categoryId": "employee_welfare",
+                "welfareType": group,
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["data"]["welfareType"] == group
+    with admin.app.state.database_session_factory() as database:
+        parser = ReceiptParserRegistry(keyword_rules=load_receipt_keyword_rules(database))
+
+    for words, group in (
+        ("示例寄递", "express"),
+        ("示例员工礼盒", "other"),
+        ("示例寄递 示例员工礼盒", "express"),
+    ):
+        document = [
+            OcrLine(value, 1) for value in ("电子发票", f"项目名称：{words}", "价税合计 ¥20.00")
+        ]
+        parsed = parser.parse(document, ParseContext(2026))
+        assert parsed.category is ExpenseCategory.EMPLOYEE_WELFARE
+        assert parsed.welfare_type == group
+        assert "WELFARE_TYPE_NEEDS_CONFIRMATION" not in parsed.warnings

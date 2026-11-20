@@ -126,7 +126,7 @@ describe('authentication request ownership', () => {
     })
     await auth.selectDepartmentFromTravelApproval(selection)
     expect(auth.session.selectedDepartment).toEqual(secondDepartment)
-    expect(drafts.loadError).toBe('')
+    expect(drafts.loadError).toBe('原部门状态')
   })
 
   it('does not replace a new session with an older identity read', async () => {
@@ -169,6 +169,20 @@ describe('authentication request ownership', () => {
     await expect(auth.selectDepartmentFromTravelApproval(selection)).rejects.toThrow('部门响应丢失')
     expect(auth.session.selectedDepartment).toEqual(secondDepartment)
     expect(getMe).toHaveBeenCalledOnce()
+  })
+
+  it('reads a department change in another tab while preserving the current workspace', async () => {
+    const auth = useAuthStore()
+    auth.session = session()
+    auth.status = 'authenticated'
+    const drafts = useReimbursementDraftStore()
+    drafts.loadError = '当前页面状态'
+    vi.mocked(selectDepartmentFromTravelApproval).mockRejectedValueOnce(new Error('审批请求失败'))
+    vi.mocked(getMe).mockResolvedValueOnce({ ...session(), selectedDepartment: secondDepartment })
+    await expect(auth.selectDepartmentFromTravelApproval(selection, undefined, true)).rejects.toThrow('审批请求失败')
+    expect(getMe).toHaveBeenCalledOnce()
+    expect(auth.session.selectedDepartment).toEqual(secondDepartment)
+    expect(drafts.loadError).toBe('当前页面状态')
   })
 
   it('offers login retry when both department change and session readback fail', async () => {

@@ -9,6 +9,17 @@ import type {
 import { isItineraryOcrResult, type ItineraryOcrResult, type OcrReceiptCandidate } from '@/types/receipts'
 import type { OaFormOption } from '@/types/oa'
 
+export type ReimbursementKind = 'travel' | 'general'
+
+export interface GeneralApproval {
+  processInstanceId: string
+  title: string
+  businessId: string
+  status: string
+  result?: string | null
+  createdAt: string
+}
+
 export type ReimbursementDraftStatus =
   | 'DRAFT'
   | 'REVIEW_READY'
@@ -24,6 +35,9 @@ export interface ReimbursementDraftExpenseItemInput extends Omit<ExcelExpenseIte
   paymentProofFileIds?: string[]
   hotelBillFileIds?: string[]
   receiptAttachmentFileIds?: string[]
+  waybillFileIds?: string[]
+  welfareType?: 'express' | 'other'
+  subjectValue?: string
   railType?: ExpenseItem['railType']
   requiresItinerary?: boolean
   transportType?: ExpenseItem['transportType']
@@ -37,6 +51,8 @@ export interface ReimbursementDraftExpenseItemInput extends Omit<ExcelExpenseIte
 }
 
 export interface ReimbursementDraftInput extends Omit<ExcelGeneratePayload, 'items' | 'project'> {
+  generalApprovalIds?: string[]
+  generalApprovalSummaries?: GeneralApproval[]
   project?: ExcelProjectInput | null
   editingState?: { includeSubsidy: boolean; trip: TripInput; trips?: TripInput[] }
   ocrDispositionVersion: 1
@@ -59,6 +75,10 @@ export interface ReimbursementDraftTemplateBinding {
 }
 
 export interface ReimbursementDraftSummary {
+  itemCount?: number
+  fileCount?: number
+  itemDescriptions?: string[]
+  kind?: ReimbursementKind
   id: string
   status: ReimbursementDraftStatus
   revision: number
@@ -104,7 +124,7 @@ export interface ReimbursementDraft extends ReimbursementDraftSummary {
   input: ReimbursementDraftInput
   totals: ExpenseTotals
   attachmentMode?: 'excel_only' | 'bundle_and_excel'
-  submittedDetails?: { employeeName: string; companyLabel: string; budgetLabel: string; travelTypeLabel: string }
+  submittedDetails?: { employeeName: string; companyLabel: string; budgetLabel: string; travelTypeLabel: string; subjectLabels?: Record<string, string> }
   relatedApprovals: ReimbursementRelatedApproval[]
   relatedApprovalSummary: ReimbursementRelatedApprovalSummary | null
 }
@@ -117,8 +137,11 @@ export interface ReimbursementDraftList {
 }
 
 export interface ReimbursementSubmissionHistoryEntry {
+  beneficiaryName?: string
   totalAmount?: string
   budgetLabel?: string
+  department?: ReimbursementDraftDepartment
+  kind?: ReimbursementKind
   id: string
   lockedAt: string
   relatedApprovalCount: number
@@ -141,6 +164,7 @@ export interface OaReimbursementOptions {
   reimbursementProcessCode: string
   companyOptions: OaFormOption[]
   budgetCodeOptions: OaFormOption[]
+  subjectOptions?: (OaFormOption & { categoryId: string })[]
   travelProfiles: OaReimbursementTravelProfile[]
 }
 
@@ -189,7 +213,7 @@ export type ReimbursementDraftFileRole =
   | 'EXPENSE_SOURCE'
   | 'ATTACHMENT_ONLY'
 
-export type ReimbursementAttachmentKind = 'itinerary' | 'payment_proof' | 'hotel_bill' | 'other'
+export type ReimbursementAttachmentKind = 'itinerary' | 'payment_proof' | 'hotel_bill' | 'waybill' | 'other'
 
 export type ReimbursementDraftFileStatus =
   | 'RESERVED'

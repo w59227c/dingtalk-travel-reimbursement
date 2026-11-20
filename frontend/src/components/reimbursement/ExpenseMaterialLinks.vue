@@ -4,42 +4,33 @@ import ExpenseMaterialGroup from './ExpenseMaterialGroup.vue'
 import ExpenseMaterialFile from './ExpenseMaterialFile.vue'
 import type { ExpenseItem } from '@/types/expenses'
 import type { ReimbursementDraftFile } from '@/types/reimbursements'
-import { isActiveProof, isRecordedProof, missingExpenseMaterials } from '@/utils/expenseProofs'
+import { isCourierExpense, isRecordedProof, missingExpenseMaterials } from '@/utils/expenseProofs'
 
 const props = withDefaults(defineProps<{
   item: ExpenseItem
   files: ReimbursementDraftFile[]
   disabled: boolean
   previewLoading: boolean
-  uploading?: boolean
-  error?: string
   hasItinerarySuggestion?: boolean
   allowPurged?: boolean
   allowPreview?: boolean
-}>(), { allowPreview: true, error: '' })
+}>(), { allowPreview: true })
 const emit = defineEmits<{
   preview: [file: ReimbursementDraftFile]
   purpose: [file: ReimbursementDraftFile]
-  upload: [replaceId?: string]
-  reuse: []
-  unlink: [fileId: string]
+  manage: [kind: 'payment_proof' | 'hotel_bill' | 'waybill']
   itinerary: []
-  hotelUpload: [replaceId?: string]
-  hotelReuse: []
-  hotelUnlink: [fileId: string]
 }>()
 const missing = computed(() => missingExpenseMaterials(props.item, props.files, { allowPurged: props.allowPurged }))
 const paymentFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'payment_proof', props.allowPurged)
   && props.item.paymentProofFileIds?.includes(file.id)))
-const hasReusableProof = computed(() => props.files.some((file) => isActiveProof(file, 'payment_proof')
-  && !props.item.paymentProofFileIds?.includes(file.id)))
 const hotelFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'hotel_bill', props.allowPurged)
   && props.item.hotelBillFileIds?.includes(file.id)))
 const receiptFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'other', props.allowPurged)
   && props.item.receiptAttachmentFileIds?.includes(file.id)))
-const hasReusableHotel = computed(() => props.files.some((file) => isActiveProof(file, 'hotel_bill')
-  && !props.item.hotelBillFileIds?.includes(file.id)))
-
+const waybills = computed(() => props.files.filter((file) => isRecordedProof(file, 'waybill', props.allowPurged)
+  && props.item.waybillFileIds?.includes(file.id)))
+const canLinkWaybill = computed(() => props.allowPreview && (isCourierExpense(props.item) || waybills.value.length > 0))
 function hotelSummary(file: ReimbursementDraftFile): string {
   const details = file.hotelBillDetails
   if (!details) return props.allowPreview ? '请预览核对住宿信息。' : ''
@@ -55,6 +46,55 @@ function hotelSummary(file: ReimbursementDraftFile): string {
     :data-expense-material-id="item.id"
     tabindex="-1"
   >
+    <ExpenseMaterialGroup
+      v-if="waybills.length || canLinkWaybill"
+      label="运单明细"
+      :count="waybills.length || undefined"
+    >
+      <template
+        v-if="canLinkWaybill"
+        #actions
+      >
+        <el-button
+          type="primary"
+          plain
+          size="small"
+          :disabled="disabled"
+          @click="emit('manage', 'waybill')"
+        >
+          关联运单明细
+        </el-button>
+      </template>
+      <p
+        v-if="canLinkWaybill && !waybills.length"
+        class="field-help"
+      >
+        运单明细可选。
+      </p>
+      <ExpenseMaterialFile
+        v-for="file in waybills"
+        :key="file.id"
+        :name="file.name"
+        :preview-available="allowPreview && file.status !== 'PURGED'"
+        :preview-loading="previewLoading"
+        @preview="emit('preview', file)"
+      >
+        <template
+          v-if="canLinkWaybill"
+          #actions
+        >
+          <el-button
+            type="primary"
+            plain
+            size="small"
+            :disabled="disabled"
+            @click="emit('purpose', file)"
+          >
+            修改用途
+          </el-button>
+        </template>
+      </ExpenseMaterialFile>
+    </ExpenseMaterialGroup>
     <ExpenseMaterialGroup
       v-if="receiptFiles.length"
       label="票据材料"
@@ -77,28 +117,17 @@ function hotelSummary(file: ReimbursementDraftFile): string {
       data-testid="hotel-bill-group"
     >
       <template
-        v-if="allowPreview && item.category === 'lodging'"
+        v-if="allowPreview"
         #actions
       >
         <el-button
           type="primary"
           plain
           size="small"
-          :loading="uploading"
           :disabled="disabled"
-          @click="emit('hotelUpload')"
+          @click="emit('manage', 'hotel_bill')"
         >
-          ＋ 添加住宿明细
-        </el-button>
-        <el-button
-          v-if="hasReusableHotel"
-          type="primary"
-          plain
-          size="small"
-          :disabled="disabled"
-          @click="emit('hotelReuse')"
-        >
-          从已上传材料选择
+          关联住宿明细
         </el-button>
       </template>
       <p
@@ -128,24 +157,6 @@ function hotelSummary(file: ReimbursementDraftFile): string {
             plain
             size="small"
             :disabled="disabled"
-            @click="emit('hotelUpload', file.id)"
-          >
-            更换
-          </el-button>
-          <el-button
-            type="danger"
-            plain
-            size="small"
-            :disabled="disabled"
-            @click="emit('hotelUnlink', file.id)"
-          >
-            移除关联
-          </el-button>
-          <el-button
-            type="primary"
-            plain
-            size="small"
-            :disabled="disabled"
             @click="emit('purpose', file)"
           >
             修改用途
@@ -168,7 +179,7 @@ function hotelSummary(file: ReimbursementDraftFile): string {
           :disabled="disabled"
           @click="emit('itinerary')"
         >
-          选择行程单
+          关联行程单
         </el-button>
       </template>
       <p class="material-needed">
@@ -182,28 +193,17 @@ function hotelSummary(file: ReimbursementDraftFile): string {
       data-testid="payment-proof-group"
     >
       <template
-        v-if="allowPreview && missing.includes('付款凭证')"
+        v-if="allowPreview"
         #actions
       >
         <el-button
           type="primary"
           plain
           size="small"
-          :loading="uploading"
           :disabled="disabled"
-          @click="emit('upload')"
+          @click="emit('manage', 'payment_proof')"
         >
-          ＋ 添加付款凭证
-        </el-button>
-        <el-button
-          v-if="hasReusableProof"
-          type="primary"
-          plain
-          size="small"
-          :disabled="disabled"
-          @click="emit('reuse')"
-        >
-          从已上传材料选择
+          关联付款凭证
         </el-button>
       </template>
       <p
@@ -232,24 +232,6 @@ function hotelSummary(file: ReimbursementDraftFile): string {
             plain
             size="small"
             :disabled="disabled"
-            @click="emit('upload', file.id)"
-          >
-            更换
-          </el-button>
-          <el-button
-            type="danger"
-            plain
-            size="small"
-            :disabled="disabled"
-            @click="emit('unlink', file.id)"
-          >
-            移除关联
-          </el-button>
-          <el-button
-            type="primary"
-            plain
-            size="small"
-            :disabled="disabled"
             @click="emit('purpose', file)"
           >
             修改用途
@@ -257,13 +239,6 @@ function hotelSummary(file: ReimbursementDraftFile): string {
         </template>
       </ExpenseMaterialFile>
     </ExpenseMaterialGroup>
-    <p
-      v-if="error"
-      class="material-error"
-      role="alert"
-    >
-      {{ error }}
-    </p>
   </div>
 </template>
 
@@ -271,5 +246,4 @@ function hotelSummary(file: ReimbursementDraftFile): string {
 .expense-materials { display: grid; gap: 12px; margin-top: 4px; padding-top: 12px; border-top: 1px solid #e4e7ed; outline-offset: 4px; }
 .expense-materials:empty { display: none; }
 .material-needed { margin: 0; padding: 8px 10px; border-radius: 8px; background: #fff8ed; color: #8b5a16; font-size: 12px; line-height: 1.6; }
-.material-error { margin: 0; color: var(--el-color-danger); font-size: 12px; }
 </style>

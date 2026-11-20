@@ -693,7 +693,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
 
 <template>
   <el-card
-    id="oa-template-catalog"
+    id="travel-oa-template"
     v-loading="loading || inspecting || saving"
     shadow="never"
     class="oa-template-card"
@@ -701,7 +701,7 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
     <template #header>
       <div class="oa-template-heading">
         <div>
-          <h2>钉钉 OA 模板目录</h2>
+          <h2>差旅报销模板</h2>
           <p>预算选项在报销时自动同步，无需重新保存目录。修改模板或字段映射时，先读取检查，再保存整个目录。</p>
         </div>
         <div class="oa-template-status">
@@ -1079,139 +1079,4 @@ function inspectionFromCatalog(catalog: OaTemplateCatalog): OaTemplateCatalogIns
   </el-card>
 </template>
 
-<style scoped>
-.oa-template-card {
-  margin-top: 18px;
-}
-
-.oa-template-heading,
-.oa-template-section-heading,
-.oa-travel-profile-heading,
-.oa-template-actions {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.oa-template-heading h2,
-.oa-template-section h3 {
-  margin: 0;
-}
-
-.oa-template-heading p,
-.oa-template-section-heading p {
-  margin: 6px 0 0;
-  color: var(--el-text-color-secondary);
-  line-height: 1.6;
-}
-
-.oa-template-status {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-}
-
-.oa-template-alert {
-  margin-bottom: 16px;
-}
-
-.oa-template-section + .oa-template-section {
-  margin-top: 24px;
-  padding-top: 24px;
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-
-.oa-template-section > h3,
-.oa-template-section-heading {
-  margin-bottom: 16px;
-}
-
-.oa-template-mapping-grid,
-.oa-template-header-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0 16px;
-}
-
-.oa-template-schema-summary {
-  display: grid;
-  gap: 5px;
-  margin: 0 0 16px;
-  padding: 12px;
-  border-radius: 8px;
-  background: var(--el-fill-color-light);
-  color: var(--el-text-color-regular);
-  font-size: 13px;
-}
-
-.oa-template-schema-summary code {
-  display: block;
-  overflow-wrap: anywhere;
-}
-
-.oa-template-placeholder {
-  margin: 0;
-  padding: 14px;
-  border: 1px dashed var(--el-border-color);
-  border-radius: 8px;
-  color: var(--el-text-color-secondary);
-  line-height: 1.6;
-}
-
-.oa-travel-profile {
-  padding: 16px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 10px;
-  background: var(--el-bg-color-page);
-}
-
-.oa-travel-profile + .oa-travel-profile {
-  margin-top: 14px;
-}
-
-.oa-travel-profile-heading {
-  margin-bottom: 12px;
-}
-
-.oa-option-value {
-  float: right;
-  margin-left: 18px;
-  color: var(--el-text-color-secondary);
-}
-
-.oa-template-actions {
-  justify-content: flex-end;
-  margin-top: 24px;
-}
-
-.oa-template-save-reason {
-  align-self: center;
-  margin-right: auto;
-  color: var(--el-color-warning-dark-2);
-}
-
-@media (max-width: 720px) {
-  .oa-template-heading,
-  .oa-template-section-heading {
-    flex-direction: column;
-  }
-
-  .oa-template-mapping-grid,
-  .oa-template-header-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .oa-template-actions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .oa-template-actions :deep(.el-button + .el-button) {
-    margin-left: 0;
-  }
-}
-</style>
+<style scoped src="./oaTemplateSettings.css"></style>

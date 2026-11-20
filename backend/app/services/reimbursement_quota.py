@@ -595,7 +595,6 @@ class ReimbursementQuotaCoordinator:
                 )
                 if draft is None:
                     raise _draft_not_found_error()
-                _require_draft_department(draft, actor)
                 if draft.recovery_source_draft_id:
                     try:
                         cleanup_guard.enter_context(
@@ -683,8 +682,6 @@ class ReimbursementQuotaCoordinator:
                         ReimbursementDraft.corp_id == actor.corp_id,
                         ReimbursementDraft.owner_user_id == actor.user_id,
                         ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                        ReimbursementDraft.department_id == actor.department_id,
-                        ReimbursementDraft.department_name == actor.department_name,
                         ReimbursementDraft.status == ReimbursementDraftStatus.EXPIRED.value,
                         ReimbursementDraft.revision == operation_revision,
                     )
@@ -1178,8 +1175,6 @@ class ReimbursementQuotaCoordinator:
                     ReimbursementDraft.corp_id == item.actor.corp_id,
                     ReimbursementDraft.owner_user_id == item.actor.user_id,
                     ReimbursementDraft.operator_user_id == item.actor.operator_user_id,
-                    ReimbursementDraft.department_id == item.actor.department_id,
-                    ReimbursementDraft.department_name == item.actor.department_name,
                     ReimbursementDraft.revision == item.draft_revision,
                     ReimbursementDraft.status == item.draft_status,
                     ReimbursementDraft.locked_at.is_(None),
@@ -1415,15 +1410,6 @@ def _delete_draft_file_cleanup(
         # deletable final object.
         return
     raise ReimbursementReservationConflict("draft file is not deletable")
-
-
-def _require_draft_department(draft: ReimbursementDraft, actor: DraftActor) -> None:
-    if draft.department_id != actor.department_id or draft.department_name != actor.department_name:
-        raise ApiError(
-            "REIMBURSEMENT_DRAFT_DEPARTMENT_MISMATCH",
-            "草稿所属部门与当前选择不同，请切换部门后重试",
-            409,
-        )
 
 
 def _draft_not_found_error() -> ApiError:

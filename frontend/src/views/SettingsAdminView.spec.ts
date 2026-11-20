@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { listAttendanceCalendars } from '@/api/attendanceCalendars'
 import { getExpenseCategories } from '@/api/expenses'
-import { getOaTemplateCatalog } from '@/api/oaTemplates'
+import { confirmGeneralOaTemplate, getGeneralOaTemplate, getOaTemplateCatalog, inspectGeneralOaTemplate } from '@/api/oaTemplates'
 import {
   createReceiptKeyword,
   deleteReceiptKeyword,
@@ -55,8 +55,11 @@ async function chooseEmployee(field: Pick<DOMWrapper<Element>, 'findAll'>): Prom
 vi.mock('@/api/attendanceCalendars', () => ({ listAttendanceCalendars: vi.fn(), parseAttendanceNotice: vi.fn(), applyAttendanceNotice: vi.fn(), deleteAttendanceCalendar: vi.fn() }))
 vi.mock('@/api/expenses', () => ({ getExpenseCategories: vi.fn() }))
 vi.mock('@/api/oaTemplates', () => ({
+  confirmGeneralOaTemplate: vi.fn(),
   confirmOaTemplateCatalog: vi.fn(),
+  getGeneralOaTemplate: vi.fn(),
   getOaTemplateCatalog: vi.fn(),
+  inspectGeneralOaTemplate: vi.fn(),
   inspectOaTemplateCatalog: vi.fn(),
 }))
 vi.mock('@/api/receiptKeywords', () => ({
@@ -242,6 +245,48 @@ describe('SettingsAdminView receipt keywords', () => {
       expect(wrapper.find(`#${id}`).exists()).toBe(true)
     }
     wrapper.unmount()
+  })
+
+  it.each([false, true])('checks and confirms the general OA template in the shared directory, mobile=%s', async (mobile) => {
+    vi.mocked(getOaTemplateCatalog).mockResolvedValue({
+      configured: false, configVersion: null, compatibilityStatus: 'UNCONFIGURED',
+      isSubmissionReady: false, requiresConfirmation: true, catalog: null,
+    })
+    const configured = { processCode: 'PROC-EXPENSE', templateName: '合成费用报销', configVersion: 1, status: 'COMPATIBLE' as const }
+    vi.mocked(getGeneralOaTemplate).mockReset().mockResolvedValue(configured)
+    vi.mocked(inspectGeneralOaTemplate).mockReset().mockResolvedValue({
+      processCode: configured.processCode, templateName: configured.templateName,
+      schemaFingerprint: 'a'.repeat(64), fields: [{ label: '报销主体', type: 'DDSelectField' }],
+    })
+    vi.mocked(confirmGeneralOaTemplate).mockReset().mockResolvedValue({ ...configured, configVersion: 2 })
+    const confirmation = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
+    const wrapper = mount(SettingsAdminView, {
+      props: { mobile }, global: { plugins: [adminPinia(), ElementPlus], stubs: { RouterLink: true } },
+    })
+    try {
+      await flushPromises()
+      const catalog = wrapper.get('#oa-template-catalog')
+      expect(catalog.get('#travel-oa-template').text()).toContain('读取并检查模板')
+      expect(getGeneralOaTemplate).not.toHaveBeenCalled()
+      await catalog.get('#tab-general').trigger('click')
+      await flushPromises()
+      const general = catalog.get('#general-oa-template')
+      expect(general.text()).toContain('配置版本 1')
+      expect(general.get<HTMLInputElement>('input[aria-label="普通费用 processCode"]').element.value).toBe('PROC-EXPENSE')
+      const button = (label: string) => general.findAll('button').find(entry => entry.text().trim() === label)!
+      expect(button('保存模板').attributes('disabled')).toBeDefined()
+      await button('读取并检查模板').trigger('click')
+      await flushPromises()
+      expect(general.text()).toContain('已核对字段：报销主体')
+      expect(confirmGeneralOaTemplate).not.toHaveBeenCalled()
+      await button('保存模板').trigger('click')
+      await flushPromises()
+      expect(confirmation).toHaveBeenCalledOnce()
+      expect(confirmGeneralOaTemplate).toHaveBeenCalledWith({
+        processCode: 'PROC-EXPENSE', schemaFingerprint: 'a'.repeat(64), expectedConfigVersion: 1,
+      })
+      expect(general.text()).toContain('配置版本 2')
+    } finally { wrapper.unmount(); confirmation.mockRestore() }
   })
 
   it.each([false, true])('does not mount any settings tool for an employee, mobile=%s', async (mobile) => {

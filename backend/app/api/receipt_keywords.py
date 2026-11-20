@@ -30,11 +30,14 @@ class ReceiptKeywordWrite(BaseModel):
     transport_type: Literal["other", "ride_hailing", "taxi"] | None = Field(
         default=None, alias="transportType"
     )
+    welfare_type: Literal["express", "other"] | None = Field(default=None, alias="welfareType")
 
     @model_validator(mode="after")
     def validate_transport_type(self) -> ReceiptKeywordWrite:
         if self.transport_type is not None and self.category_id != ExpenseCategory.LOCAL_TRANSPORT:
             raise ValueError("transport type is only available for local transport keywords")
+        if self.welfare_type is not None and self.category_id != ExpenseCategory.EMPLOYEE_WELFARE:
+            raise ValueError("welfare type is only available for welfare keywords")
         return self
 
     @field_validator("keyword")
@@ -53,7 +56,10 @@ class ReceiptKeywordWrite(BaseModel):
         except ValueError:
             raise ValueError("unknown expense category") from None
         metadata = CATEGORY_BY_ID[category]
-        if not metadata.manual_selectable or category is ExpenseCategory.OTHER:
+        if not metadata.manual_selectable or category in {
+            ExpenseCategory.OTHER,
+            ExpenseCategory.EXPRESS,
+        }:
             raise ValueError("category cannot be used by keyword mappings")
         return category.value
 
@@ -68,6 +74,8 @@ def _mapping_data(mapping: ReceiptKeywordMapping) -> dict[str, object]:
     }
     if category is ExpenseCategory.LOCAL_TRANSPORT:
         data["transportType"] = mapping.transport_type or "other"
+    if category is ExpenseCategory.EMPLOYEE_WELFARE:
+        data["welfareType"] = mapping.welfare_type or "other"
     return data
 
 
@@ -109,6 +117,7 @@ def create_receipt_keyword(
         normalized_keyword=normalize_receipt_keyword(body.keyword),
         category_id=body.category_id,
         transport_type=body.transport_type if body.transport_type != "other" else None,
+        welfare_type=body.welfare_type,
     )
     _save(database, mapping)
     return success(_mapping_data(mapping))
@@ -128,6 +137,7 @@ def update_receipt_keyword(
     mapping.normalized_keyword = normalize_receipt_keyword(body.keyword)
     mapping.category_id = body.category_id
     mapping.transport_type = body.transport_type if body.transport_type != "other" else None
+    mapping.welfare_type = body.welfare_type
     _save(database, mapping)
     return success(_mapping_data(mapping))
 

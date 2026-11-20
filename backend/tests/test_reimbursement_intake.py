@@ -566,7 +566,7 @@ def test_pdf_preview_does_not_misreport_a_transient_worker_exit_as_a_large_page(
     assert "页面超过" not in response.text
 
 
-def test_preview_rejects_changed_file_bytes_and_wrong_department(client_factory):
+def test_preview_ignores_department_and_rejects_changed_file_bytes(client_factory):
     client = client_factory(auth_mock_enabled=True)
     csrf = mock_login(client)["csrfToken"]
     draft_id = _insert_draft(client)
@@ -576,7 +576,7 @@ def test_preview_rejects_changed_file_bytes_and_wrong_department(client_factory)
         draft = database.get(ReimbursementDraft, draft_id)
         draft.department_id = "other-department"
         database.commit()
-    assert client.get(url).status_code == 409
+    assert client.get(url).status_code == 200
     with client.app.state.database_session_factory() as database:
         database.get(ReimbursementDraft, draft_id).department_id = "100"
         file = database.get(ReimbursementDraftFile, uploaded["id"])

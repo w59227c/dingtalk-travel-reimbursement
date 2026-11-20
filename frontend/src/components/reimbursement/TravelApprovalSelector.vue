@@ -8,8 +8,9 @@ import type {
   ReimbursementRelatedApprovalSelection,
 } from '@/types/reimbursements'
 import { mappedTravelTypeOption } from '@/utils/travelTypes'
-import { APPROVAL_QUERY_HINT, approvalQueryDateError, approvalQueryStartDisabled, approvalQueryEndDisabled } from '@/utils/approvalQueryDates'
+import { approvalQueryDateError } from '@/utils/approvalQueryDates'
 import ApprovalAccountingLine from './ApprovalAccountingLine.vue'
+import ApprovalSelectorPanel from './ApprovalSelectorPanel.vue'
 
 const props = withDefaults(defineProps<{
   modelValue: ReimbursementRelatedApprovalSelection[]
@@ -19,6 +20,7 @@ const props = withDefaults(defineProps<{
   busy?: boolean
   delegated?: boolean
   single?: boolean
+  departmentChoices?: { id: string; name: string }[]
   requiredStartDate?: string
   requiredEndDate?: string
 }>(), {
@@ -28,6 +30,7 @@ const props = withDefaults(defineProps<{
   busy: false,
   delegated: false,
   single: false,
+  departmentChoices: undefined,
   requiredStartDate: '',
   requiredEndDate: '',
 })
@@ -51,11 +54,7 @@ const drafts = useReimbursementDraftStore()
 const fromDate = ref('')
 const toDate = ref('')
 const keyword = ref('')
-const startCalendarMonth = computed(() => toDate.value ? new Date(`${toDate.value}T00:00:00`) : undefined)
-const endCalendarMonth = computed(() => fromDate.value ? new Date(`${fromDate.value}T00:00:00`) : undefined)
 const localError = ref('')
-const filtersOpen = ref(false)
-const hasFilters = computed(() => Boolean(fromDate.value || toDate.value || keyword.value.trim()))
 const queryNeedsAdjustment = computed(() => !!approvalQueryDateError(fromDate.value, toDate.value) || [
   'TRAVEL_APPROVAL_QUERY_HISTORY_UNAVAILABLE', 'TRAVEL_APPROVAL_QUERY_FUTURE',
   'TRAVEL_APPROVAL_QUERY_WINDOW_INVALID', 'DINGTALK_QUERY_TIME_INVALID',
@@ -63,7 +62,6 @@ const queryNeedsAdjustment = computed(() => !!approvalQueryDateError(fromDate.va
 const optionsNeedRefresh = computed(() => [
   'OA_TEMPLATE_CONFIGURATION_CHANGED', 'OA_TEMPLATE_SCHEMA_CHANGED', 'OA_TEMPLATE_CONFIRMATION_REQUIRED',
 ].includes(drafts.travelApprovalsErrorCode))
-watch(queryNeedsAdjustment, (value) => { if (value) filtersOpen.value = true }, { immediate: true })
 const candidateCache = new Map<string, OaTravelApproval>()
 
 const selectedIds = computed(() => new Set(
@@ -215,12 +213,6 @@ function unavailableReason(row: ApprovalRow): string {
   const restoredApproval = props.linkedApprovals?.find(
     (item) => item.processInstanceId === first.processInstanceId,
   )
-  const sourceDepartmentId = baseline?.originatorDepartmentId
-    ?? restoredApproval?.originatorDepartmentId
-  if (sourceDepartmentId
-    && candidate.originatorDepartmentId !== sourceDepartmentId) {
-    return '发起部门与已选审批不同，请按部门分别报销'
-  }
   const company = baseline?.companyOption?.value ?? drafts.currentDraft?.input.companyValue
   const budget = baseline?.budgetCodeOption?.value ?? drafts.currentDraft?.input.budgetCodeValue
   const profile = drafts.reimbursementOptions?.travelProfiles
@@ -267,122 +259,65 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
     )?.label || draft.input.project?.text || draft.input.budgetCodeValue,
   }
 }
+
+function departmentLabelFor(row: ApprovalRow): string {
+  const candidate = candidateCache.get(row.processInstanceId)
+  const department = props.departmentChoices?.find((item) => item.id === candidate?.originatorDepartmentId)
+  return department ? `发起部门：${department.name}` : '需确认办理部门'
+}
 </script>
 
 <template>
-  <section
-    class="travel-approval-section"
-    data-testid="travel-approval-section"
-    aria-labelledby="travel-approval-heading"
-    :aria-busy="busy"
+  <ApprovalSelectorPanel
+    v-model:from-date="fromDate"
+    v-model:to-date="toDate"
+    v-model:keyword="keyword"
+    kind="travel"
+    :title="props.single ? '选择本次出差申请' : '关联已通过的出差审批'"
+    :mobile="mobile"
+    :readonly="readonly"
+    :busy="busy"
+    :loading="drafts.loadingTravelApprovals"
+    :query-needs-adjustment="queryNeedsAdjustment"
+    :empty-description="localError || drafts.travelApprovalsError
+      ? queryNeedsAdjustment ? '请调整查询日期后重新查询' : '审批查询未完成，请重试'
+      : props.delegated ? '当前查询范围内没有抄送给你的可关联审批' : '当前查询范围内没有已通过的出差审批'"
+    :rows="rows"
+    :selected-ids="selectedIds"
+    :unavailable-reason="unavailableReason"
+    :selection-help="departmentChoices ? '选择审批并确认后更换部门。找不到时可筛选日期或标题。' : undefined"
+    @search="retrySearch"
+    @toggle="toggle"
   >
-    <div
-      class="card-header travel-approval-heading"
-      :class="{ 'travel-approval-heading--mobile': props.mobile }"
-    >
-      <div>
-        <h2 id="travel-approval-heading">
-          {{ props.single ? '选择本次出差申请' : '关联已通过的出差审批' }}
-        </h2>
-        <p v-if="props.single">
-          系统会优先匹配审批的发起部门；无法匹配当前部门时再请你确认。
-        </p>
-        <p v-else>
-          可关联同一部门、公司、预算和出差类别的多张审批，日期可不连续。
-        </p>
-        <p v-if="props.delegated">
-          代报时只显示该员工已通过且抄送给你的出差审批。
-        </p>
-      </div>
-      <el-tag
-        class="travel-approval-count"
-        :type="modelValue.length ? 'success' : 'warning'"
-        effect="light"
+    <template #intro>
+      <p
+        v-if="props.single"
+        class="field-help"
       >
-        已选 {{ modelValue.length }} 张
-      </el-tag>
-    </div>
-
-    <div
-      v-if="props.mobile && !readonly"
-      class="approval-filter-heading"
-    >
-      <span>近期已通过的审批</span>
-      <el-button
-        link
-        type="primary"
-        aria-label="筛选审批"
-        :aria-expanded="filtersOpen"
-        aria-controls="approval-query-filters"
-        @click="filtersOpen = !filtersOpen"
-      >
-        {{ filtersOpen ? '收起筛选' : hasFilters ? '筛选审批 · 已设置' : '筛选审批' }}
-      </el-button>
-    </div>
-    <fieldset
-      v-show="!props.mobile || filtersOpen"
-      id="approval-query-filters"
-      class="plain-fieldset"
-      :disabled="readonly"
-    >
-      <div
-        class="travel-query-grid"
-        :class="{ 'travel-query-grid--mobile': props.mobile }"
-      >
-        <el-date-picker
-          v-model="fromDate"
-          type="date"
-          value-format="YYYY-MM-DD"
-          :placeholder="props.mobile ? '开始日期' : '查询开始日期'"
-          :editable="false"
-          :disabled-date="(date: Date) => approvalQueryStartDisabled(date, toDate)"
-          :default-value="startCalendarMonth"
-          aria-label="出差审批查询开始日期"
-          popper-class="approval-query-picker"
-          class="full-width"
-        />
-        <el-date-picker
-          v-model="toDate"
-          type="date"
-          value-format="YYYY-MM-DD"
-          :placeholder="props.mobile ? '结束日期' : '查询结束日期'"
-          :editable="false"
-          :disabled-date="(date: Date) => approvalQueryEndDisabled(date, fromDate)"
-          :default-value="endCalendarMonth"
-          aria-label="出差审批查询结束日期"
-          popper-class="approval-query-picker"
-          class="full-width"
-        />
-        <el-input
-          v-model="keyword"
-          clearable
-          maxlength="100"
-          placeholder="标题或审批编号"
-          aria-label="搜索出差审批"
-          @keyup.enter="retrySearch"
-        />
-        <el-button
-          class="travel-query-button"
-          :loading="drafts.loadingTravelApprovals"
-          @click="retrySearch"
-        >
-          查询审批
-        </el-button>
-      </div>
-      <p class="travel-query-help">
-        {{ APPROVAL_QUERY_HINT }}
+        系统会优先匹配审批的发起部门；无法匹配当前部门时再请你确认。
       </p>
-    </fieldset>
-
-    <el-alert
-      v-if="!readonly && (localError || drafts.travelApprovalsError)"
-      :title="localError || drafts.travelApprovalsError"
-      type="error"
-      :closable="false"
-      show-icon
-      class="travel-query-alert"
-    >
-      <template #default>
+      <p
+        v-else
+        class="field-help"
+      >
+        可关联公司、预算和出差类别相同的多张审批，发起部门可不同，日期可不连续。
+      </p>
+      <p
+        v-if="props.delegated"
+        class="field-help"
+      >
+        代报时只显示该员工已通过且抄送给你的出差审批。
+      </p>
+    </template>
+    <template #notifications>
+      <el-alert
+        v-if="!readonly && (localError || drafts.travelApprovalsError)"
+        :title="localError || drafts.travelApprovalsError"
+        type="error"
+        :closable="false"
+        show-icon
+        class="travel-query-alert"
+      >
         <el-button
           v-if="!queryNeedsAdjustment"
           link
@@ -392,22 +327,9 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
         >
           {{ optionsNeedRefresh ? '刷新表单与审批' : '重新加载' }}
         </el-button>
-      </template>
-    </el-alert>
-
-    <el-skeleton
-      v-if="drafts.loadingTravelApprovals && rows.length === 0"
-      :rows="3"
-      animated
-      class="travel-result-loading"
-    />
-    <el-empty
-      v-else-if="rows.length === 0"
-      :description="localError || drafts.travelApprovalsError
-        ? queryNeedsAdjustment ? '请调整查询日期后重新查询' : '审批查询未完成，请重试'
-        : props.delegated ? '当前查询范围内没有抄送给你的可关联审批' : '当前查询范围内没有已通过的出差审批'"
-      :image-size="72"
-    >
+      </el-alert>
+    </template>
+    <template #empty-actions>
       <el-button
         v-if="!readonly && !queryNeedsAdjustment"
         :loading="drafts.loadingReimbursementOptions || drafts.loadingTravelApprovals"
@@ -415,190 +337,17 @@ function accountingFor(row: ApprovalRow): { company?: string; budget?: string } 
       >
         重新加载
       </el-button>
-    </el-empty>
-    <div
-      v-else
-      class="travel-approval-list"
-      aria-label="可关联的出差审批"
-      aria-live="polite"
-    >
-      <article
-        v-for="row in rows"
-        :key="row.processInstanceId"
-        class="travel-approval-row"
-        :class="{ 'is-selected': selectedIds.has(row.processInstanceId) }"
-      >
-        <el-checkbox
-          :model-value="selectedIds.has(row.processInstanceId)"
-          :disabled="readonly || busy || Boolean(unavailableReason(row))"
-          :aria-label="`选择出差审批 ${row.title}`"
-          @change="(checked: boolean) => toggle(row, checked)"
-        />
-        <span class="travel-approval-main">
-          <span class="travel-approval-title">
-            <strong>{{ row.title }}</strong>
-            <el-tag
-              v-if="row.linkedOnly"
-              size="small"
-              type="info"
-            >
-              已关联
-            </el-tag>
-          </span>
-          <span><span class="travel-approval-dates">{{ row.startDate }} 至 {{ row.endDate }}</span> · 出差类别：{{ row.travelTypeLabel }}</span>
-          <small>审批编号：{{ row.businessId }}</small>
-          <ApprovalAccountingLine v-bind="accountingFor(row)" />
-          <small
-            v-if="unavailableReason(row)"
-            role="status"
-          >不可选择：{{ unavailableReason(row) }}</small>
-        </span>
-      </article>
-    </div>
-
-    <p class="field-help">
-      选中的审批会自动保存。找不到时可筛选日期或标题。
-    </p>
-  </section>
+    </template>
+    <template #details="{ row }">
+      <span><span class="travel-approval-dates">{{ row.startDate }} 至 {{ row.endDate }}</span> · 出差类别：{{ row.travelTypeLabel }}</span>
+      <small v-if="departmentChoices">{{ departmentLabelFor(row) }}</small>
+    </template>
+    <template #accounting="{ row }">
+      <ApprovalAccountingLine v-bind="accountingFor(row)" />
+    </template>
+  </ApprovalSelectorPanel>
 </template>
 
 <style scoped>
-.approval-filter-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; color: var(--el-text-color-secondary); font-size: 13px; }
-.travel-query-help { margin: 8px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
-.plain-fieldset {
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.travel-approval-section {
-  margin-top: 22px;
-  padding-top: 22px;
-  border-top: 1px solid var(--el-border-color-lighter);
-}
-
-.travel-approval-heading {
-  align-items: flex-start;
-  margin-bottom: 16px;
-}
-
-.travel-approval-heading h2 {
-  margin: 0;
-  color: var(--el-text-color-primary);
-  font-size: 16px;
-}
-
-.travel-approval-heading p {
-  margin: 6px 0 0;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.travel-approval-heading--mobile {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 6px 10px;
-}
-.travel-approval-heading--mobile > div { display: contents; }
-.travel-approval-heading--mobile p { grid-column: 1 / -1; grid-row: 2; margin: 0; }
-.travel-approval-heading--mobile .travel-approval-count { grid-column: 2; grid-row: 1; }
-
-.travel-query-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(180px, 1.2fr) auto;
-  gap: 10px;
-}
-
-.travel-query-button {
-  width: 112px;
-}
-
-.travel-query-grid--mobile {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.travel-query-grid--mobile > * {
-  min-width: 0;
-  width: 100%;
-}
-
-.travel-query-grid--mobile > :nth-child(3),
-.travel-query-grid--mobile > :nth-child(4) {
-  grid-column: 1 / -1;
-}
-
-.travel-query-grid--mobile :deep(.el-date-editor) {
-  min-width: 0;
-  width: 100%;
-}
-
-.travel-query-grid--mobile :deep(.el-button) {
-  margin-left: 0;
-  width: 100%;
-}
-
-.travel-query-alert,
-.travel-result-loading {
-  margin-top: 14px;
-}
-
-.travel-approval-list {
-  display: grid;
-  gap: 10px;
-  margin-top: 16px;
-}
-
-.travel-approval-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 13px 14px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 10px;
-}
-
-.travel-approval-row.is-selected {
-  border-color: var(--el-color-primary-light-5);
-  background: var(--el-color-primary-light-9);
-}
-
-.travel-approval-main {
-  display: grid;
-  min-width: 0;
-  gap: 5px;
-  color: var(--el-text-color-regular);
-  line-height: 1.45;
-}
-
-.travel-approval-main small {
-  color: var(--el-text-color-secondary);
-  overflow-wrap: anywhere;
-}
-
 .travel-approval-dates { white-space: nowrap; }
-
-.travel-approval-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  color: var(--el-text-color-primary);
-}
-
-@media (max-width: 720px) {
-  .travel-query-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .travel-query-button { width: 100%; }
-}
-
-@media (max-width: 480px) {
-  .travel-query-grid {
-    grid-template-columns: 1fr;
-  }
-}
 </style>

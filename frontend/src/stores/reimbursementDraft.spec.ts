@@ -130,6 +130,36 @@ function responseError(code: string, message: string, status = 422): Error {
 }
 
 describe('persistent reimbursement draft store', () => {
+  it.each(['derived-category', 'amount', 'proof', 'subject', 'approval'] as const)(
+    'reconciles a lost ordinary expense save without hiding a changed %s', async (change) => {
+      const store = useReimbursementDraftStore()
+      store.reimbursementKind = 'general'
+      const original = structuredClone(input)
+      original.items[0]!.category = 'office'
+      original.items[0]!.subjectValue = 'synthetic-office'
+      store.currentDraft = { ...draft(), kind: 'general', input: original }
+      const sent = structuredClone(original)
+      sent.items[0]!.description = '合成费用说明'
+      const readback = structuredClone(sent)
+      readback.items[0]!.category = 'other'
+      if (change === 'amount') readback.items[0]!.amount = '44.90'
+      if (change === 'proof') readback.items[0]!.paymentProofFileIds = ['synthetic-other-file']
+      if (change === 'subject') readback.items[0]!.subjectValue = 'synthetic-other-subject'
+      if (change === 'approval') readback.generalApprovalIds = ['synthetic-other-approval']
+      vi.mocked(getReimbursementDraft).mockResolvedValueOnce({ ...draft('draft-1', 2), kind: 'general', input: readback })
+      vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic committed response lost'))
+      if (change === 'derived-category') {
+        await expect(store.saveDraft(sent)).resolves.toMatchObject({ revision: 2, input: readback })
+        expect(store.currentDraft?.revision).toBe(2)
+        expect(store.mutationError).toBe('')
+      } else {
+        await expect(store.saveDraft(sent)).rejects.toThrow('Synthetic committed response lost')
+        expect(store.currentDraft?.revision).toBe(1)
+      }
+      expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    },
+  )
+
   it('keeps an unresolved write until its current server input is adopted', async () => {
     const store = useReimbursementDraftStore()
     store.currentDraft = structuredClone(draft())
@@ -1663,6 +1693,71 @@ describe('persistent reimbursement draft store', () => {
     expect(downloadBlob).not.toHaveBeenCalled()
     expect(store.currentDraft?.revision).toBe(2)
     expect(store.revisionConflict).toBe(true)
+  })
+
+  it.each(['desktop', 'mobile-ticket', 'mobile-download'] as const)(
+    'refreshes budget options after a general expense preview fails at %s', async (mode) => {
+      const store = useReimbursementDraftStore()
+      store.reimbursementKind = 'general'
+      store.currentDraft = { ...draft(), kind: 'general' }
+      const options = {
+        templateConfigVersion: 12, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+        companyOptions: [], travelProfiles: [],
+        budgetCodeOptions: [{ value: 'DEMO-NEW', label: '新预算', key: null }],
+      }
+      store.reimbursementOptions = {
+        ...options, budgetCodeOptions: [{ value: input.budgetCodeValue, label: '原预算', key: null }],
+      }
+      vi.mocked(getOaReimbursementOptions).mockResolvedValue(options)
+      const error = responseError('REIMBURSEMENT_BUDGET_OPTION_INVALID', '请选择有效的预算代码')
+      if (mode === 'desktop') {
+        vi.mocked(getReimbursementDraftExcelPreview).mockRejectedValueOnce(error)
+        await expect(store.downloadExcelPreview()).rejects.toBe(error)
+      } else if (mode === 'mobile-ticket') {
+        vi.mocked(requestReimbursementDraftExcelPreviewTicket).mockRejectedValueOnce(error)
+        await expect(store.openExcelPreviewInDingTalk()).rejects.toBe(error)
+      } else {
+        vi.mocked(requestReimbursementDraftExcelPreviewTicket).mockResolvedValueOnce({
+          downloadUrl: '/synthetic.xlsx', downloadToken: 'synthetic', fileType: 'xlsx',
+        })
+        const nativeError = new Error('文件下载失败')
+        vi.mocked(downloadAndOpenDingTalkDocument).mockRejectedValueOnce(nativeError)
+        await expect(store.openExcelPreviewInDingTalk()).rejects.toBe(nativeError)
+      }
+      expect(getOaReimbursementOptions).toHaveBeenCalledOnce()
+      expect(getOaReimbursementOptions).toHaveBeenCalledWith({ kind: 'general', signal: expect.any(AbortSignal) })
+      expect(store.reimbursementOptions?.budgetCodeOptions).toEqual(options.budgetCodeOptions)
+      expect(store.currentDraft?.input.budgetCodeValue).toBe(input.budgetCodeValue)
+    },
+  )
+
+  it.each(['desktop', 'mobile'] as const)('syncs a renamed general budget after successful %s Excel preview', async (mode) => {
+    const store = useReimbursementDraftStore()
+    store.reimbursementKind = 'general'
+    store.currentDraft = { ...draft(), kind: 'general' }
+    const budget = { value: input.budgetCodeValue, label: '更新后的预算完整名称', key: null }
+    const options = {
+      templateConfigVersion: 12, reimbursementProcessCode: 'PROC-REIMBURSEMENT',
+      companyOptions: [], travelProfiles: [], budgetCodeOptions: [budget],
+    }
+    store.reimbursementOptions = { ...options, budgetCodeOptions: [{ ...budget, label: '原预算名称' }] }
+    vi.mocked(getOaReimbursementOptions).mockResolvedValueOnce(options)
+    if (mode === 'desktop') {
+      vi.mocked(getReimbursementDraftExcelPreview).mockResolvedValueOnce({ blob: new Blob(), filename: '更新后的预算完整名称.xlsx' })
+      await store.downloadExcelPreview()
+      expect(downloadBlob).toHaveBeenCalledWith(expect.any(Blob), '更新后的预算完整名称.xlsx')
+    } else {
+      vi.mocked(requestReimbursementDraftExcelPreviewTicket).mockResolvedValueOnce({
+        downloadUrl: '/synthetic.xlsx', downloadToken: 'synthetic', fileType: 'xlsx',
+      })
+      vi.mocked(downloadAndOpenDingTalkDocument).mockResolvedValueOnce()
+      await store.openExcelPreviewInDingTalk()
+      expect(downloadAndOpenDingTalkDocument).toHaveBeenCalledOnce()
+    }
+    expect(getOaReimbursementOptions).toHaveBeenCalledOnce()
+    expect(store.reimbursementOptions?.budgetCodeOptions).toEqual([budget])
+    expect(store.currentDraft?.input.budgetCodeValue).toBe(budget.value)
+    expect(updateReimbursementDraft).not.toHaveBeenCalled()
   })
 
   it('sends each operation with the latest adopted revision', async () => {

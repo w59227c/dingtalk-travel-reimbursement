@@ -22,7 +22,7 @@ class ReadinessReport:
     checks: dict[str, str]
 
 
-_EXPECTED_ALEMBIC_REVISION = "20261116_0028"
+_EXPECTED_ALEMBIC_REVISION = "20261119_0029"
 _REQUIRED_COLUMNS = {
     "oa_template_profiles": {
         "profile_key",
@@ -50,6 +50,7 @@ _REQUIRED_COLUMNS = {
         "normalized_keyword",
         "category_id",
         "transport_type",
+        "welfare_type",
     },
     "sessions": {
         "session_id_hash",
@@ -71,6 +72,7 @@ _REQUIRED_COLUMNS = {
         "corp_id",
         "owner_user_id",
         "operator_user_id",
+        "kind",
         "status",
         "revision",
         "template_process_code",
@@ -79,7 +81,8 @@ _REQUIRED_COLUMNS = {
         "expires_at",
         "locked_at",
         "recovery_source_draft_id",
-        "recovery_pending", "workspace_retired",
+        "recovery_pending",
+        "workspace_retired",
     },
     "reimbursement_draft_files": {
         "id",

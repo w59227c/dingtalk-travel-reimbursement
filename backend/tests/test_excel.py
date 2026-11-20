@@ -18,6 +18,7 @@ from app.core.errors import ApiError
 from app.domain.expenses import calculate_expense_totals
 from app.excel.template_contract import EXCEL_TEMPLATE, apply_output_page_setup
 from app.schemas.excel import ExcelGenerateRequest
+from app.schemas.reimbursements import ReimbursementDraftInput
 from app.services.excel_generator import (
     ResolvedProject,
     WorkbookResult,
@@ -25,6 +26,7 @@ from app.services.excel_generator import (
     content_disposition,
     generate_expense_workbook,
 )
+from app.services.reimbursement_drafts import complete_expense_items
 from app.services.subsidy_calculation import (
     calculate_trip_subsidies,
     merge_overlapping_subsidy_trips,
@@ -70,6 +72,33 @@ def body(*, items: list[dict[str, object]] | None = None) -> dict[str, object]:
         "trip": trip(),
         "items": items or [],
     }
+
+
+def test_courier_label_preserves_all_500_expense_description_characters():
+    description = "合" * 497 + "末尾字"
+    draft_input = ReimbursementDraftInput.model_validate(
+        {"items": [{
+            **item(category="employee_welfare", description=description),
+            "welfareType": "express",
+        }]}
+    )
+    items = complete_expense_items(draft_input)
+    workbook_bytes = generate_expense_workbook(
+        template_path=TEMPLATE_PATH,
+        employee_name="合成员工",
+        department_name="合成部门",
+        project=ResolvedProject(display_text="合成预算", filename_component="合成预算"),
+        trip=None,
+        items=items,
+        subsidy=None,
+        totals=calculate_expense_totals(items, None),
+    ).content
+    workbook = load_workbook(BytesIO(workbook_bytes))
+    try:
+        description_cell = f"{EXCEL_TEMPLATE.description_column}{EXCEL_TEMPLATE.detail_start_row}"
+        assert workbook.active[description_cell].value == f"快递｜{description}"
+    finally:
+        workbook.close()
 
 
 def generate(

@@ -17,8 +17,8 @@ PR 使用 `pull_request` 事件，不使用 `pull_request_target`；第三方 Ac
 镜像名直接根据 GitHub 的 `<owner>/<repository>` 自动生成并转为小写，不需要人工维护：
 
 ```text
-ghcr.io/<owner>/dingtalk-travel-reimbursement-backend
-ghcr.io/<owner>/dingtalk-travel-reimbursement-web
+ghcr.io/<owner>/<repository>-backend
+ghcr.io/<owner>/<repository>-web
 ```
 
 推送 job 使用 GitHub 自动提供的临时 `GITHUB_TOKEN`，权限限制为 `contents: read` 和 `packages: write`，无需配置长期 GHCR PAT。首次发布后应在 GitHub Packages 中确认镜像与仓库的关联及所需可见性，参考 [GitHub 镜像发布指南](https://docs.github.com/en/actions/tutorials/publish-packages/publish-docker-images)和 [GHCR 文档](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)。

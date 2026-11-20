@@ -23,11 +23,13 @@ import { evidenceRailType, isActiveProof } from '@/utils/expenseProofs'
 import { itineraryConfirmationWarnings, matchItineraries } from '@/utils/itineraryMatching'
 import { centsToMoney, moneyToCents } from '@/utils/money'
 import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
+import { inputSignature } from '@/utils/reimbursementInput'
 import { TRIP_PERIOD_TIME, tripPeriodFromTime } from '@/utils/tripPeriod'
 import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 import { adjustmentPayload, adjustmentValidationError } from '@/utils/subsidyAdjustments'
 import { attendanceInputError, defaultAttendanceDates, missingAttendanceYears } from '@/utils/attendanceDates'
 import { subsidyWindow } from '@/utils/subsidyWindow'
+import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 
 const CALENDAR_DATE_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/
 
@@ -65,6 +67,8 @@ function normalizedTransportType(
 function employeeEditableRecognitionSignature(item: ExpenseItem): string {
   return JSON.stringify({
     category: item.category,
+    subjectValue: item.subjectValue,
+    welfareType: item.welfareType,
     date: item.date ?? '',
     displayDate: item.displayDate,
     description: item.description,
@@ -95,6 +99,10 @@ function legacyOriginalDetailsEdited(
 }
 
 export const useExpenseStore = defineStore('expense', () => {
+  const drafts = useReimbursementDraftStore()
+  const generalMode = computed(() => (drafts.currentDraft?.status === 'LOCKED'
+    ? drafts.currentDraft.kind : drafts.reimbursementKind) === 'general')
+  const generalSubjects = computed(() => drafts.reimbursementOptions?.subjectOptions ?? [])
   const attendanceCalendar = ref<AttendanceCalendar>()
   const manualProjectText = ref('')
   const trip = reactive({
@@ -122,6 +130,7 @@ export const useExpenseStore = defineStore('expense', () => {
   const calculating = ref(false)
   const calculationError = ref('')
   let calculationVersion = 0
+  let hydratedDraftId: string | null = null
   const calculatedSignature = ref('')
 
   const projectCalendarDays = computed(() =>
@@ -200,6 +209,11 @@ export const useExpenseStore = defineStore('expense', () => {
     return centsToMoney(localExpenseCents.value + subsidyCents)
   })
   const itemReadinessError = computed(() => {
+    const unavailable = items.value.find(generalSubjectUnavailable)
+    if (unavailable) return `“${unavailable.description || '本笔费用'}”的费用科目已停用，请重新选择`
+    if (generalMode.value && items.value.some(item => !item.subjectValue)) {
+      return '请逐项选择费用科目'
+    }
     if (items.value.some((item) => !item.date || !CALENDAR_DATE_PATTERN.test(item.date))) {
       return '请补全每条费用明细的发生日期'
     }
@@ -211,6 +225,10 @@ export const useExpenseStore = defineStore('expense', () => {
     }
     return ''
   })
+  function generalSubjectUnavailable(item: Pick<ExpenseItem, 'subjectValue'>): boolean {
+    return generalMode.value && !snapshotLocked.value && Boolean(drafts.reimbursementOptions)
+      && Boolean(item.subjectValue) && !generalSubjects.value.some(option => option.value === item.subjectValue)
+  }
 
   function calculationSignature(payload: TripInput | readonly TripInput[] | null): string {
     return JSON.stringify({
@@ -355,7 +373,10 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   function upsertManualItem(input: Omit<ExpenseItem, 'id' | 'source'> & { id?: string }): string {
-    if (!manualCategories.value.some((category) => category.id === input.category)) {
+    const validCategory = generalMode.value
+      ? generalSubjects.value.some(option => option.value === input.subjectValue && option.categoryId === input.category)
+      : manualCategories.value.some(category => category.id === input.category)
+    if (!validCategory) {
       throw new Error('费用类别不可用，请重新加载类别后选择')
     }
     if (items.value.length >= maxExpenseItems.value && !input.id) {
@@ -408,10 +429,11 @@ export const useExpenseStore = defineStore('expense', () => {
       || candidate.fileId !== file.id
     ) return null
 
-    const categoryId = typeof candidate.categoryId === 'string'
+    const detectedCategory = typeof candidate.categoryId === 'string'
       ? candidate.categoryId.trim()
       : ''
-    if (!categoryId) return null
+    if (!detectedCategory) return null
+    const categoryId = generalMode.value ? 'other' : detectedCategory
     const confidenceNumber = Number(candidate.confidence)
     const confidence = Number.isFinite(confidenceNumber)
       ? Math.min(1, Math.max(0, confidenceNumber)).toFixed(2)
@@ -429,7 +451,7 @@ export const useExpenseStore = defineStore('expense', () => {
     const amountCents = foreign || candidate.amount === null ? null : moneyToCents(candidate.amount)
     if (amountCents === null) warnings.add('MISSING_AMOUNT')
     const description = candidate.description?.trim()
-      || (candidate.status === 'failed' ? file.name : candidate.categoryName.trim())
+      || (candidate.status === 'failed' || generalMode.value ? file.name : candidate.categoryName.trim())
     // A category label is the accepted fallback when OCR cannot recover a more
     // specific description. Keep it visible and do not require a redundant edit.
     if (!candidate.description?.trim()) warnings.delete('MISSING_DESCRIPTION')
@@ -452,6 +474,9 @@ export const useExpenseStore = defineStore('expense', () => {
       cnyAmountConfirmed: false,
       requiresCnyConfirmation: foreign,
       category: categoryId,
+      welfareType: !generalMode.value && categoryId === 'employee_welfare'
+        ? candidate.welfareType ?? (warnings.has('WELFARE_TYPE_NEEDS_CONFIRMATION') ? 'express' : undefined)
+        : undefined,
       date: validDate,
       displayDate: validDate ?? '',
       description,
@@ -474,6 +499,7 @@ export const useExpenseStore = defineStore('expense', () => {
       item.paymentProofFileIds = items.value[index]?.paymentProofFileIds ?? []
       item.hotelBillFileIds = items.value[index]?.hotelBillFileIds ?? []
       item.receiptAttachmentFileIds = items.value[index]?.receiptAttachmentFileIds ?? []
+      item.waybillFileIds = items.value[index]?.waybillFileIds ?? []
       item.railType = evidenceRailType(item.category, items.value[index]?.railType, receiptOcrResult(file))
       items.value[index] = item
     }
@@ -500,6 +526,13 @@ export const useExpenseStore = defineStore('expense', () => {
     draft: ReimbursementDraft,
     draftFiles: readonly ReimbursementDraftFile[],
   ): void {
+    // A same-record readback may update department/accounting data while local
+    // failed uploads still target these rows. Retain identities only when the
+    // entire ordered business content is unchanged under the save contract.
+    const previousItemIds = hydratedDraftId === draft.id
+      && inputSignature({ ...draft.input, items: buildDraftExpenseItems() }) === inputSignature(draft.input)
+      ? items.value.map(item => item.id) : []
+    hydratedDraftId = draft.id
     snapshotLocked.value = draft.status === 'LOCKED'
     ocrUnavailable.value = false
 
@@ -564,7 +597,7 @@ export const useExpenseStore = defineStore('expense', () => {
       )
       const originalDetailsEdited = legacyOriginalDetailsEdited(persisted, candidate)
       return {
-        id: sourceFileId ? `ocr-${sourceFileId}` : `draft-${draft.id}-item-${index}`,
+        id: previousItemIds[index] ?? (sourceFileId ? `ocr-${sourceFileId}` : `draft-${draft.id}-item-${index}`),
         ...(sourceFileId ? { sourceFileId } : {}),
         transportType,
         itineraryFileIds: [...(persisted.itineraryFileIds ?? [])],
@@ -572,7 +605,11 @@ export const useExpenseStore = defineStore('expense', () => {
         paymentProofFileIds: [...(persisted.paymentProofFileIds ?? [])],
         hotelBillFileIds: [...(persisted.hotelBillFileIds ?? [])],
         receiptAttachmentFileIds: [...(persisted.receiptAttachmentFileIds ?? [])],
-        railType: evidenceRailType(persisted.category, persisted.railType, receiptOcrResult(
+        waybillFileIds: [...(persisted.waybillFileIds ?? [])],
+        subjectValue: persisted.subjectValue,
+        welfareType: persisted.welfareType ?? (draft.status !== 'LOCKED' && persisted.category === 'employee_welfare'
+          && candidate?.warnings?.includes('WELFARE_TYPE_NEEDS_CONFIRMATION') ? candidate.welfareType : undefined),
+        railType: evidenceRailType(persisted.subjectValue && transportType === 'rail' ? 'rail_fare' : persisted.category, persisted.railType, receiptOcrResult(
           draftFiles.find((file) => file.id === sourceFileId),
         )),
         requiresItinerary: transportType === 'ride_hailing',
@@ -653,6 +690,7 @@ export const useExpenseStore = defineStore('expense', () => {
       item.itineraryFileIds = item.itineraryFileIds?.filter((id) => id !== fileId)
       item.paymentProofFileIds = item.paymentProofFileIds?.filter((id) => id !== fileId)
       item.hotelBillFileIds = item.hotelBillFileIds?.filter((id) => id !== fileId)
+      item.waybillFileIds = item.waybillFileIds?.filter((id) => id !== fileId)
       item.receiptAttachmentFileIds = item.receiptAttachmentFileIds?.filter((id) => id !== fileId)
     }
     dismissedOcrFileIds.value = dismissedOcrFileIds.value.filter((id) => id !== fileId)
@@ -678,9 +716,11 @@ export const useExpenseStore = defineStore('expense', () => {
       const receiptIds = (item.receiptAttachmentFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'other')))
       if (receiptIds.length !== (item.receiptAttachmentFileIds?.length ?? 0)) item.receiptAttachmentFileIds = receiptIds
       const hotelIds = (item.hotelBillFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'hotel_bill')))
+      const waybillIds = (item.waybillFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'waybill')))
       if (itineraryIds.length !== (item.itineraryFileIds?.length ?? 0)) item.itineraryFileIds = itineraryIds
       if (paymentIds.length !== (item.paymentProofFileIds?.length ?? 0)) item.paymentProofFileIds = paymentIds
       if (hotelIds.length !== (item.hotelBillFileIds?.length ?? 0)) item.hotelBillFileIds = hotelIds
+      if (waybillIds.length !== (item.waybillFileIds?.length ?? 0)) item.waybillFileIds = waybillIds
     }
   }
 
@@ -758,6 +798,9 @@ export const useExpenseStore = defineStore('expense', () => {
       paymentProofFileIds: [...(item.paymentProofFileIds ?? [])],
       hotelBillFileIds: [...(item.hotelBillFileIds ?? [])],
       ...(item.receiptAttachmentFileIds?.length ? { receiptAttachmentFileIds: [...item.receiptAttachmentFileIds] } : {}),
+      ...(item.waybillFileIds?.length ? { waybillFileIds: [...item.waybillFileIds] } : {}),
+      ...(item.subjectValue ? { subjectValue: item.subjectValue } : {}),
+      ...(item.welfareType ? { welfareType: item.welfareType } : {}),
       railType: item.railType ?? 'unknown',
       requiresItinerary: item.transportType === 'ride_hailing',
       originalCurrency: item.originalCurrency,
@@ -816,6 +859,7 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   function reset(): void {
+    hydratedDraftId = null
     snapshotLocked.value = false
     manualProjectText.value = ''
     Object.assign(trip, {
@@ -843,6 +887,9 @@ export const useExpenseStore = defineStore('expense', () => {
   }
 
   return {
+    generalMode,
+    generalSubjects,
+    generalSubjectUnavailable,
     attendanceCalendar,
     manualProjectText,
     trip,

@@ -960,6 +960,48 @@ def test_submit_freezes_the_beneficiary_and_the_actual_oa_initiator(
     assert polled.json()["data"]["status"] == "SUBMITTED", polled.text
     assert workflow.create_calls == 1
 
+    history = client.get("/api/reimbursements/submission-history")
+    assert history.status_code == 200, history.text
+    entry, = history.json()["data"]
+    assert entry["id"] == draft_id
+    assert entry.get("beneficiaryName") == (employee_name if is_delegate else None)
+    draft_path = f"/api/reimbursements/drafts/{draft_id}"
+    historical = client.get(f"{draft_path}?history=true")
+    assert historical.status_code == 200, historical.text
+    assert historical.json()["data"]["submittedDetails"]["employeeName"] == employee_name
+    files = client.get(f"{draft_path}/files?history=true").json()["data"]["items"]
+    assert {file["id"] for file in files} == set(original_ids)
+    assert all(file["ocrResult"] is None for file in files)
+    status = client.get(f"/api/oa/reimbursements/drafts/{draft_id}/submission?history=true")
+    assert status.status_code == 200, status.text
+    desktop = client.post(
+        f"{draft_path}/excel-preview?history=true",
+        headers={"X-CSRF-Token": login["csrfToken"]},
+        json={"expectedRevision": historical.json()["data"]["revision"]},
+    )
+    assert desktop.status_code == 200, desktop.text
+    ticket = client.post(
+        f"{draft_path}/excel-preview-ticket?history=true",
+        headers={"X-CSRF-Token": login["csrfToken"]},
+        json={"expectedRevision": historical.json()["data"]["revision"]},
+    )
+    assert ticket.status_code == 200, ticket.text
+    ticket_data = ticket.json()["data"]
+    mobile = client.get(
+        ticket_data["downloadUrl"],
+        headers={"X-Reimbursement-Download-Token": ticket_data["downloadToken"]},
+    )
+    assert mobile.status_code == 200, mobile.text
+    for download in (desktop, mobile):
+        historical_workbook = load_workbook(io.BytesIO(download.content))
+        try:
+            assert (
+                historical_workbook.active[EXCEL_TEMPLATE.employee_name_cell].value
+                == employee_name
+            )
+        finally:
+            historical_workbook.close()
+
     command = workflow.created_command
     assert command.originator_user_id == "mock-user"
     assert command.department_id == 100

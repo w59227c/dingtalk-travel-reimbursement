@@ -20,6 +20,7 @@ from app.domain.money import (
     quantize_original_amount,
 )
 from app.domain.subsidy import MAX_ATTENDANCE_DATES, AdjustmentType
+from app.models.reimbursement import ReimbursementKind
 from app.schemas.excel import ExcelGenerateRequest, ManualProjectInput, SelectedProjectInput
 from app.schemas.expenses import MAX_EXPENSE_ITEMS_HARD_LIMIT, TripPurpose
 from app.schemas.primitives import DecimalString, StrictCalendarDate
@@ -98,6 +99,24 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     category: ExpenseCategory
+    subject_value: str | None = Field(
+        default=None,
+        alias="subjectValue",
+        min_length=1,
+        max_length=500,
+        exclude_if=lambda value: value is None,
+    )
+    welfare_type: Literal["express", "other"] | None = Field(
+        default=None,
+        alias="welfareType",
+        exclude_if=lambda value: value is None,
+    )
+    waybill_file_ids: list[str] = Field(
+        default_factory=list,
+        alias="waybillFileIds",
+        max_length=100,
+        exclude_if=lambda value: not value,
+    )
     date: StrictCalendarDate | None = None
     display_date: str = Field(default="", alias="displayDate", max_length=100)
     description: str = Field(default="", max_length=500)
@@ -192,6 +211,7 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
         "payment_proof_file_ids",
         "hotel_bill_file_ids",
         "receipt_attachment_file_ids",
+        "waybill_file_ids",
     )
     @classmethod
     def normalize_itinerary_ids(cls, values: list[str]) -> list[str]:
@@ -227,6 +247,17 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
         return self
 
 
+class GeneralApprovalSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    process_instance_id: str = Field(alias="processInstanceId", min_length=1, max_length=128)
+    title: str
+    business_id: str = Field(alias="businessId")
+    status: str
+    result: str | None = None
+    created_at: str = Field(alias="createdAt")
+
+
 class ReimbursementDraftInput(ExcelGenerateRequest):
     """Editable values whose authoritative result is recalculated by the server."""
 
@@ -236,6 +267,18 @@ class ReimbursementDraftInput(ExcelGenerateRequest):
         default=False, alias="accountingSourceVerified", strict=True
     )
     budget_code_value: str = Field(default="", alias="budgetCodeValue", max_length=2048)
+    # Read compatibility for drafts created before the form used only expense descriptions.
+    general_reason: str = Field(default="", alias="generalReason", max_length=1500)
+    general_approval_ids: list[Annotated[str, StringConstraints(min_length=1, max_length=128)]] = (
+        Field(
+            default_factory=list,
+            alias="generalApprovalIds",
+            max_length=MAX_RELATED_APPROVALS,
+        )
+    )
+    general_approval_summaries: list[GeneralApprovalSummary] = Field(
+        default_factory=list, alias="generalApprovalSummaries", max_length=MAX_RELATED_APPROVALS
+    )
     project: (
         Annotated[SelectedProjectInput | BudgetProjectInput, Field(discriminator="mode")] | None
     ) = None
@@ -265,6 +308,8 @@ class ReimbursementDraftInput(ExcelGenerateRequest):
 
     @model_validator(mode="after")
     def validate_ocr_file_dispositions(self) -> ReimbursementDraftInput:
+        if len(self.general_approval_ids) != len(set(self.general_approval_ids)):
+            raise ValueError("approval selection must be unique")
         source_ids = [item.source_file_id for item in self.items if item.source_file_id is not None]
         dismissed_ids = self.dismissed_ocr_file_ids
         if len(source_ids) != len(set(source_ids)):
@@ -281,6 +326,7 @@ class CreateReimbursementDraftRequest(BaseModel):
 
     expected_revision: int = Field(alias="expectedRevision", ge=0, le=0, strict=True)
     reuse_existing: bool = Field(default=False, alias="reuseExisting", strict=True)
+    kind: ReimbursementKind = ReimbursementKind.TRAVEL
     expected_department_id: str | None = Field(
         default=None,
         alias="expectedDepartmentId",
@@ -315,6 +361,19 @@ class DraftRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     expected_revision: int = Field(alias="expectedRevision", ge=1, strict=True)
+
+
+class ReplaceGeneralApprovalsRequest(DraftRevisionRequest):
+    instance_ids: list[
+        Annotated[str, StringConstraints(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
+    ] = Field(alias="instanceIds", max_length=MAX_RELATED_APPROVALS)
+
+    @field_validator("instance_ids")
+    @classmethod
+    def validate_unique_ids(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("approval ids must be unique")
+        return values
 
 
 class TravelApprovalQueryWindowInput(BaseModel):
@@ -355,3 +414,23 @@ class ReplaceRelatedApprovalsRequest(DraftRevisionRequest):
         if len(instance_ids) != len(set(instance_ids)):
             raise ValueError("related approval instances must be unique")
         return self
+
+
+class WorkspaceCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    id: str = Field(min_length=1, max_length=36)
+    revision: int = Field(ge=1, strict=True)
+
+
+class OpenWorkspaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    kind: ReimbursementKind = ReimbursementKind.TRAVEL
+    draft_id: str = Field(alias="draftId", min_length=1, max_length=36)
+    candidates: list[WorkspaceCandidate] = Field(min_length=1, max_length=100)
+
+
+class CorrectDraftDepartmentRequest(DraftRevisionRequest):
+    department_id: str | None = Field(
+        default=None, alias="departmentId", min_length=1, max_length=128
+    )
+    selection: RelatedApprovalSelectionInput | None = None

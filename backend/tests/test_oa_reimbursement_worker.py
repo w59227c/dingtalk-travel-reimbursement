@@ -300,6 +300,9 @@ class FakeMaterializer:
         del heartbeat
         return None
 
+    async def validate_before_create(self, _job, *, heartbeat):
+        del heartbeat
+
     def read_upload(self, _job, _upload):
         return CONTENT
 
@@ -323,7 +326,7 @@ class FakeMaterializer:
         assert hashlib.sha256(value.encode()).hexdigest() == expected_sha256
         return _command()
 
-    def matches_instance(self, command, instance):
+    def matches_instance(self, _job, command, instance):
         return strict_instance_matches_command(command, instance)
 
     def approval_url(self, process_instance_id):

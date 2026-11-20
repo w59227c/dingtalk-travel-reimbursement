@@ -5,7 +5,7 @@ import hmac
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -74,6 +74,13 @@ from app.services.excel_generator import (
     build_download_filename,
     sanitize_filename_component,
 )
+from app.services.general_reimbursement import (
+    GENERAL_FIELD_SPECS,
+    general_options,
+    get_general_catalog,
+    schema_bindings,
+    subject_category,
+)
 from app.services.oa_template_compatibility import schema_contract_fingerprint
 from app.services.oa_template_profiles import (
     REIMBURSEMENT_LOGICAL_FIELD_SPECS,
@@ -85,6 +92,7 @@ from app.services.reimbursement_drafts import (
     DraftActor,
     apply_ocr_evidence,
     complete_expense_items,
+    express_description,
     require_owned_draft,
     validate_and_calculate_input,
     validate_draft_file_references,
@@ -174,7 +182,8 @@ class SnapshotTravelProfile(_SnapshotModel):
         exclude_if=lambda value: value is None,
     )
     schema_contract_version: Literal[2] | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
     start_date_component_id: Annotated[str, StringConstraints(min_length=1, max_length=512)]
     end_date_component_id: Annotated[str, StringConstraints(min_length=1, max_length=512)]
@@ -226,15 +235,18 @@ class SnapshotProject(_SnapshotModel):
 
 class SnapshotExcludedPeriod(_SnapshotModel):
     adjustment_type: AdjustmentType = Field(
-        default=AdjustmentType.TEMPORARY_ABSENCE, alias="type",
+        default=AdjustmentType.TEMPORARY_ABSENCE,
+        alias="type",
         exclude_if=lambda value: value == AdjustmentType.TEMPORARY_ABSENCE,
     )
     start_date: StrictCalendarDate | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
     start_time: MinuteTime | None = Field(default=None, exclude_if=lambda value: value is None)
     end_date: StrictCalendarDate | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
     end_time: MinuteTime | None = Field(default=None, exclude_if=lambda value: value is None)
 
@@ -274,6 +286,14 @@ class SnapshotTrip(_SnapshotModel):
 
 class SnapshotExpenseItem(_SnapshotModel):
     category: ExpenseCategory
+    subject_value: Annotated[str, StringConstraints(min_length=1, max_length=500)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    welfare_type: Literal["express", "other"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    waybill_file_ids: tuple[ShortText, ...] = Field(default=(), exclude_if=lambda value: not value)
     date: StrictCalendarDate
     display_date: Annotated[str, StringConstraints(min_length=1, max_length=100)]
     description: Annotated[str, StringConstraints(min_length=1, max_length=500)]
@@ -312,6 +332,11 @@ class SnapshotInput(_SnapshotModel):
     dismissed_ocr_file_ids: tuple[
         Annotated[str, StringConstraints(min_length=1, max_length=36)], ...
     ] = ()
+    # Earlier version 12 snapshots retain the exact description previously sent to DingTalk.
+    general_reason: str = Field(default="", max_length=1500, exclude_if=lambda value: not value)
+    general_approval_ids: tuple[ShortText, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def validate_ocr_dispositions(self) -> SnapshotInput:
@@ -378,7 +403,9 @@ class SnapshotOriginalFile(_SnapshotModel):
     draft_file_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     sort_order: NonNegativeInt
     processing_role: Literal["EXPENSE_SOURCE", "ATTACHMENT_ONLY"]
-    attachment_kind: Literal["itinerary", "payment_proof", "hotel_bill", "other"] = "other"
+    attachment_kind: Literal["itinerary", "payment_proof", "hotel_bill", "other", "waybill"] = (
+        "other"
+    )
     storage_key: Annotated[str, StringConstraints(min_length=1, max_length=255)]
     file_name: ShortText
     file_type: Literal["jpg", "jpeg", "png", "pdf"]
@@ -406,7 +433,7 @@ class SnapshotTravelPeriod(_SnapshotModel):
 class SnapshotSelections(_SnapshotModel):
     company: SnapshotOption
     budget_code: SnapshotOption
-    travel_type: SnapshotOption
+    travel_type: SnapshotOption | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SnapshotFormValue(_SnapshotModel):
@@ -415,7 +442,10 @@ class SnapshotFormValue(_SnapshotModel):
 
 
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[6, 7, 8, 9, 10, 11] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6, 7, 8, 9, 10, 11, 12] = SNAPSHOT_VERSION
+    kind: Literal["travel", "general"] = Field(
+        default="travel", exclude_if=lambda value: value == "travel"
+    )
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
     identity: SnapshotIdentity
@@ -429,7 +459,10 @@ class ReimbursementSnapshot(_SnapshotModel):
     subsidy: SnapshotSubsidy | None
     subsidies: tuple[SnapshotSubsidy, ...] = ()
     totals: SnapshotTotals
-    travel_period: SnapshotTravelPeriod
+    travel_period: SnapshotTravelPeriod | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     related_approvals: tuple[SnapshotRelatedApproval, ...]
     original_files: tuple[SnapshotOriginalFile, ...]
     attachment_mode: Literal["excel_only", "bundle_and_excel"] | None = Field(
@@ -531,6 +564,8 @@ class ExcelGenerationInput:
     detailed_subsidies: bool = True
     compact_subsidies: bool = True
     detail_order: ExcelDetailOrder = "current"
+    expense_labels: tuple[str, ...] = ()
+    subject_labels: tuple[str, ...] = ()
     attendance_description_format: AttendanceDescriptionFormat = (
         CURRENT_ATTENDANCE_DESCRIPTION_FORMAT
     )
@@ -559,18 +594,20 @@ def collect_snapshot_source(
     """
 
     _require_positive_integer(expected_revision, "expected_revision")
-    identity = _snapshot_identity(
-        actor=actor,
-        union_id=originator_union_id,
-        name=originator_name,
-        microapp_agent_id=microapp_agent_id,
-    )
     draft = require_owned_draft(
         database,
         draft_id=draft_id,
         actor=actor,
         mutable=True,
         now=utc_now(),
+    )
+    identity = _snapshot_identity(
+        actor=replace(
+            actor, department_id=draft.department_id, department_name=draft.department_name
+        ),
+        union_id=originator_union_id,
+        name=originator_name,
+        microapp_agent_id=microapp_agent_id,
     )
     recover_stale_running_ocr(
         database,
@@ -590,7 +627,9 @@ def collect_snapshot_source(
             409,
         )
 
-    catalog = require_submission_ready_catalog(database)
+    catalog = (
+        get_general_catalog if draft.kind == "general" else require_submission_ready_catalog
+    )(database)
     if (
         draft.template_process_code != catalog.reimbursement.process_code
         or draft.template_config_version != catalog.config_version
@@ -600,7 +639,7 @@ def collect_snapshot_source(
         draft_input = ReimbursementDraftInput.model_validate_json(draft.input_json)
     except ValidationError:
         raise _snapshot_error("报销数据损坏，请重新填写") from None
-    if not draft_input.accounting_source_verified:
+    if not catalog.is_general and not draft_input.accounting_source_verified:
         raise _snapshot_error("请重新确认关联出差审批，以核验所属公司和预算代码")
     draft_input = apply_ocr_evidence(database, draft_id=draft.id, draft_input=draft_input)
     calculation = validate_and_calculate_input(
@@ -614,6 +653,7 @@ def collect_snapshot_source(
         calculation.canonical_json,
     ):
         raise _snapshot_error("报销内容已变化，请重新确认后再提交")
+    draft_input = ReimbursementDraftInput.model_validate(calculation.input_data)
 
     related_rows = database.scalars(
         select(ReimbursementDraftRelatedApproval)
@@ -621,7 +661,14 @@ def collect_snapshot_source(
         .order_by(ReimbursementDraftRelatedApproval.sort_order)
     ).all()
     related = tuple(_related_source(item) for item in related_rows)
-    _validate_related_sources(draft.related_instance_ids_json, related, catalog, draft_input)
+    if catalog.is_general:
+        if (
+            related
+            or json.loads(draft.related_instance_ids_json) != draft_input.general_approval_ids
+        ):
+            raise _snapshot_error("关联审批数据损坏，请重新选择")
+    else:
+        _validate_related_sources(draft.related_instance_ids_json, related, catalog, draft_input)
 
     all_files = database.scalars(
         select(ReimbursementDraftFile)
@@ -702,6 +749,8 @@ def _only_derived_project_changed(stored_json: str, calculated_json: str) -> boo
 def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
     """Build the versioned immutable payload persisted with a submission."""
 
+    if source.catalog.is_general:
+        return _build_general_snapshot(source)
     if source.oa_initiator and not all(
         key in source.catalog.reimbursement.mappings for key in _OA_IDENTITY_KEYS
     ):
@@ -734,10 +783,12 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
         trip = _snapshot_trip(source.draft_input.trip)
         trips = tuple(_snapshot_trip(item) for item in source.draft_input.trips)
         items = tuple(_snapshot_expense_item(item) for item in source.draft_input.items)
-        detail_order = tuple(sorted(
-            range(len(items)),
-            key=lambda index: expense_output_sort_key(items[index].date, items[index].category),
-        ))
+        detail_order = tuple(
+            sorted(
+                range(len(items)),
+                key=lambda index: expense_output_sort_key(items[index].date, items[index].category),
+            )
+        )
         ordered_items = tuple(items[index] for index in detail_order)
         subsidy = _snapshot_subsidy(source.totals_data.get("subsidy"))
         subsidies = tuple(
@@ -779,9 +830,11 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
             subsidies=subsidies,
             totals=totals,
             related=related,
-            subsidy_trips=tuple(merge_overlapping_subsidy_trips(
-                request_trips(trip=source.draft_input.trip, trips=source.draft_input.trips)
-            )),
+            subsidy_trips=tuple(
+                merge_overlapping_subsidy_trips(
+                    request_trips(trip=source.draft_input.trip, trips=source.draft_input.trips)
+                )
+            ),
             detailed_subsidies=True,
             subsidy_format=subsidy_format,
         )
@@ -824,6 +877,129 @@ def build_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
         )
     except (KeyError, TypeError, ValueError, ValidationError):
         raise _snapshot_error("报销提交快照无法生成，请刷新后重试") from None
+
+
+def _general_detail_order(
+    items: Sequence[ReimbursementDraftExpenseItemInput | SnapshotExpenseItem],
+    subjects: Sequence[FormOption],
+) -> tuple[int, ...]:
+    rank = {option.value: index for index, option in enumerate(subjects)}
+    return tuple(
+        sorted(range(len(items)), key=lambda i: (items[i].date, rank[items[i].subject_value]))
+    )
+
+
+def _general_form_values(
+    request: ReimbursementDraftInput,
+    items: tuple[SnapshotExpenseItem, ...],
+    subjects: Sequence[FormOption],
+    totals: SnapshotTotals,
+    *,
+    legacy_reason: str = "",
+) -> tuple[SnapshotFormValue, ...]:
+    label_by_value = {entry.value: entry.label for entry in subjects}
+    used = {item.subject_value for item in items}
+    lines = [
+        f"{item.date.isoformat()} {label_by_value[item.subject_value]} "
+        f"{item.description}：{money_string(item.amount)}"
+        for item in items
+    ]
+    if legacy_reason:
+        lines.insert(0, legacy_reason.strip())
+    values = {
+        "company": request.company_value,
+        "budgetCode": request.budget_code_value,
+        "subjects": _canonical_json([option.value for option in subjects if option.value in used]),
+        "description": "\n".join(lines),
+        "reimbursementAmount": money_string(totals.total_amount),
+    }
+    if request.general_approval_ids:
+        values["relatedApprovals"] = _canonical_json(request.general_approval_ids)
+    return tuple(
+        SnapshotFormValue(logical_key=spec.key, value=values[spec.key])
+        for spec in GENERAL_FIELD_SPECS
+        if spec.key in values
+    )
+
+
+def _build_general_snapshot(source: SnapshotSource) -> ReimbursementSnapshot:
+    request = source.draft_input
+    company = _mapped_option(source.catalog, "company", request.company_value)
+    budget = _mapped_option(source.catalog, "budgetCode", request.budget_code_value)
+    subjects = general_options(source.catalog, "subjects")
+    items = tuple(_snapshot_expense_item(item) for item in request.items)
+    order = _general_detail_order(items, subjects)
+    ordered = tuple(items[i] for i in order)
+    ranks = {file_id: index for index, file_id in enumerate(_expense_attachment_ids(ordered))}
+    originals = sorted(
+        source.original_files,
+        key=lambda item: (
+            ranks.get(item.draft_file_id, len(ranks)),
+            item.sort_order,
+        ),
+    )
+    totals = _snapshot_totals(source.totals_data)
+    project = SnapshotProject(
+        mode="manual",
+        manual_text=budget.label,
+        display_text=budget.label,
+        filename_component=sanitize_filename_component(budget.label),
+    )
+    return ReimbursementSnapshot(
+        snapshot_version=12,
+        kind="general",
+        draft_id=source.draft_id,
+        draft_revision=source.draft_revision,
+        identity=source.identity,
+        template=_snapshot_template(source.catalog),
+        selections=SnapshotSelections(
+            company=_snapshot_option(company), budget_code=_snapshot_option(budget)
+        ),
+        input=SnapshotInput(
+            ocr_disposition_version=request.ocr_disposition_version,
+            company_value=company.value,
+            budget_code_value=budget.value,
+            project=project,
+            trip=None,
+            items=items,
+            dismissed_ocr_file_ids=tuple(request.dismissed_ocr_file_ids),
+            general_approval_ids=tuple(request.general_approval_ids),
+        ),
+        totals=totals,
+        subsidy=None,
+        related_approvals=(),
+        detail_order=order,
+        original_files=tuple(
+            _snapshot_original(item, manifest_order=i) for i, item in enumerate(originals)
+        ),
+        attachment_mode="bundle_and_excel",
+        excel=SnapshotExcel(
+            template_sha256=source.excel_template_sha256,
+            file_name=build_download_filename(source.identity.name, project.filename_component),
+        ),
+        form_values=_general_form_values(request, ordered, subjects, totals),
+    )
+
+
+def snapshot_subject_options(snapshot: ReimbursementSnapshot) -> tuple[FormOption, ...]:
+    schema = form_schema_from_dict(json.loads(snapshot.template.schema_canonical_json))
+    component_id = next(
+        item.component_id for item in snapshot.template.fields if item.logical_key == "subjects"
+    )
+    return next(item.options for item in schema.components if item.component_id == component_id)
+
+
+def _snapshot_excel_subjects(
+    snapshot: ReimbursementSnapshot,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if snapshot.kind != "general":
+        return (), ()
+    subjects = snapshot_subject_options(snapshot)
+    label_by_value = {option.value: option.label for option in subjects}
+    return (
+        tuple(option.label for option in subjects),
+        tuple(label_by_value[item.subject_value] for item in snapshot.ordered_items),
+    )
 
 
 def serialize_snapshot(snapshot: ReimbursementSnapshot) -> str:
@@ -879,6 +1055,7 @@ def parse_locked_submission_snapshot(
         or snapshot.identity.user_id != draft.owner_user_id
         or snapshot.identity.department_id != draft.department_id
         or snapshot.identity.department_name != draft.department_name
+        or snapshot.kind != draft.kind
         or snapshot.template.process_code != draft.template_process_code
         or snapshot.template.config_version != draft.template_config_version
     ):
@@ -895,6 +1072,7 @@ def snapshot_excel_input(snapshot: ReimbursementSnapshot) -> ExcelGenerationInpu
     output_trips = merge_overlapping_subsidy_trips(
         request.trips or ([request.trip] if request.trip is not None else [])
     )
+    subject_labels, expense_labels = _snapshot_excel_subjects(snapshot)
     return ExcelGenerationInput(
         employee_name=snapshot.identity.name,
         department_name=snapshot.identity.department_name,
@@ -913,6 +1091,8 @@ def snapshot_excel_input(snapshot: ReimbursementSnapshot) -> ExcelGenerationInpu
             snapshot.subsidy_description_format == CURRENT_SUBSIDY_DESCRIPTION_FORMAT
         ),
         detail_order=snapshot.detail_order,
+        expense_labels=expense_labels,
+        subject_labels=subject_labels,
         attendance_description_format=snapshot.attendance_description_format or "individual_dates",
     )
 
@@ -934,8 +1114,7 @@ def verify_excel_template(snapshot: ReimbursementSnapshot, template_path: Path) 
     if not (
         hmac.compare_digest(observed, expected)
         or (
-            metadata_replacement is not None
-            and hmac.compare_digest(observed, metadata_replacement)
+            metadata_replacement is not None and hmac.compare_digest(observed, metadata_replacement)
         )
     ):
         raise ApiError(
@@ -980,7 +1159,9 @@ def build_create_command(
         [item.as_oa_value() for item in normalized_attachments]
     )
     bindings = {item.logical_key: item for item in snapshot.template.fields}
-    has_range = bindings["startDate"].component_type == "DDDateRangeField"
+    has_range = (
+        "startDate" in bindings and bindings["startDate"].component_type == "DDDateRangeField"
+    )
     if has_range:
         values_by_key["startDate"] = _canonical_json(
             [values_by_key["startDate"], values_by_key["endDate"]]
@@ -994,7 +1175,8 @@ def build_create_command(
             biz_alias=binding.biz_alias,
         )
         for binding in snapshot.template.fields
-        if not has_range or binding.logical_key not in {"endDate", "durationDays"}
+        if binding.logical_key in values_by_key
+        and (not has_range or binding.logical_key not in {"endDate", "durationDays"})
     )
     initiator = snapshot.approval_initiator
     return CreateProcessInstanceCommand(
@@ -1213,7 +1395,7 @@ def _snapshot_template(catalog: OaTemplateCatalogContract) -> SnapshotTemplate:
     reimbursement = catalog.reimbursement
     components = {item.component_id: item for item in reimbursement.schema.components}
     fields: list[SnapshotTemplateField] = []
-    for spec in REIMBURSEMENT_LOGICAL_FIELD_SPECS:
+    for spec in GENERAL_FIELD_SPECS if catalog.is_general else REIMBURSEMENT_LOGICAL_FIELD_SPECS:
         component_id = reimbursement.mappings.get(spec.key)
         if component_id is None and not spec.required:
             continue
@@ -1313,6 +1495,9 @@ def _snapshot_expense_item(
 ) -> SnapshotExpenseItem:
     return SnapshotExpenseItem(
         category=item.category,
+        subject_value=item.subject_value,
+        welfare_type=item.welfare_type,
+        waybill_file_ids=tuple(item.waybill_file_ids),
         date=item.date,
         display_date=item.display_date,
         description=item.description,
@@ -1470,9 +1655,12 @@ def _snapshot_form_values(
         str(duration_days),
         (
             _description_v3(items, subsidy, totals, subsidies, subsidy_trips)
-            if subsidy_format == CURRENT_SUBSIDY_DESCRIPTION_FORMAT else
-            _description_v2(items, subsidy, totals, subsidies, subsidy_trips, attendance_format)
-            if detailed_subsidies else _description_v1(items, subsidy, totals, subsidies)
+            if subsidy_format == CURRENT_SUBSIDY_DESCRIPTION_FORMAT
+            else _description_v2(
+                items, subsidy, totals, subsidies, subsidy_trips, attendance_format
+            )
+            if detailed_subsidies
+            else _description_v1(items, subsidy, totals, subsidies)
         ),
         money_string(totals.total_amount),
         related_value,
@@ -1489,11 +1677,17 @@ def _description_v1(
     totals: SnapshotTotals,
     subsidies: tuple[SnapshotSubsidy, ...] = (),
 ) -> str:
-    lines = [
-        f"{item.date.isoformat()} {CATEGORY_BY_ID[item.category].name} "
-        f"{item.description}：{money_string(item.amount)}"
-        for item in items
-    ]
+    lines = []
+    for item in items:
+        description = (
+            express_description(item.description)
+            if item.welfare_type == "express"
+            else item.description
+        )
+        lines.append(
+            f"{item.date.isoformat()} {CATEGORY_BY_ID[item.category].name} "
+            f"{description}：{money_string(item.amount)}"
+        )
     calculated = subsidies or ((subsidy,) if subsidy is not None else ())
     for item in calculated:
         exclusion = (
@@ -1510,22 +1704,29 @@ def _description_v1(
 
 
 def _expense_attachment_ids(items: tuple[SnapshotExpenseItem, ...]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(
-        file_id
-        for item in items
-        for file_id in (
-            item.source_file_id,
-            *item.receipt_attachment_file_ids,
-            *item.hotel_bill_file_ids,
-            *item.itinerary_file_ids,
-            *item.payment_proof_file_ids,
+    return tuple(
+        dict.fromkeys(
+            file_id
+            for item in items
+            for file_id in (
+                item.source_file_id,
+                *item.receipt_attachment_file_ids,
+                *item.hotel_bill_file_ids,
+                *item.itinerary_file_ids,
+                *item.payment_proof_file_ids,
+                *item.waybill_file_ids,
+            )
+            if file_id is not None
         )
-        if file_id is not None
-    ))
+    )
 
 
 def _description_v2(
-    items, subsidy, totals, subsidies, trips,
+    items,
+    subsidy,
+    totals,
+    subsidies,
+    trips,
     attendance_format: AttendanceDescriptionFormat = CURRENT_ATTENDANCE_DESCRIPTION_FORMAT,
 ) -> str:
     calculated = subsidies or ((subsidy,) if subsidy is not None else ())
@@ -1535,9 +1736,9 @@ def _description_v2(
     for trip, result in zip(trips, calculated, strict=True):
         if trip.excluded_periods or trip.attendance_dates is not None:
             calculation = _subsidy_from_snapshot(result)
-            lines.extend(subsidy_explanation(
-                trip, calculation, attendance_format=attendance_format
-            ))
+            lines.extend(
+                subsidy_explanation(trip, calculation, attendance_format=attendance_format)
+            )
         else:
             lines.extend(_description_v1((), result, totals).splitlines()[:-1])
     lines.append(f"合计：{money_string(totals.total_amount)}")
@@ -1574,6 +1775,35 @@ def is_oa_department_id(value: str) -> bool:
 
 
 def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
+    is_general = snapshot.kind == "general"
+    if is_general:
+        if (
+            snapshot.snapshot_version != 12
+            or snapshot.oa_initiator is not None
+            or snapshot.travel_period is not None
+            or snapshot.selections.travel_type is not None
+            or snapshot.input.trip is not None
+            or snapshot.input.trips
+            or snapshot.subsidy is not None
+            or snapshot.subsidies
+            or snapshot.related_approvals
+            or snapshot.template.travel_profiles
+            or snapshot.detail_order is None
+            or snapshot.attachment_mode != "bundle_and_excel"
+        ):
+            raise ValueError("general reimbursement snapshot contains travel data")
+    elif (
+        snapshot.snapshot_version == 12
+        or snapshot.travel_period is None
+        or snapshot.selections.travel_type is None
+        or snapshot.input.general_reason
+        or snapshot.input.general_approval_ids
+        or any(
+            item.subject_value or item.category == ExpenseCategory.EXPRESS
+            for item in snapshot.input.items
+        )
+    ):
+        raise ValueError("travel reimbursement snapshot contains general expense data")
     trips = snapshot.input.trips or ((snapshot.input.trip,) if snapshot.input.trip else ())
     if snapshot.detail_order is not None:
         if snapshot.snapshot_version < 11:
@@ -1595,7 +1825,12 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
         raise ValueError("microapp agent id must be a positive signed int64")
     field_keys = tuple(item.logical_key for item in snapshot.template.fields)
     identity_keys = tuple(key for key in _OA_IDENTITY_KEYS if key in field_keys)
-    if field_keys != (*_OA_LOGICAL_KEYS, *identity_keys):
+    expected_fields = (
+        tuple(spec.key for spec in GENERAL_FIELD_SPECS)
+        if is_general
+        else (*_OA_LOGICAL_KEYS, *identity_keys)
+    )
+    if field_keys != expected_fields:
         raise ValueError("template fields are incomplete or out of order")
     if snapshot.oa_initiator is not None:
         initiator = snapshot.oa_initiator
@@ -1609,7 +1844,10 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
             raise ValueError("delegated OA initiator is invalid")
     if identity_keys and snapshot.snapshot_version < 11:
         raise ValueError("reimbursement identity fields require snapshot v11")
-    if tuple(item.logical_key for item in snapshot.form_values) != _OA_VALUE_KEYS:
+    if (
+        not is_general
+        and tuple(item.logical_key for item in snapshot.form_values) != _OA_VALUE_KEYS
+    ):
         raise ValueError("form values are incomplete or out of order")
     range_bindings = [
         item for item in snapshot.template.fields if item.component_type == "DDDateRangeField"
@@ -1622,7 +1860,7 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     expected_ids = len(field_keys) - (2 if range_bindings else 0)
     if len({item.component_id for item in snapshot.template.fields}) != expected_ids:
         raise ValueError("template component ids must be unique")
-    if not snapshot.related_approvals:
+    if not is_general and not snapshot.related_approvals:
         raise ValueError("related approvals are required")
     if snapshot.snapshot_version < 10:
         if snapshot.attachment_mode is not None or not snapshot.original_files:
@@ -1653,11 +1891,8 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     ):
         raise ValueError("related approval ids must be unique")
     related_department_ids = [item.originator_department_id for item in snapshot.related_approvals]
-    if any(related_department_ids) and (
-        any(item is None for item in related_department_ids)
-        or len(set(related_department_ids)) != 1
-    ):
-        raise ValueError("related approval departments must be complete and identical")
+    if any(related_department_ids) and any(item is None for item in related_department_ids):
+        raise ValueError("related approval department evidence must be complete")
     if len({item.draft_file_id for item in snapshot.original_files}) != len(
         snapshot.original_files
     ):
@@ -1672,9 +1907,10 @@ def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
     _validate_business_snapshot(snapshot)
     if snapshot.detail_order is not None:
         attachment_ids = _expense_attachment_ids(snapshot.ordered_items)
-        if tuple(
-            file.draft_file_id for file in snapshot.original_files[: len(attachment_ids)]
-        ) != attachment_ids:
+        if (
+            tuple(file.draft_file_id for file in snapshot.original_files[: len(attachment_ids)])
+            != attachment_ids
+        ):
             raise ValueError("original file order differs from expense order")
 
 
@@ -1696,7 +1932,11 @@ def _validate_template_snapshot(snapshot: ReimbursementSnapshot) -> None:
     ):
         raise ValueError("template schema identity mismatch")
     components = {item.component_id: item for item in schema.components}
-    specs = {item.key: item for item in REIMBURSEMENT_LOGICAL_FIELD_SPECS}
+    is_general = snapshot.kind == "general"
+    specs = {
+        item.key: item
+        for item in (GENERAL_FIELD_SPECS if is_general else REIMBURSEMENT_LOGICAL_FIELD_SPECS)
+    }
     for binding in snapshot.template.fields:
         component = components.get(binding.component_id)
         if (
@@ -1723,6 +1963,10 @@ def _validate_template_snapshot(snapshot: ReimbursementSnapshot) -> None:
         "travelType": snapshot.selections.travel_type,
     }
     bindings = {item.logical_key: item for item in snapshot.template.fields}
+    if is_general:
+        selection_by_key.pop("travelType")
+        if schema_bindings(schema) != {key: item.component_id for key, item in bindings.items()}:
+            raise ValueError("general template mapping mismatch")
     for logical_key, selection in selection_by_key.items():
         component = components[bindings[logical_key].component_id]
         if not any(
@@ -1800,6 +2044,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
             (item.payment_proof_file_ids, "payment_proof"),
             (item.hotel_bill_file_ids, "hotel_bill"),
             (item.receipt_attachment_file_ids, "other"),
+            (item.waybill_file_ids, "waybill"),
         ):
             if len(proof_ids) != len(set(proof_ids)) or any(
                 file_id not in support_ids or by_id[file_id].attachment_kind != kind
@@ -1809,7 +2054,13 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         if (
             payment_proof_required(
                 amount=item.amount,
-                category=item.category,
+                category=ExpenseCategory.RAIL_FARE
+                if (
+                    item.subject_value
+                    and item.category == ExpenseCategory.LOCAL_TRANSPORT
+                    and item.transport_type == "rail"
+                )
+                else item.category,
                 rail_type=item.rail_type,
                 receipt_count=(
                     item.receipt_count
@@ -1849,6 +2100,37 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         or expected_totals.uppercase_amount != totals.uppercase_amount
     ):
         raise ValueError("snapshot totals mismatch")
+    if snapshot.kind == "general":
+        subjects = snapshot_subject_options(snapshot)
+        by_value = {option.value: option.label for option in subjects}
+        if (
+            not request.items
+            or snapshot.input.company_value != snapshot.selections.company.value
+            or snapshot.input.budget_code_value != snapshot.selections.budget_code.value
+            or snapshot.detail_order != _general_detail_order(snapshot.input.items, subjects)
+            or any(
+                item.subject_value not in by_value
+                or item.welfare_type is not None
+                or item.category != subject_category(by_value[item.subject_value])
+                or bool(item.waybill_file_ids and item.category != ExpenseCategory.EXPRESS)
+                for item in snapshot.input.items
+            )
+            or snapshot.form_values
+            != _general_form_values(
+                request,
+                snapshot.ordered_items,
+                subjects,
+                snapshot.totals,
+                legacy_reason=snapshot.input.general_reason,
+            )
+            or snapshot.excel.file_name
+            != build_download_filename(
+                snapshot.identity.name,
+                snapshot.input.project.filename_component,
+            )
+        ):
+            raise ValueError("general reimbursement data differs from the snapshot")
+        return
     subsidy_trips = request.trips or ([request.trip] if request.trip is not None else [])
     output_trips = merge_overlapping_subsidy_trips(subsidy_trips)
     if len(calculated_subsidies) != len(output_trips):
@@ -2010,6 +2292,7 @@ def draft_input_from_snapshot(snapshot: ReimbursementSnapshot) -> ReimbursementD
             "ocrDispositionVersion": snapshot.input.ocr_disposition_version,
             "companyValue": snapshot.input.company_value,
             "budgetCodeValue": snapshot.input.budget_code_value,
+            "generalApprovalIds": list(snapshot.input.general_approval_ids),
             "project": project_value,
             "trip": trip_value,
             "trips": trips_value,

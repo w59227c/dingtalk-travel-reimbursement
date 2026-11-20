@@ -72,7 +72,7 @@ describe('persistent reimbursement API', () => {
     expect(http.post).toHaveBeenCalledWith(
       '/reimbursements/drafts/draft%2F%E4%B8%80/excel-preview-ticket',
       { expectedRevision: 9 },
-      { signal: undefined },
+      { signal: undefined, timeout: 60_000 },
     )
   })
 

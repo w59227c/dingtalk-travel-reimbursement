@@ -161,6 +161,32 @@ describe('TravelApprovalSelector', () => {
     }
   })
 
+  it.each([false, true])('paginates results and preserves linked approvals, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.travelApprovals = Array.from({ length: 23 }, (_, i) => ({
+      ...candidate, processInstanceId: `travel-${i + 1}`, title: `演示出差 ${i + 1}`,
+    }))
+    const load = vi.spyOn(drafts, 'loadTravelApprovals').mockResolvedValue(undefined)
+    const wrapper = mount(TravelApprovalSelector, {
+      props: { modelValue: [selection], linkedApprovals: [linked], mobile },
+      global: { plugins: [ElementPlus] },
+    })
+    const rows = () => wrapper.findAll('.travel-approval-row')
+    const pagination = wrapper.get('.approval-pagination')
+    expect(rows()).toHaveLength(10)
+    expect(rows()[0]!.classes()).toContain('is-selected')
+    await pagination.get('button.btn-next').trigger('click')
+    await pagination.get('button.btn-next').trigger('click')
+    expect(rows()).toHaveLength(3)
+    expect(rows()[0]!.text()).toContain('演示出差 21')
+    expect(wrapper.get('.travel-approval-count').text()).toBe('已选 1 张')
+    await wrapper.get('.travel-query-button').trigger('click')
+    expect(load).toHaveBeenCalledOnce()
+    expect(rows()).toHaveLength(10)
+    expect(rows()[0]!.classes()).toContain('is-selected')
+    wrapper.unmount()
+  })
+
   it.each([false, true])('shows each candidate company and budget without borrowing the saved selection, mobile=%s', (mobile) => {
     const drafts = useReimbursementDraftStore()
     drafts.currentDraft = restoredDraft()
@@ -296,7 +322,7 @@ describe('TravelApprovalSelector', () => {
     wrapper.unmount()
   })
 
-  it('disables mismatched and unavailable approvals with reasons and keeps selections removable', () => {
+  it.each([false, true])('allows different departments and explains the remaining approval rules, mobile=%s', (mobile) => {
     const drafts = useReimbursementDraftStore()
     drafts.travelApprovals = [candidate,
       { ...candidate, processInstanceId: 'other-company', companyOption: { value: 'other', label: '另一公司', key: null } },
@@ -306,14 +332,16 @@ describe('TravelApprovalSelector', () => {
       { ...candidate, processInstanceId: 'missing', companyOption: null, unavailableReason: '出差审批的所属公司缺失' },
     ]
     const wrapper = mount(TravelApprovalSelector, {
-      props: { modelValue: [selection] }, global: { plugins: [ElementPlus] },
+      props: { modelValue: [selection], mobile }, global: { plugins: [ElementPlus] },
     })
     expect(wrapper.findAllComponents({ name: 'ElCheckbox' }).map((item) => item.props('disabled')))
-      .toEqual([false, true, true, true, true, true])
+      .toEqual([false, true, true, true, false, true])
     expect(wrapper.text()).toContain('所属公司与已选审批不同')
     expect(wrapper.text()).toContain('预算代码与已选审批不同')
     expect(wrapper.text()).toContain('出差类别与已选审批不同')
-    expect(wrapper.text()).toContain('发起部门与已选审批不同')
+    expect(wrapper.text()).not.toContain('发起部门与已选审批不同')
+    expect(wrapper.text()).toContain('发起部门可不同')
+    expect(wrapper.text()).not.toContain('同一部门')
     expect(wrapper.text()).toContain('出差审批的所属公司缺失')
     wrapper.findAllComponents({ name: 'ElCheckbox' })[1]!.vm.$emit('change', true)
     expect(wrapper.emitted('update:modelValue')).toBeUndefined()

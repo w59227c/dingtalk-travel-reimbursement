@@ -233,14 +233,14 @@ describe('authentication clears scoped client memory', () => {
 
     await auth.selectDepartmentFromTravelApproval(selection)
 
-    expect(selectDepartmentFromTravelApprovalRequest).toHaveBeenCalledWith(selection, undefined)
+    expect(selectDepartmentFromTravelApprovalRequest).toHaveBeenCalledWith(selection, undefined, false, undefined)
     expect(auth.status).toBe('authenticated')
     expect(auth.session?.selectedDepartment).toEqual({ id: '200', name: '示例业务部门' })
     expect(auth.session?.departments).toEqual([
       { id: '100', name: '测试部门' },
       { id: '200', name: '示例业务部门' },
     ])
-    expect(drafts.drafts).toEqual([])
+    expect(drafts.drafts.map(d => d.id)).toEqual(['draft-a'])
   })
 
   it('keeps the current scope intact while a historical approval needs a choice', async () => {

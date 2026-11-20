@@ -6,9 +6,12 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError
 from app.database.session import get_db
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient, FormOption
+from app.models.oa_template_profile import OaTemplateProfile
 from app.schemas.common import success
+from app.services.general_reimbursement import PROFILE_KEY, confirm_general_catalog, schema_bindings
 from app.services.oa_template_profiles import (
     TravelProfileConfirmation,
     TravelProfileInspection,
@@ -19,6 +22,24 @@ from app.services.oa_template_profiles import (
 from app.services.sessions import CurrentSession, require_admin, require_admin_csrf
 
 router = APIRouter(tags=["oa-template-administration"])
+
+
+@router.get("/admin/oa/templates/general")
+def read_general_template(
+    database: Annotated[Session, Depends(get_db)],
+    _current: Annotated[CurrentSession, Depends(require_admin)],
+) -> dict[str, object]:
+    profile = database.get(OaTemplateProfile, PROFILE_KEY)
+    return success(
+        None
+        if profile is None
+        else {
+            "processCode": profile.process_code,
+            "templateName": profile.template_name,
+            "configVersion": profile.config_version,
+            "status": profile.compatibility_status,
+        }
+    )
 
 
 class StrictRequest(BaseModel):
@@ -37,6 +58,61 @@ class ProcessCodeValue(StrictRequest):
     @classmethod
     def normalize_process_code(cls, value: str) -> str:
         return value.strip()
+
+
+class GeneralTemplateConfirmation(ProcessCodeValue):
+    expected_config_version: int = Field(alias="expectedConfigVersion", ge=0, strict=True)
+    schema_fingerprint: str = Field(alias="schemaFingerprint", pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post("/admin/oa/templates/general/inspect")
+async def inspect_general_template(
+    body: ProcessCodeValue,
+    request: Request,
+    _current: Annotated[CurrentSession, Depends(require_admin_csrf)],
+) -> dict[str, object]:
+    schema = await request.app.state.dingtalk_workflow.get_form_schema(body.process_code)
+    bindings = schema_bindings(schema)
+    return success(
+        {
+            "processCode": schema.process_code,
+            "templateName": schema.template_name,
+            "schemaFingerprint": schema.fingerprint,
+            "fields": [
+                {"label": c.label, "type": c.component_type}
+                for c in schema.components
+                if c.component_id in bindings.values()
+            ],
+        }
+    )
+
+
+@router.put("/admin/oa/templates/general")
+async def write_general_template(
+    body: GeneralTemplateConfirmation,
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_admin_csrf)],
+) -> dict[str, object]:
+    administrator = current.record.dingtalk_user_id
+    database.rollback()
+    schema = await request.app.state.dingtalk_workflow.get_form_schema(body.process_code)
+    if schema.fingerprint != body.schema_fingerprint:
+        raise ApiError("OA_GENERAL_TEMPLATE_CHANGED", "模板已更新，请重新读取后确认", 409)
+    profile = confirm_general_catalog(
+        database,
+        schema=schema,
+        expected_version=body.expected_config_version,
+        administrator=administrator,
+    )
+    return success(
+        {
+            "processCode": profile.process_code,
+            "templateName": profile.template_name,
+            "configVersion": profile.config_version,
+            "status": profile.compatibility_status,
+        }
+    )
 
 
 class TravelProfileHeader(ProcessCodeValue):
@@ -92,10 +168,16 @@ class TemplateMappingsWrite(StrictRequest):
     related_approvals: str = Field(alias="relatedApprovals", min_length=1, max_length=128)
     attachments: str = Field(min_length=1, max_length=128)
     reimbursement_employee: str | None = Field(
-        default=None, alias="reimbursementEmployee", min_length=1, max_length=128,
+        default=None,
+        alias="reimbursementEmployee",
+        min_length=1,
+        max_length=128,
     )
     reimbursement_department: str | None = Field(
-        default=None, alias="reimbursementDepartment", min_length=1, max_length=128,
+        default=None,
+        alias="reimbursementDepartment",
+        min_length=1,
+        max_length=128,
     )
 
     @field_validator("*")

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import Select, and_, delete, func, or_, select, update
+from sqlalchemy import Select, and_, case, delete, func, or_, select, update
 from sqlalchemy.orm import Session, undefer
 
 from app.core.config import Settings
@@ -34,9 +35,18 @@ from app.schemas.expenses import TripInput
 from app.schemas.reimbursements import (
     CURRENT_OCR_DISPOSITION_VERSION,
     BudgetProjectInput,
+    GeneralApprovalSummary,
     ReimbursementDraftExpenseItemInput,
     ReimbursementDraftInput,
     RelatedApprovalSelectionInput,
+)
+from app.services.dingtalk import DepartmentIdentity
+from app.services.general_reimbursement import (
+    approval_summary,
+    general_options,
+    get_general_catalog,
+    subject_category,
+    verify_general_approvals,
 )
 from app.services.oa_template_profiles import (
     OaTemplateCatalogContract,
@@ -100,7 +110,7 @@ class DraftCalculation:
     input_data: dict[str, object]
     totals_data: dict[str, object]
     attachment_mode: str | None = None
-    submitted_details: dict[str, str] | None = None
+    submitted_details: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,17 +131,6 @@ class CatalogBinding:
 def draft_actor(current: CurrentSession) -> DraftActor:
     department_name = current.reimbursement_department_name
     department_id = current.reimbursement_department_id
-    if not department_id or not department_name:
-        raise ApiError("DEPARTMENT_REQUIRED", "请先选择本次报销部门", 409)
-    if not any(
-        department.id == department_id and department.name == department_name
-        for department in current.reimbursement_departments
-    ):
-        raise ApiError(
-            "INVALID_DEPARTMENT_CONTEXT",
-            "当前报销部门不在登录员工的所属部门中，请重新选择",
-            409,
-        )
     corp_id = str(current.record.corp_id or "").strip()
     user_id = str(current.reimbursement_user_id or "").strip()
     if not corp_id or not user_id:
@@ -139,15 +138,16 @@ def draft_actor(current: CurrentSession) -> DraftActor:
     return DraftActor(
         corp_id=corp_id,
         user_id=user_id,
-        department_id=department_id,
-        department_name=department_name,
+        department_id=department_id or "",
+        department_name=department_name or "",
         available_department_ids=tuple(
             department.id for department in current.reimbursement_departments
         ),
         operator_user_id=current.reimbursement_operator_user_id,
         session_id_hash=(
             current.record.session_id_hash
-            if current.reimbursement_operator_user_id is not None else None
+            if current.reimbursement_operator_user_id is not None
+            else None
         ),
         operator_department_ids=current.reimbursement_operator_department_ids,
     )
@@ -190,8 +190,8 @@ def require_owned_draft(
     )
     if draft is None:
         raise _not_found_error()
-    _require_department(draft, actor)
     if mutable:
+        require_resolved_workspace(database, actor, kind=draft.kind)
         _require_mutable(draft, now=now or utc_now())
     return draft
 
@@ -244,8 +244,6 @@ def bump_owned_draft_revision(
             ReimbursementDraft.corp_id == actor.corp_id,
             ReimbursementDraft.owner_user_id == actor.user_id,
             ReimbursementDraft.operator_user_id == actor.operator_user_id,
-            ReimbursementDraft.department_id == actor.department_id,
-            ReimbursementDraft.department_name == actor.department_name,
             ReimbursementDraft.revision == expected_revision,
             ReimbursementDraft.status.in_(_MUTABLE_STATUSES),
             ReimbursementDraft.recovery_pending.is_(False),
@@ -290,10 +288,20 @@ def create_reimbursement_draft(
     replaces_draft_id: str | None = None,
     replaces_draft_revision: int | None = None,
     now: datetime | None = None,
+    kind: str = "travel",
+    bind_department_for: UserSession | None = None,
+    departments: tuple[DepartmentIdentity, ...] = (),
+    expected_department_id: str | None = None,
+    expected_department_name: str | None = None,
 ) -> dict[str, object]:
+    if kind == "general" and actor.operator_user_id is not None:
+        raise ApiError("OA_GENERAL_SELF_ONLY", "普通费用暂只支持本人报销", 403)
     if _draft_file_reference_ids(draft_input) or any(
-        item.itinerary_file_ids or item.payment_proof_file_ids or item.hotel_bill_file_ids
+        item.itinerary_file_ids
+        or item.payment_proof_file_ids
+        or item.hotel_bill_file_ids
         or item.receipt_attachment_file_ids
+        or item.waybill_file_ids
         for item in draft_input.items
     ):
         raise _invalid_file_reference_error()
@@ -302,11 +310,16 @@ def create_reimbursement_draft(
             "ocr_disposition_version": CURRENT_OCR_DISPOSITION_VERSION,
             "company_value": "",
             "accounting_source_verified": False,
+            "general_reason": "",
+            "general_approval_ids": [],
+            "general_approval_summaries": [],
             "budget_code_value": "",
             "project": None,
         }
     )
-    catalog = require_submission_ready_catalog(database)
+    catalog = (get_general_catalog if kind == "general" else require_submission_ready_catalog)(
+        database
+    )
     # Calculating subsidies can seed settings and commit on an empty database.
     calculation = validate_and_calculate_input(
         database,
@@ -319,13 +332,29 @@ def create_reimbursement_draft(
         # Serialize current-record selection, retirement and creation across tabs.
         database.connection().exec_driver_sql("BEGIN IMMEDIATE")
         actor.require_current_delegation(database)
-        catalog = require_submission_ready_catalog(database)
+        require_resolved_workspace(database, actor, kind=kind)
+        catalog = (get_general_catalog if kind == "general" else require_submission_ready_catalog)(
+            database
+        )
         created_at = now or utc_now()
         binding = CatalogBinding.from_catalog(catalog)
         if replaces_draft_id:
-            previous = require_owned_draft(database, draft_id=replaces_draft_id, actor=actor)
+            # Replacement retires the owned workspace record; it does not edit
+            # its old department, expiry or frozen submission contents.
+            previous = database.scalar(
+                select(ReimbursementDraft)
+                .where(
+                    ReimbursementDraft.id == replaces_draft_id,
+                    ReimbursementDraft.corp_id == actor.corp_id,
+                    ReimbursementDraft.owner_user_id == actor.user_id,
+                    ReimbursementDraft.operator_user_id == actor.operator_user_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+            if previous is None:
+                raise _not_found_error()
             latest = database.scalar(
-                _department_drafts(actor)
+                _workspace_drafts(actor, kind=kind)
                 .where(
                     ReimbursementDraft.workspace_retired.is_(False),
                 )
@@ -333,7 +362,8 @@ def create_reimbursement_draft(
                 .limit(1)
             )
             if (
-                previous.workspace_retired
+                previous.kind != kind
+                or previous.workspace_retired
                 or previous.revision != replaces_draft_revision
                 or (latest and latest.id != previous.id)
             ):
@@ -342,7 +372,7 @@ def create_reimbursement_draft(
                 )
         else:
             existing = database.scalar(
-                _department_drafts(actor)
+                _workspace_drafts(actor, kind=kind)
                 .where(
                     ReimbursementDraft.workspace_retired.is_(False),
                 )
@@ -352,10 +382,26 @@ def create_reimbursement_draft(
             if existing is not None:
                 if not reuse_existing:
                     raise ApiError(
-                        "REIMBURSEMENT_CURRENT_EXISTS", "已有当前报销，请确认新开后再替换", 409,
+                        "REIMBURSEMENT_CURRENT_EXISTS",
+                        "已有当前报销，请确认新开后再替换",
+                        409,
                     )
                 database.commit()
                 return draft_data(database, existing, now=created_at)
+        # Reuse is independent of a page's stale department choice. Only after
+        # deciding to create a record do we validate and adopt its explicit value.
+        if expected_department_id is not None or expected_department_name is not None:
+            department = next(
+                (d for d in departments
+                 if (expected_department_id is None or d.id == expected_department_id)
+                 and (expected_department_name is None or d.name == expected_department_name)),
+                None,
+            )
+            if department is None:
+                raise ApiError("INVALID_DEPARTMENT", "请选择有效的报销部门", 422)
+            actor = replace(actor, department_id=department.id, department_name=department.name)
+        if not actor.department_id or not actor.department_name:
+            raise ApiError("DEPARTMENT_REQUIRED", "请先填写本次报销部门", 409)
         if replaces_draft_id:
             database.execute(
                 update(ReimbursementDraft)
@@ -363,12 +409,12 @@ def create_reimbursement_draft(
                     ReimbursementDraft.corp_id == actor.corp_id,
                     ReimbursementDraft.owner_user_id == actor.user_id,
                     ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                    ReimbursementDraft.department_id == actor.department_id,
-                    ReimbursementDraft.department_name == actor.department_name,
+                    ReimbursementDraft.kind == kind,
                 )
                 .values(workspace_retired=True, updated_at=ReimbursementDraft.updated_at)
             )
         draft = ReimbursementDraft(
+            kind=kind,
             corp_id=actor.corp_id,
             owner_user_id=actor.user_id,
             operator_user_id=actor.operator_user_id,
@@ -386,6 +432,9 @@ def create_reimbursement_draft(
             updated_at=created_at,
         )
         database.add(draft)
+        if bind_department_for is not None:
+            bind_department_for.current_department_id = actor.department_id
+            bind_department_for.current_department_name = actor.department_name
         database.commit()
         database.refresh(draft)
     except Exception:
@@ -401,9 +450,10 @@ def list_reimbursement_drafts(
     offset: int,
     limit: int,
     now: datetime | None = None,
+    kind: str = "travel",
 ) -> dict[str, object]:
     actor.require_current_delegation(database)
-    statement = _department_drafts(actor)
+    statement = _owned_drafts(actor, kind=kind)
     total = database.scalar(select(func.count()).select_from(statement.subquery())) or 0
     drafts = database.scalars(
         statement.order_by(
@@ -425,28 +475,19 @@ def list_reimbursement_drafts(
 def list_reimbursement_submission_history(
     database: Session,
     *,
-    actor: DraftActor,
+    corp_id: str,
+    user_id: str,
+    kind: str | None = None,
 ) -> list[dict[str, object]]:
     from app.services.oa_reimbursement_payload import parse_locked_submission_snapshot
 
-    actor.require_current_delegation(database)
+    statement = _initiated_submissions(corp_id, user_id)
+    if kind is not None:
+        statement = statement.where(ReimbursementDraft.kind == kind)
     rows = database.execute(
-        _department_drafts(actor, include_beneficiary_history=actor.operator_user_id is None)
-        .add_columns(ReimbursementSubmission)
-        .options(
+        statement.options(
             undefer(ReimbursementDraft.operator_user_id),
             undefer(ReimbursementSubmission.operator_user_id),
-        )
-        .join(ReimbursementSubmission, ReimbursementSubmission.draft_id == ReimbursementDraft.id)
-        .where(
-            ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
-            ReimbursementDraft.locked_at.is_not(None),
-            ReimbursementSubmission.corp_id == actor.corp_id,
-            ReimbursementSubmission.originator_user_id == actor.user_id,
-            ReimbursementSubmission.operator_user_id.is_not_distinct_from(
-                ReimbursementDraft.operator_user_id
-            ),
-            ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
         )
         .order_by(ReimbursementDraft.locked_at.desc(), ReimbursementDraft.id.desc())
         .limit(10)
@@ -455,28 +496,110 @@ def list_reimbursement_submission_history(
     for draft, submission in rows:
         # Never recalculate successful history with current rates or options.
         snapshot = parse_locked_submission_snapshot(draft, submission)
-        results.append({
-            "id": draft.id,
-            "lockedAt": _timestamp(draft.locked_at),
-            "relatedApprovalCount": _related_id_count(draft.related_instance_ids_json),
-            "totalAmount": format(snapshot.totals.total_amount, ".2f"),
-            "budgetLabel": snapshot.selections.budget_code.label,
-        })
+        results.append(
+            {
+                "id": draft.id,
+                "kind": draft.kind,
+                "department": {"id": draft.department_id, "name": draft.department_name},
+                "lockedAt": _timestamp(draft.locked_at),
+                "relatedApprovalCount": _related_id_count(draft.related_instance_ids_json),
+                "totalAmount": format(snapshot.totals.total_amount, ".2f"),
+                "budgetLabel": snapshot.selections.budget_code.label,
+                **(
+                    {"beneficiaryName": snapshot.identity.name}
+                    if snapshot.identity.user_id != user_id
+                    else {}
+                ),
+            }
+        )
     return results
 
 
-def _department_drafts(
-    actor: DraftActor, *, include_beneficiary_history: bool = False
+def _initiated_submissions(
+    corp_id: str, user_id: str
+) -> Select[tuple[ReimbursementDraft, ReimbursementSubmission]]:
+    snapshot_json = ReimbursementSubmission.form_snapshot_json
+    initiator = case(
+        (
+            func.json_valid(snapshot_json) == 1,
+            func.json_extract(snapshot_json, "$.oaInitiator.userId"),
+        )
+    )
+    return (
+        select(ReimbursementDraft, ReimbursementSubmission)
+        .join(ReimbursementSubmission, ReimbursementSubmission.draft_id == ReimbursementDraft.id)
+        .where(
+            ReimbursementDraft.corp_id == corp_id,
+            ReimbursementDraft.status == ReimbursementDraftStatus.LOCKED.value,
+            ReimbursementDraft.locked_at.is_not(None),
+            ReimbursementSubmission.corp_id == corp_id,
+            ReimbursementSubmission.originator_user_id == ReimbursementDraft.owner_user_id,
+            func.coalesce(initiator, ReimbursementSubmission.originator_user_id) == user_id,
+            or_(initiator.is_(None), initiator == ReimbursementSubmission.operator_user_id),
+            ReimbursementSubmission.operator_user_id.is_not_distinct_from(
+                ReimbursementDraft.operator_user_id
+            ),
+            ReimbursementSubmission.status == ReimbursementSubmissionStatus.SUBMITTED.value,
+        )
+    )
+
+
+def history_draft_actor(database: Session, current: CurrentSession, draft_id: str) -> DraftActor:
+    from app.services.oa_reimbursement_payload import parse_locked_submission_snapshot
+
+    corp_id, user_id = current.record.corp_id, current.record.dingtalk_user_id
+    row = database.execute(
+        _initiated_submissions(corp_id, user_id).where(ReimbursementDraft.id == draft_id)
+    ).one_or_none()
+    if row is None:
+        raise _not_found_error()
+    draft, submission = row
+    if parse_locked_submission_snapshot(draft, submission).approval_initiator.user_id != user_id:
+        raise _not_found_error()
+    # Reconstruct the original department for this verified read only. Do not
+    # adopt it as the employee's present department or provide write access.
+    return DraftActor(
+        corp_id,
+        draft.owner_user_id,
+        draft.department_id,
+        draft.department_name,
+        operator_user_id=draft.operator_user_id,
+    )
+
+
+def _owned_drafts(
+    actor: DraftActor, *, kind: str = "travel"
 ) -> Select[tuple[ReimbursementDraft]]:
-    statement = select(ReimbursementDraft).where(
+    return select(ReimbursementDraft).where(
         ReimbursementDraft.corp_id == actor.corp_id,
         ReimbursementDraft.owner_user_id == actor.user_id,
-        ReimbursementDraft.department_id == actor.department_id,
-        ReimbursementDraft.department_name == actor.department_name,
+        ReimbursementDraft.kind == kind,
+        ReimbursementDraft.operator_user_id == actor.operator_user_id,
     )
-    if include_beneficiary_history:
-        return statement
-    return statement.where(ReimbursementDraft.operator_user_id == actor.operator_user_id)
+
+
+def _workspace_drafts(
+    actor: DraftActor, *, kind: str = "travel"
+) -> Select[tuple[ReimbursementDraft]]:
+    return select(ReimbursementDraft).where(
+        ReimbursementDraft.corp_id == actor.corp_id,
+        ReimbursementDraft.owner_user_id == actor.user_id,
+        ReimbursementDraft.operator_user_id == actor.operator_user_id,
+        ReimbursementDraft.kind == kind,
+        ReimbursementDraft.workspace_retired.is_(False),
+    )
+
+
+def require_resolved_workspace(database: Session, actor: DraftActor, *, kind: str) -> None:
+    ids = database.scalars(
+        _workspace_drafts(actor, kind=kind).with_only_columns(ReimbursementDraft.id).limit(2)
+    ).all()
+    if len(ids) > 1:
+        raise ApiError(
+            "REIMBURSEMENT_WORKSPACE_SELECTION_REQUIRED",
+            "有多笔旧报销，请先选择保留哪一笔当前报销",
+            409,
+        )
 
 
 def get_reimbursement_draft(
@@ -487,7 +610,10 @@ def get_reimbursement_draft(
     now: datetime | None = None,
 ) -> dict[str, object]:
     draft = require_owned_draft(
-        database, draft_id=draft_id, actor=actor, allow_submitted_beneficiary=True
+        database,
+        draft_id=draft_id,
+        actor=actor,
+        allow_submitted_beneficiary=True,
     )
     return draft_data(database, draft, now=now)
 
@@ -510,19 +636,28 @@ def update_reimbursement_draft(
         mutable=True,
         now=changed_at,
     )
-    catalog = require_submission_ready_catalog(database)
-    _require_catalog_binding(draft, CatalogBinding.from_catalog(catalog))
+    catalog = (
+        get_general_catalog if draft.kind == "general" else require_submission_ready_catalog
+    )(database)
+    require_draft_catalog_binding(draft, CatalogBinding.from_catalog(catalog))
     # Accounting values belong to the verified approval selection. An ordinary
     # autosave can carry a stale client snapshot, but cannot replace these values.
     stored_input = _stored_input(draft)
     has_related = bool(json.loads(draft.related_instance_ids_json))
     draft_input = draft_input.model_copy(
         update={
-            "company_value": stored_input.company_value if has_related else "",
+            "company_value": draft_input.company_value
+            if catalog.is_general
+            else (stored_input.company_value if has_related else ""),
             "accounting_source_verified": stored_input.accounting_source_verified
             if has_related
             else False,
-            "budget_code_value": stored_input.budget_code_value if has_related else "",
+            "budget_code_value": draft_input.budget_code_value
+            if catalog.is_general
+            else (stored_input.budget_code_value if has_related else ""),
+            "general_reason": stored_input.general_reason,
+            "general_approval_ids": stored_input.general_approval_ids,
+            "general_approval_summaries": stored_input.general_approval_summaries,
             "project": stored_input.project if has_related else None,
         }
     )
@@ -533,7 +668,9 @@ def update_reimbursement_draft(
         draft_input=draft_input,
         max_items=max_items,
         allow_partial=True,
+        saved_general_input=stored_input if catalog.is_general else None,
     )
+    draft_input = ReimbursementDraftInput.model_validate(calculation.input_data)
     validate_draft_file_references(
         database,
         draft_id=draft.id,
@@ -594,13 +731,15 @@ def mark_reimbursement_draft_review_ready(
         ocr_timeout_seconds=settings.ocr_operation_timeout_seconds,
         now=changed_at,
     )
-    catalog = require_submission_ready_catalog(database)
+    catalog = (
+        get_general_catalog if draft.kind == "general" else require_submission_ready_catalog
+    )(database)
     binding = CatalogBinding.from_catalog(catalog)
-    _require_catalog_binding(draft, binding)
-    if not json.loads(draft.related_instance_ids_json):
+    require_draft_catalog_binding(draft, binding)
+    if not catalog.is_general and not json.loads(draft.related_instance_ids_json):
         raise _not_ready_error("请先关联至少一张已通过的出差审批单")
     draft_input = _stored_input(draft)
-    if not draft_input.accounting_source_verified:
+    if not catalog.is_general and not draft_input.accounting_source_verified:
         raise _not_ready_error("请重新确认关联出差审批，以核验所属公司和预算代码")
     draft_input = apply_ocr_evidence(database, draft_id=draft.id, draft_input=draft_input)
     calculation = validate_and_calculate_input(
@@ -614,7 +753,18 @@ def mark_reimbursement_draft_review_ready(
         .where(ReimbursementDraftRelatedApproval.draft_id == draft.id)
         .order_by(ReimbursementDraftRelatedApproval.sort_order)
     ).all()
-    _validate_related_snapshot(draft, related, catalog, draft_input=draft_input)
+    draft_input = ReimbursementDraftInput.model_validate(calculation.input_data)
+    if not catalog.is_general:
+        _validate_related_snapshot(draft, related, catalog, draft_input=draft_input)
+    elif not database.scalar(
+        select(ReimbursementDraftFile.id)
+        .where(
+            ReimbursementDraftFile.draft_id == draft.id,
+            ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,
+        )
+        .limit(1)
+    ):
+        raise _not_ready_error("请先上传至少一个有效附件")
     _validate_file_snapshot(database, draft_id=draft.id, draft_input=draft_input)
 
     try:
@@ -625,8 +775,6 @@ def mark_reimbursement_draft_review_ready(
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
                 ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                ReimbursementDraft.department_id == actor.department_id,
-                ReimbursementDraft.department_name == actor.department_name,
                 ReimbursementDraft.revision == expected_revision,
                 ReimbursementDraft.status.in_(_MUTABLE_STATUSES),
                 ReimbursementDraft.locked_at.is_(None),
@@ -669,6 +817,7 @@ async def replace_related_approvals(
     draft_id: str,
     expected_revision: int,
     selections: list[RelatedApprovalSelectionInput],
+    departments: tuple[DepartmentIdentity, ...] = (),
     now: datetime | None = None,
 ) -> dict[str, object]:
     preflight_at = now or utc_now()
@@ -681,9 +830,11 @@ async def replace_related_approvals(
     )
     if draft.revision != expected_revision:
         raise _revision_conflict_error()
+    if draft.kind != "travel":
+        raise _not_found_error()
     catalog = require_submission_ready_catalog(database)
     binding = CatalogBinding.from_catalog(catalog)
-    _require_catalog_binding(draft, binding)
+    require_draft_catalog_binding(draft, binding)
     domain_selections = tuple(
         TravelApprovalSelection(
             profile_key=item.profile_key,
@@ -710,6 +861,13 @@ async def replace_related_approvals(
         if domain_selections
         else None
     )
+    # Re-derive this ordinary field for every saved selection, including removals.
+    # Ambiguous or historical sources retain the current value for manual choice.
+    department = None
+    if verified is not None:
+        department = next((d for d in departments if d.id == verified.department_id), None)
+        if department is None and len(departments) == 1:
+            department = departments[0]
     return _store_related_approvals(
         database,
         actor=actor,
@@ -717,8 +875,117 @@ async def replace_related_approvals(
         expected_revision=expected_revision,
         expected_binding=binding,
         verified=verified,
+        target_actor=replace(
+            actor, department_id=department.id, department_name=department.name
+        ) if department is not None else None,
         changed_at=now or utc_now(),
     )
+
+
+async def replace_general_approvals(
+    database: Session,
+    workflow: DingTalkWorkflowClient,
+    *,
+    actor: DraftActor,
+    draft_id: str,
+    expected_revision: int,
+    instance_ids: list[str],
+) -> dict[str, object]:
+    draft = require_owned_draft(
+        database, draft_id=draft_id, actor=actor, mutable=True, now=utc_now()
+    )
+    if draft.kind != "general" or actor.operator_user_id is not None:
+        raise _not_found_error()
+    if draft.revision != expected_revision:
+        raise _revision_conflict_error()
+    binding = CatalogBinding.from_catalog(get_general_catalog(database))
+    require_draft_catalog_binding(draft, binding)
+    draft_input = _stored_input(draft)
+    saved_ids = set(draft_input.general_approval_ids)
+    summaries = {
+        entry.process_instance_id: entry for entry in draft_input.general_approval_summaries
+    }
+    database.rollback()
+    # Removing a selection must still work when another saved approval is unavailable.
+    # Verify all requested approvals when the selection adds an instance.
+    if set(instance_ids) - saved_ids:
+        approvals = await verify_general_approvals(
+            workflow, user_id=actor.user_id, instance_ids=instance_ids
+        )
+        summaries = {
+            item.instance_id: GeneralApprovalSummary.model_validate(approval_summary(item))
+            for item in approvals
+        }
+    calculation = _calculate_input(
+        database,
+        draft_input.model_copy(
+            update={
+                "general_approval_ids": instance_ids,
+                "general_approval_summaries": [
+                    summaries[instance_id]
+                    for instance_id in instance_ids
+                    if instance_id in summaries
+                ],
+            },
+        ),
+    )
+    database.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    current_binding = CatalogBinding.from_catalog(get_general_catalog(database))
+    require_draft_catalog_binding(draft, current_binding)
+    revision = bump_owned_draft_revision(
+        database,
+        draft_id=draft_id,
+        actor=actor,
+        expected_revision=expected_revision,
+        now=utc_now(),
+    )
+    database.execute(
+        update(ReimbursementDraft)
+        .where(
+            ReimbursementDraft.id == draft_id,
+            ReimbursementDraft.revision == revision,
+        )
+        .values(
+            input_json=calculation.canonical_json,
+            related_instance_ids_json=json.dumps(instance_ids),
+        )
+    )
+    database.commit()
+    database.expire_all()
+    return get_reimbursement_draft(database, actor=actor, draft_id=draft_id)
+
+
+async def read_general_approval_summaries(
+    database: Session, workflow: DingTalkWorkflowClient, *, actor: DraftActor, draft_id: str
+) -> list[dict[str, str | None]]:
+    draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    if draft.kind != "general" or actor.operator_user_id is not None:
+        raise _not_found_error()
+    revision = draft.revision
+    draft_input = _stored_input(draft)
+    saved = {
+        entry.process_instance_id: entry.model_dump(by_alias=True)
+        for entry in draft_input.general_approval_summaries
+    }
+    database.rollback()
+    for instance_id in draft_input.general_approval_ids:
+        if instance_id in saved:
+            continue
+        try:
+            (instance,) = await verify_general_approvals(
+                workflow, user_id=actor.user_id, instance_ids=[instance_id]
+            )
+            saved[instance_id] = approval_summary(instance)
+        except ApiError:
+            continue
+    current = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    if current.revision != revision:
+        raise _revision_conflict_error()
+    return [
+        saved[instance_id]
+        for instance_id in draft_input.general_approval_ids
+        if instance_id in saved
+    ]
 
 
 def validate_and_calculate_input(
@@ -728,6 +995,7 @@ def validate_and_calculate_input(
     draft_input: ReimbursementDraftInput,
     max_items: int,
     allow_partial: bool = False,
+    saved_general_input: ReimbursementDraftInput | None = None,
 ) -> DraftCalculation:
     if len(draft_input.items) > max_items:
         raise ApiError(
@@ -735,17 +1003,98 @@ def validate_and_calculate_input(
             f"当前部署每张报销单最多处理 {max_items} 条费用明细",
             422,
         )
+    previous = saved_general_input if allow_partial and catalog.is_general else None
     if draft_input.company_value or not allow_partial:
-        _require_exact_option(catalog, "company", draft_input.company_value)
+        _require_exact_option(
+            catalog,
+            "company",
+            draft_input.company_value,
+            unchanged_value=previous.company_value if previous else None,
+        )
     budget = None
     if draft_input.budget_code_value or not allow_partial:
-        budget = _require_exact_option(catalog, "budgetCode", draft_input.budget_code_value)
+        budget = _require_exact_option(
+            catalog,
+            "budgetCode",
+            draft_input.budget_code_value,
+            unchanged_value=previous.budget_code_value if previous else None,
+        )
+    if catalog.is_general:
+        if (
+            draft_input.trip
+            or draft_input.trips
+            or (draft_input.editing_state and draft_input.editing_state.include_subsidy)
+        ):
+            raise _not_ready_error("普通费用报销不能申请差旅补助")
+        subjects = {option.value: option for option in general_options(catalog, "subjects")}
+        retained_subjects = Counter(
+            (item.subject_value, item.category)
+            for item in (previous.items if previous else [])
+            if item.subject_value and item.subject_value not in subjects
+        )
+        normalized = []
+        for index, item in enumerate(draft_input.items, 1):
+            selected = subjects.get(item.subject_value or "")
+            if item.subject_value and selected is None:
+                retained = (item.subject_value, item.category)
+                if not retained_subjects[retained]:
+                    raise _invalid_general_subject_error(index)
+                retained_subjects[retained] -= 1
+                normalized.append(item)
+                continue
+            if selected is None and not allow_partial:
+                raise _not_ready_error("请逐项选择费用科目")
+            category = subject_category(selected.label) if selected else ExpenseCategory.OTHER
+            normalized.append(
+                item.model_copy(
+                    update={
+                        "category": category,
+                        "welfare_type": None,
+                        "waybill_file_ids": item.waybill_file_ids
+                        if category == ExpenseCategory.EXPRESS
+                        else [],
+                    }
+                )
+            )
+        if not allow_partial and not normalized:
+            raise _not_ready_error("请添加费用明细")
+        draft_input = draft_input.model_copy(update={"items": normalized, "editing_state": None})
+    else:
+        if (
+            draft_input.general_reason
+            or draft_input.general_approval_ids
+            or any(
+                item.subject_value or item.category == ExpenseCategory.EXPRESS
+                for item in draft_input.items
+            )
+        ):
+            raise _not_ready_error("差旅报销不能保存普通费用科目或审批")
+        draft_input = draft_input.model_copy(
+            update={
+                "items": [
+                    item.model_copy(
+                        update={
+                            "welfare_type": None,
+                            "waybill_file_ids": [],
+                        }
+                    )
+                    if item.category != ExpenseCategory.EMPLOYEE_WELFARE
+                    else item.model_copy(
+                        update={
+                            "waybill_file_ids": item.waybill_file_ids
+                            if item.welfare_type == "express"
+                            else [],
+                        }
+                    )
+                    for item in draft_input.items
+                ]
+            }
+        )
     # The selected OA budget option is authoritative for the generated workbook.
-    draft_input = draft_input.model_copy(
-        update={
-            "project": BudgetProjectInput(mode="manual", text=budget.label) if budget else None,
-        }
-    )
+    project = BudgetProjectInput(mode="manual", text=budget.label) if budget else None
+    if budget is None and previous and draft_input.budget_code_value == previous.budget_code_value:
+        project = previous.project
+    draft_input = draft_input.model_copy(update={"project": project})
     if not allow_partial:
         require_complete_draft_input(draft_input)
     return _calculate_input(database, draft_input, allow_partial=allow_partial)
@@ -753,7 +1102,7 @@ def validate_and_calculate_input(
 
 def complete_expense_items(draft_input: ReimbursementDraftInput) -> list[ExcelExpenseItemInput]:
     """Only validated workbook fields may reach arithmetic or generation."""
-    return [
+    result = [
         ExcelExpenseItemInput.model_validate(
             item.model_dump(
                 mode="json",
@@ -763,6 +1112,16 @@ def complete_expense_items(draft_input: ReimbursementDraftInput) -> list[ExcelEx
         )
         for item in draft_input.items
     ]
+    return [
+        value.model_copy(update={"description": express_description(value.description)})
+        if item.welfare_type == "express"
+        else value
+        for item, value in zip(draft_input.items, result, strict=True)
+    ]
+
+
+def express_description(description: str) -> str:
+    return description if description.startswith("快递") else f"快递｜{description}"
 
 
 def require_complete_draft_input(draft_input: ReimbursementDraftInput) -> None:
@@ -817,7 +1176,8 @@ def validate_draft_file_references(
         )
     ).all()
     if require_terminal_disposition and any(
-        file.file_status in {
+        file.file_status
+        in {
             ReimbursementDraftFileStatus.RESERVED.value,
             ReimbursementDraftFileStatus.WRITING.value,
             ReimbursementDraftFileStatus.DELETING.value,
@@ -836,8 +1196,7 @@ def validate_draft_file_references(
     ):
         raise _not_ready_error("票据尚未识别，或附件仍在上传、删除、识别中")
     files = [
-        file for file in all_files
-        if file.file_status == ReimbursementDraftFileStatus.ACTIVE.value
+        file for file in all_files if file.file_status == ReimbursementDraftFileStatus.ACTIVE.value
     ]
     files_by_id = {item.id: item for item in files}
     if require_submission_proofs or require_terminal_disposition:
@@ -865,6 +1224,7 @@ def validate_draft_file_references(
             (item.payment_proof_file_ids, "payment_proof"),
             (item.hotel_bill_file_ids, "hotel_bill"),
             (item.receipt_attachment_file_ids, "other"),
+            (item.waybill_file_ids, "waybill"),
         ):
             if any(
                 file_id not in files_by_id
@@ -896,7 +1256,8 @@ def validate_draft_file_references(
 
 
 def _validate_linked_support_files(
-    draft_input: ReimbursementDraftInput, files: Sequence[ReimbursementDraftFile],
+    draft_input: ReimbursementDraftInput,
+    files: Sequence[ReimbursementDraftFile],
 ) -> None:
     for kind, field, label in (
         ("itinerary", "itinerary_file_ids", "行程单"),
@@ -927,7 +1288,7 @@ def validate_submission_evidence(
         if (
             payment_proof_required(
                 amount=item.amount,
-                category=item.category,
+                category=_proof_category(item),
                 rail_type=_authoritative_rail_type(item, evidence),
                 receipt_count=1 if item.source_file_id else item.receipt_count,
             )
@@ -957,7 +1318,7 @@ def _authoritative_rail_type(
     item: ReimbursementDraftExpenseItemInput, evidence: dict[str, object]
 ) -> str:
     # "other" is an unclassified fallback, not positive non-rail evidence.
-    if item.category is not ExpenseCategory.RAIL_FARE or evidence.get("categoryId") not in (
+    if _proof_category(item) is not ExpenseCategory.RAIL_FARE or evidence.get("categoryId") not in (
         None,
         "other",
         "rail_fare",
@@ -969,6 +1330,16 @@ def _authoritative_rail_type(
             return str(observed)
         return item.rail_type if item.rail_type != "unknown" else str(observed)
     return item.rail_type
+
+
+def _proof_category(item: ReimbursementDraftExpenseItemInput) -> ExpenseCategory:
+    if (
+        item.subject_value
+        and item.category == ExpenseCategory.LOCAL_TRANSPORT
+        and item.transport_type == "rail"
+    ):
+        return ExpenseCategory.RAIL_FARE
+    return item.category
 
 
 def file_ocr_evidence(file: ReimbursementDraftFile | None) -> dict[str, object]:
@@ -1022,6 +1393,13 @@ def apply_ocr_evidence(
     for item in draft_input.items:
         evidence = file_ocr_evidence(by_id.get(item.source_file_id or ""))
         values = item.model_dump(mode="json", by_alias=True)
+        if (
+            not item.subject_value
+            and item.category == ExpenseCategory.EMPLOYEE_WELFARE
+            and item.welfare_type is None
+            and "WELFARE_TYPE_NEEDS_CONFIRMATION" in (evidence.get("warnings") or [])
+        ):
+            values["welfareType"] = "express"
         original_details_edited = _original_details_were_edited(item, evidence)
         if original_details_edited:
             values["originalDetailsEdited"] = True
@@ -1071,6 +1449,9 @@ def detach_draft_files_from_input(
                 ],
                 "receipt_attachment_file_ids": [
                     value for value in item.receipt_attachment_file_ids if value not in file_ids
+                ],
+                "waybill_file_ids": [
+                    value for value in item.waybill_file_ids if value not in file_ids
                 ],
             }
         )
@@ -1165,7 +1546,8 @@ def draft_data(
         **({"attachmentMode": calculation.attachment_mode} if calculation.attachment_mode else {}),
         **(
             {"submittedDetails": calculation.submitted_details}
-            if calculation.submitted_details else {}
+            if calculation.submitted_details
+            else {}
         ),
         "relatedApprovals": [_related_data(item) for item in related],
         "relatedApprovalSummary": _related_summary(related),
@@ -1177,7 +1559,10 @@ def _locked_draft_calculation(
     draft: ReimbursementDraft,
     stored_input: ReimbursementDraftInput,
 ) -> DraftCalculation:
-    from app.services.oa_reimbursement_payload import parse_locked_submission_snapshot
+    from app.services.oa_reimbursement_payload import (
+        parse_locked_submission_snapshot,
+        snapshot_subject_options,
+    )
 
     submission = database.scalar(
         select(ReimbursementSubmission).where(ReimbursementSubmission.draft_id == draft.id)
@@ -1207,7 +1592,18 @@ def _locked_draft_calculation(
             "employeeName": snapshot.identity.name,
             "companyLabel": snapshot.selections.company.label,
             "budgetLabel": snapshot.selections.budget_code.label,
-            "travelTypeLabel": snapshot.selections.travel_type.label,
+            "travelTypeLabel": snapshot.selections.travel_type.label
+            if snapshot.selections.travel_type
+            else "",
+            **(
+                {
+                    "subjectLabels": {
+                        option.value: option.label for option in snapshot_subject_options(snapshot)
+                    }
+                }
+                if snapshot.kind == "general"
+                else {}
+            ),
         },
     )
 
@@ -1221,6 +1617,8 @@ def _store_related_approvals(
     expected_binding: CatalogBinding,
     verified: VerifiedTravelSelection | None,
     changed_at: datetime,
+    target_actor: DraftActor | None = None,
+    bind_department_for: UserSession | None = None,
 ) -> dict[str, object]:
     current_catalog = require_submission_ready_catalog(database)
     current_binding = CatalogBinding.from_catalog(current_catalog)
@@ -1233,18 +1631,13 @@ def _store_related_approvals(
         mutable=True,
         now=changed_at,
     )
-    _require_catalog_binding(current_draft, current_binding)
+    require_draft_catalog_binding(current_draft, current_binding)
+    destination = target_actor or replace(
+        actor,
+        department_id=current_draft.department_id,
+        department_name=current_draft.department_name,
+    )
     approvals = verified.approvals if verified is not None else ()
-    if (
-        verified is not None
-        and verified.department_id in actor.available_department_ids
-        and verified.department_id != actor.department_id
-    ):
-        raise ApiError(
-            "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH",
-            "所选出差审批属于另一个当前部门，请按部门分别报销",
-            422,
-        )
     instance_ids = [item.instance.instance_id for item in approvals]
     derived_input = _stored_input(current_draft).model_copy(
         update={
@@ -1305,6 +1698,8 @@ def _store_related_approvals(
                     separators=(",", ":"),
                     sort_keys=True,
                 ),
+                department_id=destination.department_id,
+                department_name=destination.department_name,
                 related_instance_ids_json=json.dumps(
                     instance_ids,
                     ensure_ascii=False,
@@ -1312,12 +1707,15 @@ def _store_related_approvals(
                 ),
             )
         )
+        if bind_department_for is not None:
+            bind_department_for.current_department_id = destination.department_id
+            bind_department_for.current_department_name = destination.department_name
         database.commit()
         database.expire_all()
     except Exception:
         database.rollback()
         raise
-    updated = require_owned_draft(database, draft_id=draft_id, actor=actor)
+    updated = require_owned_draft(database, draft_id=draft_id, actor=destination)
     return draft_data(database, updated, now=changed_at)
 
 
@@ -1369,6 +1767,17 @@ def _canonical_input_data(draft_input: ReimbursementDraftInput) -> dict[str, obj
         result["trips"] = trips
     if draft_input.editing_state is not None:
         result["editingState"] = draft_input.editing_state.model_dump(mode="json", by_alias=True)
+    if draft_input.general_reason:
+        result["generalReason"] = draft_input.general_reason
+    if draft_input.general_approval_ids:
+        result["generalApprovalIds"] = draft_input.general_approval_ids
+    if draft_input.general_approval_summaries:
+        selected = set(draft_input.general_approval_ids)
+        result["generalApprovalSummaries"] = [
+            item.model_dump(by_alias=True)
+            for item in draft_input.general_approval_summaries
+            if item.process_instance_id in selected
+        ]
     return result
 
 
@@ -1394,7 +1803,9 @@ def _require_exact_option(
     catalog: OaTemplateCatalogContract,
     logical_field: str,
     requested_value: str,
-) -> FormOption:
+    *,
+    unchanged_value: str | None = None,
+) -> FormOption | None:
     component_id = catalog.reimbursement.mappings.get(logical_field)
     component = next(
         (
@@ -1413,16 +1824,22 @@ def _require_exact_option(
         else None
     )
     if option is None:
+        if requested_value == unchanged_value:
+            return None
         code = (
             "REIMBURSEMENT_COMPANY_OPTION_INVALID"
             if logical_field == "company"
             else "REIMBURSEMENT_BUDGET_OPTION_INVALID"
         )
-        raise ApiError(code, "所选 OA 模板选项已失效，请刷新后重新选择", 422)
+        message = "所选 OA 模板选项已失效，请刷新后重新选择"
+        if catalog.is_general:
+            field = "报销主体" if logical_field == "company" else "预算代码"
+            message = f"请选择有效的{field}"
+        raise ApiError(code, message, 422)
     return option
 
 
-def _require_catalog_binding(
+def require_draft_catalog_binding(
     draft: ReimbursementDraft,
     binding: CatalogBinding,
 ) -> None:
@@ -1431,6 +1848,27 @@ def _require_catalog_binding(
         or draft.template_config_version != binding.config_version
     ):
         raise _template_changed_error()
+
+
+def require_general_draft_options(
+    draft: ReimbursementDraft, catalog: OaTemplateCatalogContract
+) -> None:
+    require_draft_catalog_binding(draft, CatalogBinding.from_catalog(catalog))
+    draft_input = _stored_input(draft)
+    _require_exact_option(catalog, "company", draft_input.company_value)
+    _require_exact_option(catalog, "budgetCode", draft_input.budget_code_value)
+    subjects = {option.value for option in general_options(catalog, "subjects")}
+    for index, item in enumerate(draft_input.items, 1):
+        if not item.subject_value:
+            raise _not_ready_error("请逐项选择费用科目")
+        if item.subject_value not in subjects:
+            raise _invalid_general_subject_error(index)
+
+
+def _invalid_general_subject_error(index: int) -> ApiError:
+    return ApiError(
+        "REIMBURSEMENT_SUBJECT_OPTION_INVALID", f"第 {index} 笔费用的科目已停用，请重新选择", 409
+    )
 
 
 def _validate_related_snapshot(
@@ -1566,15 +2004,6 @@ def _validate_file_snapshot(
     )
 
 
-def _require_department(draft: ReimbursementDraft, actor: DraftActor) -> None:
-    if draft.department_id != actor.department_id or draft.department_name != actor.department_name:
-        raise ApiError(
-            "REIMBURSEMENT_DRAFT_DEPARTMENT_MISMATCH",
-            "本次报销所属部门与当前选择不同，请切换部门后重试",
-            409,
-        )
-
-
 def _require_mutable(draft: ReimbursementDraft, *, now: datetime) -> None:
     if draft.workspace_retired:
         raise ApiError("REIMBURSEMENT_DRAFT_REPLACED", "已新开另一笔报销，请返回当前报销", 409)
@@ -1598,6 +2027,7 @@ def _draft_summary(draft: ReimbursementDraft, *, now: datetime) -> dict[str, obj
     )
     return {
         "id": draft.id,
+        **({"kind": draft.kind} if draft.kind == "general" else {}),
         "status": status,
         "revision": draft.revision,
         "department": {"id": draft.department_id, "name": draft.department_name},

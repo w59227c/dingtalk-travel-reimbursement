@@ -27,6 +27,8 @@ export interface ReimbursementDepartmentResolution {
   selectedDepartment: Department | null
   selectionRequired: boolean
   departments: Department[]
+  existingDraftDepartment?: Department
+  reservedDraftId?: string
   reimbursementContext?: string
 }
 

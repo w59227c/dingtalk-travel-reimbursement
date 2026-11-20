@@ -16,6 +16,7 @@ describe('reimbursement review overview', () => {
       global: { plugins: [ElementPlus] },
     })
     expect(wrapper.text()).toContain(budget)
+    expect(wrapper.findAll('dt').map(label => label.text())).toContain('预算代码 / 项目')
     expect(wrapper.text()).toContain('合成公司')
     expect(wrapper.text()).toContain('合成部门')
     const dates = wrapper.get('.review-overview__dates')

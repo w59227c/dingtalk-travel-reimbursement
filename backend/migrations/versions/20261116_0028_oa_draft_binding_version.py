@@ -19,13 +19,17 @@ def upgrade():
     op.add_column("oa_template_profiles", sa.Column("draft_binding_version", sa.Integer()))
 
 
-def downgrade():
-    if op.get_bind().scalar(sa.text(
-        "SELECT count(*) FROM oa_template_profiles WHERE draft_binding_version IS NOT NULL"
-    )):
+def _preflight_downgrade():
+    if op.get_bind().scalar(
+        sa.text("SELECT count(*) FROM oa_template_profiles WHERE draft_binding_version IS NOT NULL")
+    ):
         raise CommandError("Cannot downgrade a catalog with a preserved OA draft binding")
     context = op.get_context()
-    if context.opts.get("destination_rev") not in {down_revision, "-1"}:
+    if context.opts.get("destination_rev") not in {revision, down_revision, "-1"}:
         previous = ScriptDirectory.from_config(context.config).get_revision(down_revision)
         previous.module._preflight_downgrade()
+
+
+def downgrade():
+    _preflight_downgrade()
     op.drop_column("oa_template_profiles", "draft_binding_version")

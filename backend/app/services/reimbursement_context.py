@@ -160,8 +160,6 @@ async def _select_context(
     if employee.user_id != user_id:
         raise _context_error()
     departments = selectable_departments(employee.departments)
-    if not departments:
-        raise _context_error()
     if department_id is None and restore_workspace:
         department_id = database.scalar(
             select(ReimbursementDraft.department_id).where(
@@ -173,8 +171,10 @@ async def _select_context(
             ).order_by(ReimbursementDraft.updated_at.desc(), ReimbursementDraft.id.desc()).limit(1)
         )
     selected = next((item for item in departments if item.id == department_id), None)
-    if department_id is not None and selected is None:
+    if restore_workspace and department_id is not None and selected is None:
         raise _context_error()
+    # Signed legacy contexts retain their beneficiary after a directory move.
+    # Current delegation permission and employee identity are still rechecked.
     if selected is None and len(departments) == 1:
         selected = departments[0]
     scoped = replace(

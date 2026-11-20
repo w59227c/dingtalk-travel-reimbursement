@@ -193,12 +193,6 @@ def create_session(
     existing_cookie: str | None,
 ) -> tuple[UserSession, str, str]:
     departments = selectable_departments(identity.departments)
-    if not departments:
-        raise ApiError(
-            "DINGTALK_PERMISSION_MISSING",
-            "未找到可用于报销的所属部门，请联系管理员",
-            502,
-        )
     if existing_cookie:
         existing = database.get(
             UserSession,
@@ -331,8 +325,6 @@ def get_current_session(
         record.last_seen_at = now
         changed = True
     departments = deserialize_departments(record.departments_json)
-    if not departments:
-        raise ApiError("UNAUTHORIZED", "登录身份数据无效，请重新进入", 401)
     selected_is_valid = any(
         item.id == record.current_department_id
         and item.name == record.current_department_name
@@ -360,15 +352,6 @@ def require_csrf(
     ):
         raise ApiError("CSRF_INVALID", "页面安全令牌已失效，请刷新后重试", 403)
     return current
-
-
-def require_selected_department(current: CurrentSession) -> str:
-    """Return the trusted department name or reject an incomplete reimbursement context."""
-
-    department_name = current.reimbursement_department_name
-    if not current.reimbursement_department_id or not department_name:
-        raise ApiError("DEPARTMENT_REQUIRED", "请先选择本次报销部门", 409)
-    return department_name
 
 
 async def has_admin_access(

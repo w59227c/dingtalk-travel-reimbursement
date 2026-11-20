@@ -39,6 +39,7 @@ class ReceiptKeywordRule:
     keyword: str
     category: ExpenseCategory
     transport_type: Literal["ride_hailing", "taxi"] | None = None
+    welfare_type: Literal["express", "other"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,7 @@ class ParsedExpense:
     invoice_numbers: tuple[str, ...] = field(default_factory=tuple)
     order_numbers: tuple[str, ...] = field(default_factory=tuple)
     rail_type: Literal["high_speed", "emu", "regular", "unknown"] | None = None
+    welfare_type: Literal["express", "other"] | None = None
 
 
 @dataclass(frozen=True, slots=True)

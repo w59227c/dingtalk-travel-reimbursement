@@ -14,7 +14,7 @@
 └── .env
 ```
 
-仓库当前的 `compose.yaml` 即为 16C / 32 GiB 内存 / 100 GiB 磁盘准备的资源配置；将项目
+本目录的 `compose.yaml` 即为 16C / 32 GiB 内存 / 100 GiB 磁盘准备的资源配置；将项目
 根目录的 `.env.production.16c32g.example` 复制为同目录 `.env`。该配置为后端限制 12 核、16 GiB，
 OCR 单槽使用 8 个 CPU 线程并限制为 8 GiB，Web 限制 1 核、256 MiB，持久材料逻辑上限为
 30 GiB；剩余资源保留给宿主系统、Docker、页缓存、备份和突发任务。当前程序只允许一个 OCR
@@ -63,6 +63,8 @@ OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX R
 先停止接单及 worker，记录当前数据库 revision，并核对目标后端镜像的 `alembic heads`、数据库约束和快照格式兼容性。**不能仅改镜像标签就跨数据库版本回滚**：旧镜像无法识别新 revision，启动时的 `alembic upgrade head` 会失败；部分降级还会因业务记录或审计证据而被明确拒绝。
 
 数据库 revision 相同也须核对应用格式。版本 11 快照可能包含 `detailOrder`、代报的 `oaInitiator`、报销身份字段映射，以及出差模板的 `schemaContractVersion=2`（发布标识变化不改变字段契约），模板目录也可保存报销人和报销部门映射。保留当前数据的镜像回滚须选用支持已写入字段和映射的后端。确需回到更早的镜像时，按下方步骤恢复升级前的一致性备份。
+
+普通费用使用版本 12 快照、独立模板配置及费用科目，并增加运单和福利费子类。保留现有数据的目标镜像还须支持两种报销类型各自的跨部门当前工作区、可更正的部门属性及已有恢复记录；不能只以差旅版本 11 快照可读作为兼容依据。
 
 只有确认目标镜像支持当前数据库和已保存快照时，才把 `.env` 的 `IMAGE_TAG` 改为 Actions 已成功发布的目标 `sha-<完整 commit>`，再执行 `docker compose pull` 和 `docker compose up -d --wait --wait-timeout 300`。恢复跟随主线时改回 `IMAGE_TAG=main`。
 

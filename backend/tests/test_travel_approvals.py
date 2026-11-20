@@ -834,7 +834,7 @@ async def test_reverification_allows_a_gap_between_selected_approvals() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reverification_rejects_approvals_from_different_departments() -> None:
+async def test_reverification_allows_departments_and_leaves_attribute_unresolved() -> None:
     window = _window()
     workflow = FakeWorkflow(
         {("PROC-A", 0): WorkflowInstanceIdPage(("first", "second"), None)},
@@ -844,8 +844,7 @@ async def test_reverification_rejects_approvals_from_different_departments() -> 
         },
     )
 
-    with pytest.raises(ApiError) as caught:
-        await reverify_travel_approval_selection(
+    verified = await reverify_travel_approval_selection(
             workflow,
             _catalog(_profile("domestic", "PROC-A")),
             current_user_id="employee-1",
@@ -855,7 +854,8 @@ async def test_reverification_rejects_approvals_from_different_departments() -> 
             ),
         )
 
-    assert caught.value.code == "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH"
+    assert verified.department_id is None
+    assert len(verified.approvals) == 2
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,15 @@ from app.models.reimbursement import (
     new_uuid,
     utc_now,
 )
-from app.services.reimbursement_drafts import DraftActor
+from app.services.general_reimbursement import (
+    general_options,
+    get_general_catalog,
+    require_current_subject_categories,
+)
+from app.services.reimbursement_drafts import (
+    DraftActor,
+    require_general_draft_options,
+)
 from app.services.reimbursement_quota import SubmissionLease
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -541,7 +549,6 @@ def create_submission(
     )
     if draft is None:
         raise _draft_not_found_error()
-    _require_submission_department(draft, actor)
     _require_review_ready_draft(
         draft,
         expected_revision=expected_revision,
@@ -556,6 +563,7 @@ def create_submission(
         .order_by(ReimbursementDraftFile.sort_order, ReimbursementDraftFile.id)
     ).all()
     excel_only = False
+    snapshot = None
     if snapshot_version >= 10:
         from app.services.oa_reimbursement_payload import parse_snapshot
 
@@ -604,8 +612,6 @@ def create_submission(
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
                 ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                ReimbursementDraft.department_id == actor.department_id,
-                ReimbursementDraft.department_name == actor.department_name,
                 ReimbursementDraft.revision == expected_revision,
                 ReimbursementDraft.status == ReimbursementDraftStatus.REVIEW_READY.value,
                 ReimbursementDraft.locked_at.is_(None),
@@ -647,6 +653,17 @@ def create_submission(
                 now=created_at,
             )
 
+        if draft.kind == "general":
+            # Validate under the CAS write lock. A stale binding or inactive option
+            # must leave the draft editable and prevent enqueueing the snapshot.
+            catalog = get_general_catalog(database)
+            require_general_draft_options(draft, catalog)
+            if snapshot is None or snapshot.kind != "general":
+                raise ReimbursementSubmissionConflict("submission snapshot kind mismatch")
+            require_current_subject_categories(
+                general_options(catalog, "subjects"),
+                ((item.subject_value, item.category) for item in snapshot.input.items),
+            )
         actor.require_current_delegation(database)
         submission = ReimbursementSubmission(
             id=submission_id,
@@ -730,15 +747,6 @@ def require_owned_submission(
     )
     if submission is None:
         raise ApiError("REIMBURSEMENT_SUBMISSION_NOT_FOUND", "提交记录不存在", 404)
-    if (
-        submission.department_id != actor.department_id
-        or submission.department_name != actor.department_name
-    ):
-        raise ApiError(
-            "REIMBURSEMENT_SUBMISSION_DEPARTMENT_MISMATCH",
-            "提交记录所属部门与当前选择不同，请切换部门后重试",
-            409,
-        )
     return submission
 
 
@@ -2656,8 +2664,6 @@ def _owned_submission_for_draft(
             _submission_operator_scope(
                 actor, allow_submitted_beneficiary=allow_submitted_beneficiary
             ),
-            ReimbursementSubmission.department_id == actor.department_id,
-            ReimbursementSubmission.department_name == actor.department_name,
         )
     )
 
@@ -2733,22 +2739,12 @@ def _raise_current_draft_conflict(
     )
     if current is None:
         raise _draft_not_found_error()
-    _require_submission_department(current, actor)
     _require_review_ready_draft(
         current,
         expected_revision=expected_revision,
         now=now,
     )
     raise ReimbursementSubmissionConflict("draft submission CAS changed")
-
-
-def _require_submission_department(draft: ReimbursementDraft, actor: DraftActor) -> None:
-    if draft.department_id != actor.department_id or draft.department_name != actor.department_name:
-        raise ApiError(
-            "REIMBURSEMENT_DRAFT_DEPARTMENT_MISMATCH",
-            "草稿所属部门与当前选择不同，请切换部门后重试",
-            409,
-        )
 
 
 def _require_actor(actor: DraftActor) -> None:
@@ -2758,8 +2754,6 @@ def _require_actor(actor: DraftActor) -> None:
     _required_text(actor.user_id, maximum=128)
     if actor.operator_user_id is not None:
         _required_text(actor.operator_user_id, maximum=128)
-    _required_text(actor.department_id, maximum=128)
-    _required_text(actor.department_name, maximum=255)
 
 
 def _idempotency_hash(value: str) -> str:

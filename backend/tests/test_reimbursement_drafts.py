@@ -40,6 +40,7 @@ from app.services.reimbursement_submissions import find_owned_submission_for_dra
 
 def _catalog():
     return SimpleNamespace(
+        is_general=False,
         config_version=12,
         reimbursement=SimpleNamespace(
             process_code="PROC-REIMBURSEMENT",
@@ -494,7 +495,6 @@ def test_open_current_draft_skips_records_outside_current_scope(
     excluded_records = [
         {"corp_id": "different-corp"},
         {"owner_user_id": "different-employee"},
-        {"department_id": "200"},
     ]
     for overrides in excluded_records:
         created = client.post(url, json=payload, headers=headers)
@@ -514,8 +514,11 @@ def test_open_current_draft_skips_records_outside_current_scope(
     assert client.get(url).json()["data"]["total"] == 1
 
 
-def _add_history_submission(database, draft, *, status="QUEUED", resume_status=None):
+def _add_history_submission(
+    database, draft, *, status="QUEUED", resume_status=None, template_hash=None
+):
     from app.models.reimbursement import new_uuid
+
     draft.id = draft.id or new_uuid()
     frozen = None
     if status == "SUBMITTED":
@@ -524,18 +527,28 @@ def _add_history_submission(database, draft, *, status="QUEUED", resume_status=N
         from app.services.oa_reimbursement_payload import build_snapshot
 
         source = _source()
+        if template_hash:
+            source = replace(source, excel_template_sha256=template_hash)
         catalog = replace(source.catalog, config_version=draft.template_config_version)
-        frozen = build_snapshot(replace(
-            source,
-            draft_id=draft.id,
-            catalog=catalog,
-            identity=source.identity.model_copy(update={
-                "corp_id": draft.corp_id, "user_id": draft.owner_user_id,
-                "department_id": draft.department_id, "department_name": draft.department_name,
-            }),
-            related_approvals=tuple(replace(row, catalog_config_version=catalog.config_version)
-                                    for row in source.related_approvals),
-        ))
+        frozen = build_snapshot(
+            replace(
+                source,
+                draft_id=draft.id,
+                catalog=catalog,
+                identity=source.identity.model_copy(
+                    update={
+                        "corp_id": draft.corp_id,
+                        "user_id": draft.owner_user_id,
+                        "department_id": draft.department_id,
+                        "department_name": draft.department_name,
+                    }
+                ),
+                related_approvals=tuple(
+                    replace(row, catalog_config_version=catalog.config_version)
+                    for row in source.related_approvals
+                ),
+            )
+        )
         draft.revision = frozen.draft_revision + 1
         draft.template_process_code = frozen.template.process_code
     database.add(draft)
@@ -722,16 +735,16 @@ def test_beneficiary_may_read_completed_delegation_but_not_pending_or_originals(
             _add_history_submission(database, draft, status=status)
             records[status] = draft.id
         database.commit()
-        for actor in (beneficiary, delegate):
-            assert [
-                record["id"]
-                for record in reimbursement_drafts.list_reimbursement_submission_history(
-                    database, actor=actor
-                )
-            ] == [records["SUBMITTED"]]
-        assert reimbursement_drafts.list_reimbursement_submission_history(
-            database, actor=other_delegate
-        ) == []
+        assert [
+            record["id"]
+            for record in reimbursement_drafts.list_reimbursement_submission_history(
+                database, corp_id=beneficiary.corp_id, user_id=beneficiary.user_id
+            )
+        ] == [records["SUBMITTED"]]
+        for actor in (delegate, other_delegate):
+            assert reimbursement_drafts.list_reimbursement_submission_history(
+                database, corp_id=actor.corp_id, user_id=actor.operator_user_id
+            ) == []
         assert find_owned_submission_for_draft(
             database, draft_id=records["QUEUED"], actor=beneficiary,
             allow_submitted_beneficiary=True,
@@ -743,19 +756,27 @@ def test_beneficiary_may_read_completed_delegation_but_not_pending_or_originals(
             database, draft_id=records["SUBMITTED"], actor=beneficiary,
             allow_submitted_beneficiary=True,
         ).status == "SUBMITTED"
-        assert reimbursement_drafts.get_reimbursement_draft(
-            database, draft_id=records["SUBMITTED"], actor=beneficiary,
-        )["id"] == records["SUBMITTED"]
+        assert (
+            reimbursement_drafts.get_reimbursement_draft(
+                database,
+                draft_id=records["SUBMITTED"],
+                actor=beneficiary,
+            )["id"]
+            == records["SUBMITTED"]
+        )
         with pytest.raises(ApiError) as exc:
             require_previewable_draft_file(
-                database, draft_id=records["SUBMITTED"], file_id="synthetic-original",
+                database,
+                draft_id=records["SUBMITTED"],
+                file_id="synthetic-original",
                 actor=beneficiary,
             )
         assert exc.value.status_code == 404
 
 
-def test_submission_history_only_returns_ten_latest_submissions_in_current_scope(
-    client_factory, monkeypatch,
+def test_submission_history_caps_personal_successes_across_departments(
+    client_factory,
+    monkeypatch,
 ) -> None:
     _install_catalog(monkeypatch)
     client = client_factory(auth_mock_enabled=True)
@@ -764,11 +785,15 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
     headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
     assert client.get(url).json()["data"] == []
     created = client.post(
-        "/api/reimbursements/drafts", json={"expectedRevision": 0, "input": _input()},
+        "/api/reimbursements/drafts",
+        json={"expectedRevision": 0, "input": _input()},
         headers=headers,
     )
     assert created.status_code == 201, created.text
 
+    from app.services.oa_reimbursement_payload import hash_excel_template
+
+    template_hash = hash_excel_template(client.app.state.settings.excel_template_path)
     now = utc_now()
     with client.app.state.database_session_factory() as database:
         source = database.get(ReimbursementDraft, created.json()["data"]["id"])
@@ -782,55 +807,84 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
             "template_config_version": source.template_config_version,
             "schema_fingerprint": source.schema_fingerprint,
             "expires_at": source.expires_at,
+            "input_json": source.input_json,
         }
         for index in range(12):
             record = ReimbursementDraft(
-                **scope, id=f"synthetic-submission-{index:02d}", status="LOCKED",
+                **scope,
+                id=f"synthetic-submission-{index:02d}",
+                status="LOCKED",
                 locked_at=now - timedelta(days=20 - index // 2),
                 updated_at=now - timedelta(days=index),
             )
-            _add_history_submission(database, record, status="SUBMITTED")
+            _add_history_submission(
+                database, record, status="SUBMITTED", template_hash=template_hash
+            )
         for index in range(55):
             database.add(ReimbursementDraft(**scope, id=f"synthetic-draft-{index:02d}"))
         # Newer unfinished and failed tasks must not crowd out successful records.
         for index in range(12):
             record = ReimbursementDraft(
-                **scope, id=f"synthetic-failure-{index:02d}", status="LOCKED", locked_at=now,
+                **scope,
+                id=f"synthetic-failure-{index:02d}",
+                status="LOCKED",
+                locked_at=now,
             )
             _add_history_submission(
                 database,
                 record,
                 status="QUEUED" if index % 2 else "FAILED_FINAL",
             )
-        for field, value in (
-            ("corp_id", "another-corp"), ("owner_user_id", "another-employee"),
-            ("department_id", "200"), ("department_name", "其他测试部门"),
+        for index, (field, value) in enumerate(
+            (
+                ("corp_id", "another-corp"),
+                ("owner_user_id", "another-employee"),
+                ("department_id", "200"),
+                ("department_name", "其他测试部门"),
+            )
         ):
             record = ReimbursementDraft(
-                **{**scope, field: value}, status="LOCKED", locked_at=now,
+                **{**scope, field: value},
+                id=f"synthetic-history-scope-{index}",
+                status="LOCKED",
+                locked_at=now,
             )
-            _add_history_submission(database, record, status="SUBMITTED")
+            _add_history_submission(
+                database, record, status="SUBMITTED", template_hash=template_hash
+            )
         database.commit()
 
     response = client.get(url)
     assert response.status_code == 200, response.text
     records = response.json()["data"]
     assert [record["id"] for record in records] == [
-        f"synthetic-submission-{index:02d}" for index in range(11, 1, -1)
+        "synthetic-history-scope-3",
+        "synthetic-history-scope-2",
+        *(f"synthetic-submission-{index:02d}" for index in range(11, 3, -1)),
     ]
-    assert all(set(record) == {
-        "id", "lockedAt", "relatedApprovalCount", "totalAmount", "budgetLabel",
-    } for record in records)
+    assert client.get(url, params={"offset": 10, "limit": 50}).json()["data"] == records
+    assert all(
+        set(record)
+        == {
+            "id",
+            "kind",
+            "department",
+            "lockedAt",
+            "relatedApprovalCount",
+            "totalAmount",
+            "budgetLabel",
+        }
+        for record in records
+    )
     assert all(record["budgetLabel"] == "DEMO-001 项目" for record in records)
     assert all(record["totalAmount"] != "0.00" for record in records)
     with client.app.state.database_session_factory() as database:
         assert database.get(ReimbursementDraft, "synthetic-submission-00") is not None
 
-    for endpoint in (url, "/api/reimbursements/drafts"):
-        for scope in ({"expectedDepartmentId": "200"}, {"expectedDepartmentName": "另一部门"}):
-            stale = client.get(endpoint, params=scope)
-            assert stale.status_code == 409, stale.text
-            assert stale.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_CHANGED"
+    for scope in ({"expectedDepartmentId": "200"}, {"expectedDepartmentName": "另一部门"}):
+        stale = client.get("/api/reimbursements/drafts", params=scope)
+        assert stale.status_code == 200, stale.text
+        assert stale.json()["data"]["total"] > 0
     stale_create = client.post(
         "/api/reimbursements/drafts",
         json={
@@ -842,7 +896,72 @@ def test_submission_history_only_returns_ten_latest_submissions_in_current_scope
         headers=headers,
     )
     assert stale_create.status_code == 409, stale_create.text
-    assert stale_create.json()["error"]["code"] == "REIMBURSEMENT_DEPARTMENT_CHANGED"
+    assert stale_create.json()["error"]["code"] == "REIMBURSEMENT_WORKSPACE_SELECTION_REQUIRED"
+
+    with client.app.state.database_session_factory() as database:
+        from app.models.session import UserSession
+
+        current = database.query(UserSession).one()
+        current.current_department_id = None
+        current.current_department_name = None
+        database.commit()
+    assert client.get(url).json()["data"] == records
+    cross_department = "/api/reimbursements/drafts/synthetic-history-scope-2"
+    assert client.get(cross_department).status_code == 200
+    historical = client.get(cross_department, params={"history": True})
+    assert historical.status_code == 200, historical.text
+    assert historical.json()["data"]["department"]["id"] == "200"
+    assert client.get(f"{cross_department}/files", params={"history": True}).status_code == 200
+    assert (
+        client.get(
+            "/api/oa/reimbursements/drafts/synthetic-history-scope-2/submission",
+            params={"history": True},
+        ).status_code
+        == 200
+    )
+    for denied in (
+        "synthetic-history-scope-0",
+        "synthetic-history-scope-1",
+        "synthetic-failure-00",
+    ):
+        assert (
+            client.get(f"/api/reimbursements/drafts/{denied}", params={"history": True}).status_code
+            == 404
+        )
+    revision = historical.json()["data"]["revision"]
+    assert (
+        client.post(
+            f"{cross_department}/excel-preview-ticket?history=true",
+            json={"expectedRevision": revision},
+        ).status_code
+        == 403
+    )
+    preview = client.post(
+        f"{cross_department}/excel-preview?history=true",
+        headers=headers,
+        json={"expectedRevision": revision},
+    )
+    assert preview.status_code == 200 and preview.content.startswith(b"PK"), preview.text[:160]
+    ticket = client.post(
+        f"{cross_department}/excel-preview-ticket?history=true",
+        headers=headers,
+        json={"expectedRevision": revision},
+    )
+    assert ticket.status_code == 200, ticket.text
+    native = ticket.json()["data"]
+    download = client.get(
+        native["downloadUrl"], headers={"X-Reimbursement-Download-Token": native["downloadToken"]}
+    )
+    assert download.status_code == 200 and download.content.startswith(b"PK"), download.text[:160]
+    assert (
+        client.put(
+            cross_department,
+            params={"history": True},
+            headers=headers,
+            json={"expectedRevision": historical.json()["data"]["revision"], "input": _input()},
+        ).status_code
+        == 409
+    )
 
 
 def test_submission_history_only_shows_success_and_preserves_other_tasks(
@@ -1758,7 +1877,7 @@ async def test_related_reverification_runs_without_an_open_database_transaction(
 
 
 @pytest.mark.asyncio
-async def test_related_approval_rejects_another_current_department(
+async def test_related_approval_accepts_another_department_without_changing_saved_attribute(
     client_factory,
     monkeypatch,
 ) -> None:
@@ -1784,8 +1903,7 @@ async def test_related_approval_rejects_another_current_department(
     )
 
     try:
-        with pytest.raises(ApiError) as caught:
-            await reimbursement_drafts.replace_related_approvals(
+        result = await reimbursement_drafts.replace_related_approvals(
                 database,
                 FakeTravelWorkflow(department_id="200"),
                 actor=actor,
@@ -1796,7 +1914,8 @@ async def test_related_approval_rejects_another_current_department(
     finally:
         database.close()
 
-    assert caught.value.code == "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH"
+    assert result["relatedApprovals"][0]["originatorDepartmentId"] == "200"
+    assert result["department"]["id"] == "100"
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,7 @@ import {
   recognizeReimbursementDraftFile,
   requestReimbursementDraftExcelPreviewTicket,
   replaceReimbursementRelatedApprovals,
+  replaceGeneralApprovals,
   updateReimbursementDraft,
   updateReimbursementDraftFile,
   uploadReimbursementDraftFile,
@@ -41,6 +42,7 @@ import type {
   ReimbursementDraftFileUpdate,
   ReimbursementDraftInput,
   ReimbursementDraftSummary,
+  ReimbursementKind,
   ReimbursementPendingUpload,
   ReimbursementRelatedApprovalSelection,
 } from '@/types/reimbursements'
@@ -105,6 +107,7 @@ function inputAfterRemovingFiles(input: ReimbursementDraftInput, ids: ReadonlySe
         itineraryFileIds: item.itineraryFileIds?.filter(retain),
         paymentProofFileIds: item.paymentProofFileIds?.filter(retain),
         hotelBillFileIds: item.hotelBillFileIds?.filter(retain),
+        waybillFileIds: item.waybillFileIds?.filter(retain),
         // The backend omits this optional field after the last receipt is removed.
         receiptAttachmentFileIds: receipts?.length ? receipts : undefined,
       }
@@ -116,7 +119,6 @@ function inputAfterRemovingFiles(input: ReimbursementDraftInput, ids: ReadonlySe
 interface FilePipeline {
   id: number
   draftId: string
-  departmentId: string
   epoch: number
   intentVersion: number
   inputSignature: string
@@ -155,6 +157,7 @@ export async function readConsistentDraft(
 }
 
 export const useReimbursementDraftStore = defineStore('reimbursementDraft', () => {
+  const reimbursementKind = ref<ReimbursementKind>('travel')
   const drafts = ref<ReimbursementDraftSummary[]>([])
   const draftListOffset = ref(0)
   const draftListLimit = ref(50)
@@ -225,7 +228,6 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     return filePipeline?.id === id && filePipeline.epoch === lifecycleEpoch
       && filePipeline.intentVersion === currentIntentVersion
       && currentDraft.value?.id === filePipeline.draftId
-      && currentDraft.value.department.id === filePipeline.departmentId
       && !currentDraft.value.workspaceRetired && !currentDraft.value.recoveryPending
       && ['DRAFT', 'REVIEW_READY'].includes(currentDraft.value.status)
   }
@@ -237,7 +239,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       throw new Error('请等待当前文件操作完成后再上传')
     }
     filePipeline = {
-      id: ++filePipelineSequence, draftId: target.id, departmentId: target.department.id,
+      id: ++filePipelineSequence, draftId: target.id,
       epoch: lifecycleEpoch, intentVersion: currentIntentVersion, inputSignature: JSON.stringify(target.input),
       controllers: new Set(), uploadedIds: new Set(), recognizedIds: new Set(), fileRevisions: new Map(),
       uploading: false, recognizing: false, needsRefresh: false,
@@ -564,6 +566,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     try {
       const result = await getOaReimbursementOptions({
         signal: context.controller.signal,
+        ...(reimbursementKind.value === 'general' ? { kind: reimbursementKind.value } : {}),
       })
       if (
         !accepts(context)
@@ -683,6 +686,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
       const result = await listReimbursementDrafts({
         offset,
         limit,
+        ...(reimbursementKind.value === 'general' ? { kind: reimbursementKind.value } : {}),
         ...(expectedDepartment ? { expectedDepartment } : {}),
         signal: context.controller.signal,
       })
@@ -731,6 +735,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     draftId: string,
     keepCurrent = false,
     shouldAdopt?: (draft: ReimbursementDraft) => boolean,
+    history = false,
   ): Promise<boolean> {
     if (filePipeline) cancelFilePipeline(filePipeline.id)
     const previousDraftId = currentDraft.value?.id
@@ -755,7 +760,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     loadingCurrentDraft.value = true
     loadError.value = ''
     try {
-      const result = await readConsistentDraft(draftId, { signal: context.controller.signal })
+      const result = await readConsistentDraft(draftId, { signal: context.controller.signal, ...(history ? { history } : {}) })
       if (requestVersion !== detailRequestVersion || !acceptsDraftRead(context, guard)
         || result.draft.id !== draftId) return false
       if (shouldAdopt && !shouldAdopt(result.draft)) return false
@@ -837,14 +842,11 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     try {
       const created = await createReimbursementDraft(input, {
         signal: context.controller.signal,
+        ...(reimbursementKind.value === 'general' ? { kind: reimbursementKind.value } : {}),
         ...(reuseExisting ? { reuseExisting: true } : {}),
         ...(replaceCurrent ? { replaceCurrent } : {}),
         ...(expectedDepartment ? { expectedDepartment } : {}),
       })
-      if (expectedDepartment && (created.department.id !== expectedDepartment.id
-        || created.department.name !== expectedDepartment.name)) {
-        throw new Error('当前报销部门已变化，请刷新页面后重试')
-      }
       createdDraftId = created.id
       if (reuseExisting && accepts(context) && intentVersion === currentIntentVersion) {
         const guard = draftReadGuard(created.id, intentVersion)
@@ -1277,6 +1279,15 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     )
   }
 
+  async function saveGeneralApprovals(instanceIds: string[]): Promise<ReimbursementDraft> {
+    return mutateCurrent(
+      (draftId, revision, signal) => replaceGeneralApprovals(draftId, revision, instanceIds, signal),
+      applyDraftMutation,
+      '关联审批保存失败，请重试',
+      { reloadAfterFailure: true },
+    )
+  }
+
   async function uploadFile(
     file: File,
     role: ReimbursementDraftFileRole = 'EXPENSE_SOURCE',
@@ -1430,7 +1441,26 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     }
   }
 
-  async function downloadExcelPreview(): Promise<void> {
+  async function refreshGeneralPreviewOptions(
+    target: ReimbursementDraft, error: unknown, nativeDownloadStarted = false,
+  ): Promise<void> {
+    if (target.kind !== 'general' || target.status === 'LOCKED') return
+    const code = apiErrorCode(error)
+    if (nativeDownloadStarted || [
+      'OA_GENERAL_TEMPLATE_NOT_CONFIGURED', 'OA_GENERAL_TEMPLATE_CHANGED', 'OA_GENERAL_TEMPLATE_INVALID',
+      'REIMBURSEMENT_DRAFT_TEMPLATE_CHANGED', 'REIMBURSEMENT_COMPANY_OPTION_INVALID',
+      'REIMBURSEMENT_BUDGET_OPTION_INVALID', 'REIMBURSEMENT_SUBJECT_OPTION_INVALID',
+      'REIMBURSEMENT_PREVIEW_CHANGED',
+    ].includes(code ?? '')) await loadReimbursementOptions()
+  }
+
+  function syncOptionsAfterPreview(target: ReimbursementDraft): void {
+    if (target.kind === 'general' && target.status !== 'LOCKED') {
+      void loadReimbursementOptions({ background: true })
+    }
+  }
+
+  async function downloadExcelPreview(history = false): Promise<void> {
     const target = requireCurrentDraft()
     const draftId = target.id
     const revision = target.revision
@@ -1449,9 +1479,11 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     try {
       const preview = await getReimbursementDraftExcelPreview(draftId, revision, {
         signal: context.controller.signal,
+        ...(history ? { history } : {}),
       })
       if (isCurrent()) {
         downloadBlob(preview.blob, preview.filename)
+        syncOptionsAfterPreview(target)
       }
     } catch (error) {
       if (observeReadOnlyFailure(error, context, refreshGuard)) throw error
@@ -1481,7 +1513,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && currentDraft.value?.id === draftId
         && !isCancellation(error)
       ) {
-        mutationError.value = apiErrorMessage(error, 'Excel 预览生成失败，请重试')
+        if (isCurrent()) await refreshGeneralPreviewOptions(target, error)
+        if (isCurrent()) mutationError.value = apiErrorMessage(error, 'Excel 预览生成失败，请重试')
       }
       throw error
     } finally {
@@ -1496,7 +1529,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     }
   }
 
-  async function openExcelPreviewInDingTalk(): Promise<void> {
+  async function openExcelPreviewInDingTalk(history = false): Promise<void> {
     const target = requireCurrentDraft()
     const draftId = target.id
     const revision = target.revision
@@ -1512,11 +1545,14 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
     const isCurrent = () => accepts(context) && intentVersion === currentIntentVersion
       && requestVersion === previewRequestVersion && currentDraft.value?.id === draftId
       && currentDraft.value.revision === revision
+    let nativeDownloadStarted = false
     try {
       const ticket = await requestReimbursementDraftExcelPreviewTicket(draftId, revision, {
         signal: context.controller.signal,
+        ...(history ? { history } : {}),
       })
       if (!isCurrent()) return
+      nativeDownloadStarted = true
       await downloadAndOpenDingTalkDocument({
         url: new URL(ticket.downloadUrl, window.location.origin).href,
         headers: { 'X-Reimbursement-Download-Token': ticket.downloadToken },
@@ -1524,6 +1560,7 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         signal: context.controller.signal,
         isCurrent,
       })
+      if (isCurrent()) syncOptionsAfterPreview(target)
     } catch (error) {
       if (observeReadOnlyFailure(error, context, refreshGuard)) throw error
       if (
@@ -1549,7 +1586,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
         && currentDraft.value?.id === draftId
         && !isCancellation(error)
       ) {
-        mutationError.value = apiErrorMessage(error, 'Excel 预览打开失败，请重试')
+        if (isCurrent()) await refreshGeneralPreviewOptions(target, error, nativeDownloadStarted)
+        if (isCurrent()) mutationError.value = apiErrorMessage(error, 'Excel 预览打开失败，请重试')
       }
       throw error
     } finally {
@@ -1625,6 +1663,8 @@ export const useReimbursementDraftStore = defineStore('reimbursementDraft', () =
   }
 
   return {
+    reimbursementKind,
+    saveGeneralApprovals,
     drafts,
     draftListOffset,
     draftListLimit,

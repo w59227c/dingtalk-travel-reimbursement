@@ -40,6 +40,7 @@ def _profile():
 
 def _catalog():
     return SimpleNamespace(
+        is_general=False,
         config_version=12,
         reimbursement=SimpleNamespace(
             process_code="PROC-REIMBURSEMENT",

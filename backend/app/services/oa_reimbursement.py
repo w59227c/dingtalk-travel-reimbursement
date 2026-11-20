@@ -32,6 +32,7 @@ from app.integrations.dingtalk.workflow import (
     DingTalkProcessInstanceCreateOutcomeUnknown,
     DingTalkProcessInstanceCreateRejected,
     DingTalkWorkflowClient,
+    FormComponent,
     FormOption,
     WorkflowFormValue,
     WorkflowProcessInstance,
@@ -47,9 +48,15 @@ from app.models.reimbursement import (
     ReimbursementUploadStatus,
 )
 from app.services.excel_generator import generate_expense_workbook
+from app.services.general_reimbursement import (
+    require_current_subject_categories,
+    schema_bindings,
+    verify_general_approvals,
+)
 from app.services.oa_reimbursement_payload import (
     ReimbursementSnapshot,
     SnapshotOaInitiator,
+    SnapshotTemplateField,
     build_create_command,
     create_command_sha256,
     draft_input_from_snapshot,
@@ -134,7 +141,7 @@ _T = TypeVar("_T")
 _RECONCILIATION_PAGE_SIZE = 20
 _MAX_RECONCILIATION_PAGES = 100
 _RECONCILIATION_CLOCK_SKEW = timedelta(minutes=5)
-_JSON_FORM_COMPONENT_TYPES = frozenset({"RelateField", "DDAttachment"})
+_JSON_FORM_COMPONENT_TYPES = frozenset({"RelateField", "DDAttachment", "DDMultiSelectField"})
 
 
 class WorkHeartbeat(Protocol):
@@ -392,6 +399,10 @@ class SubmissionMaterializer(Protocol):
         heartbeat: WorkHeartbeat,
     ) -> None: ...
 
+    async def validate_before_create(
+        self, job: SubmissionJob, *, heartbeat: WorkHeartbeat
+    ) -> None: ...
+
     def read_upload(self, job: SubmissionJob, upload: SubmissionUpload) -> bytes: ...
 
     def approval_initiator(self, job: SubmissionJob) -> SnapshotOaInitiator: ...
@@ -415,6 +426,7 @@ class SubmissionMaterializer(Protocol):
 
     def matches_instance(
         self,
+        job: SubmissionJob,
         command: CreateProcessInstanceCommand,
         instance: WorkflowProcessInstance,
     ) -> bool: ...
@@ -453,34 +465,19 @@ class SnapshotSubmissionMaterializer:
                 self._excel_template_path,
             ),
         )
-        schema = await _call_with_heartbeat(
-            heartbeat,
-            lambda: self._workflow.get_form_schema(snapshot.template.process_code),
-        )
-        stored_schema = form_schema_from_dict(json.loads(snapshot.template.schema_canonical_json))
-        fields = {field.logical_key: field.component_id for field in snapshot.template.fields}
-        if (
-            classify_schema_change(
-                stored_schema,
-                schema,
-                mapped_component_ids=set(fields.values()),
-            )
-            is SchemaChangeKind.INCOMPATIBLE
-        ):
-            raise ApiError(
-                "OA_TEMPLATE_CHANGED",
-                "审批模板已更新，请重新确认后提交",
-                409,
-            )
-        try:
-            validate_template_mapping(schema, fields)
-        except ApiError:
-            raise ApiError(
-                "OA_TEMPLATE_CHANGED",
-                "审批模板已更新，请重新确认后提交",
-                409,
-            ) from None
-        components = {component.component_id: component for component in schema.components}
+        fields = await self._validate_reimbursement_template(snapshot, heartbeat=heartbeat)
+        if snapshot.kind == "general":
+            for instance_id in snapshot.input.general_approval_ids:
+                await _call_with_heartbeat(
+                    heartbeat,
+                    lambda instance_id=instance_id: verify_general_approvals(
+                        self._workflow,
+                        user_id=snapshot.identity.user_id,
+                        instance_ids=[instance_id],
+                    ),
+                )
+            _validate_original_manifest(snapshot, job.uploads)
+            return
 
         profile_by_key = {item.profile_key: item for item in snapshot.template.travel_profiles}
         schema_by_process_code = {}
@@ -653,7 +650,7 @@ class SnapshotSubmissionMaterializer:
             )
             live_travel_type_options = [
                 item
-                for item in components[fields["travelType"]].options
+                for item in fields["travelType"].options
                 if item.value == snapshot.selections.travel_type.value
             ]
             if (
@@ -673,8 +670,8 @@ class SnapshotSubmissionMaterializer:
                 source_schema=schema_by_process_code[profile.process_code],
                 company_component_id=profile.company_component_id,
                 budget_code_component_id=profile.budget_code_component_id,
-                company_options=components[fields["company"]].options,
-                budget_options=components[fields["budgetCode"]].options,
+                company_options=fields["company"].options,
+                budget_options=fields["budgetCode"].options,
             )
             if (
                 reason
@@ -709,6 +706,8 @@ class SnapshotSubmissionMaterializer:
             compact_subsidies=workbook_input.compact_subsidies,
             attendance_description_format=workbook_input.attendance_description_format,
             detail_order=workbook_input.detail_order,
+            expense_labels=workbook_input.expense_labels,
+            subject_labels=workbook_input.subject_labels,
         )
         if result.filename != snapshot.excel.file_name:
             raise ApiError(
@@ -805,10 +804,20 @@ class SnapshotSubmissionMaterializer:
 
     def matches_instance(
         self,
+        job: SubmissionJob,
         command: CreateProcessInstanceCommand,
         instance: WorkflowProcessInstance,
     ) -> bool:
-        return strict_instance_matches_command(command, instance)
+        empty_relation = None
+        if not any(field.component_type == "RelateField" for field in command.form_values):
+            snapshot = self._snapshot(job)
+            if snapshot.kind == "general" and not snapshot.input.general_approval_ids:
+                empty_relation = next(
+                    field
+                    for field in snapshot.template.fields
+                    if field.logical_key == "relatedApprovals"
+                )
+        return strict_instance_matches_command(command, instance, empty_relation=empty_relation)
 
     def approval_url(self, process_instance_id: str) -> str | None:
         if self._approval_url_factory is None:
@@ -826,6 +835,61 @@ class SnapshotSubmissionMaterializer:
         snapshot = parse_snapshot(job.snapshot_json, expected_sha256=job.snapshot_sha256)
         _validate_job_identity(job, snapshot)
         return snapshot
+
+    async def validate_before_create(self, job: SubmissionJob, *, heartbeat: WorkHeartbeat) -> None:
+        snapshot = self._snapshot(job)
+        if snapshot.kind == "general":
+            await self._validate_reimbursement_template(snapshot, heartbeat=heartbeat)
+
+    async def _validate_reimbursement_template(
+        self, snapshot: ReimbursementSnapshot, *, heartbeat: WorkHeartbeat
+    ) -> dict[str, FormComponent]:
+        schema = await _call_with_heartbeat(
+            heartbeat,
+            lambda: self._workflow.get_form_schema(snapshot.template.process_code),
+        )
+        stored_schema = form_schema_from_dict(json.loads(snapshot.template.schema_canonical_json))
+        fields = {field.logical_key: field.component_id for field in snapshot.template.fields}
+        if (
+            classify_schema_change(
+                stored_schema,
+                schema,
+                mapped_component_ids=set(fields.values()),
+            )
+            is SchemaChangeKind.INCOMPATIBLE
+        ):
+            raise ApiError(
+                "OA_TEMPLATE_CHANGED",
+                "审批模板已更新，请重新确认后提交",
+                409,
+            )
+        try:
+            if snapshot.kind == "general":
+                if schema_bindings(schema) != fields:
+                    raise ApiError("OA_TEMPLATE_CHANGED", "普通费用审批模板已变化", 409)
+            else:
+                validate_template_mapping(schema, fields)
+        except ApiError:
+            raise ApiError(
+                "OA_TEMPLATE_CHANGED",
+                "审批模板已更新，请重新确认后提交",
+                409,
+            ) from None
+        components = {component.component_id: component for component in schema.components}
+        mapped = {key: components[component_id] for key, component_id in fields.items()}
+        if snapshot.kind == "general":
+            for key, values in (
+                ("company", {snapshot.selections.company.value}),
+                ("budgetCode", {snapshot.selections.budget_code.value}),
+                ("subjects", {item.subject_value for item in snapshot.input.items}),
+            ):
+                if not values.issubset({option.value for option in mapped[key].options}):
+                    raise ApiError("OA_TEMPLATE_CHANGED", "普通费用报销选项已失效，请重新选择", 409)
+            require_current_subject_categories(
+                mapped["subjects"].options,
+                ((item.subject_value, item.category) for item in snapshot.input.items),
+            )
+        return mapped
 
     async def _listed_instance_ids(
         self,
@@ -1879,12 +1943,17 @@ class OAReimbursementProcessor:
             )
             return
 
+        async def heartbeat() -> None:
+            nonlocal lease
+            lease = await self._renew(lease)
+
         try:
             job = await self._state_call(self._state.load_job, lease)
             attachments = tuple(upload.as_attachment() for upload in job.uploads)
             command = self._materializer.build_create_command(job, attachments)
             request_json = self._materializer.serialize_create_command(command)
             request_hash = self._materializer.create_command_hash(command)
+            await self._materializer.validate_before_create(job, heartbeat=heartbeat)
         except ApiError as exc:
             await self._handle_pre_create_failure(
                 lease,
@@ -2137,7 +2206,7 @@ class OAReimbursementProcessor:
                         candidate_id
                     ),
                 )
-                if self._materializer.matches_instance(command, instance):
+                if self._materializer.matches_instance(job, command, instance):
                     matches.append(instance)
                     if len(matches) > 1:
                         return tuple(matches)
@@ -2232,7 +2301,7 @@ class OAReimbursementProcessor:
         instance: WorkflowProcessInstance,
         command: CreateProcessInstanceCommand,
     ) -> None:
-        if not self._materializer.matches_instance(command, instance):
+        if not self._materializer.matches_instance(job, command, instance):
             await self._transition(
                 lease,
                 to_status=ReimbursementSubmissionStatus.MANUAL_REVIEW,
@@ -2549,6 +2618,8 @@ def _validate_committed_attachment(
 def strict_instance_matches_command(
     command: CreateProcessInstanceCommand,
     instance: WorkflowProcessInstance,
+    *,
+    empty_relation: SnapshotTemplateField | None = None,
 ) -> bool:
     """Fail closed unless every submitted form value is present and exact."""
 
@@ -2565,6 +2636,15 @@ def strict_instance_matches_command(
     by_name: dict[str, list[WorkflowFormValue]] = {}
     for value in instance.form_values:
         by_name.setdefault(value.name, []).append(value)
+    if empty_relation is not None:
+        relations = [
+            value
+            for value in instance.form_values
+            if value.component_id == empty_relation.component_id
+            or (value.component_id is None and value.name == empty_relation.name)
+        ]
+        if len(relations) > 1 or any(not _empty_relate_field_matches(value) for value in relations):
+            return False
     for expected in command.form_values:
         if expected.component_id is not None:
             actual = by_id.get(expected.component_id)
@@ -2580,6 +2660,20 @@ def strict_instance_matches_command(
         if expected.biz_alias is not None and actual.biz_alias != expected.biz_alias:
             return False
     return True
+
+
+def _empty_relate_field_matches(actual: WorkflowFormValue) -> bool:
+    """Accept an omitted or genuinely empty relation, including DingTalk's empty extValue."""
+    try:
+        value = _strict_json_value(actual.value) if actual.value and actual.value.strip() else None
+        ext = (
+            _strict_json_value(actual.ext_value)
+            if actual.ext_value and actual.ext_value.strip()
+            else None
+        )
+    except ValueError:
+        return False
+    return value in (None, []) and ext in (None, [], {"list": []})
 
 
 def _form_value_matches(

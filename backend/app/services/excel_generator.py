@@ -28,6 +28,7 @@ from app.excel.template_contract import (
     EXCEL_TEMPLATE,
     ExcelSheetLayout,
     apply_output_page_setup,
+    expense_category_list_formula,
     output_layout_for_line_count,
     template_invalid,
     validate_workbook_safety,
@@ -51,6 +52,7 @@ _INVALID_FILENAME_CHARACTERS = re.compile(r"[\\/:*?\"<>|\x00-\x1f\x7f]")
 _DANGEROUS_FORMULA_PREFIXES = ("=", "+", "-", "@")
 _MAX_ROW_HEIGHT = 409.5
 _MAX_CELL_TEXT_LENGTH = 32_767
+_MAX_EXPENSE_DESCRIPTION_WITH_LABEL = 503  # Up to 500 entered characters plus 快递｜.
 
 # A tuple gives the frozen indices of ordinary rows. None selects historical Excel order.
 ExcelDetailOrder = tuple[int, ...] | Literal["current"] | None
@@ -227,9 +229,9 @@ def _ordered_lines(
                     category=ExpenseCategory.SUBSIDY,
                     sort_date=subsidy_trip.end_date,
                     display_date=_compact_date(subsidy_trip.end_date),
-                    description=explanation[0] if explanation else _subsidy_description(
-                        subsidy_trip, subsidy_item
-                    ),
+                    description=explanation[0]
+                    if explanation
+                    else _subsidy_description(subsidy_trip, subsidy_item),
                     amount=subsidy_item.total,
                     receipt_count=0,
                     subsidy=True,
@@ -243,10 +245,16 @@ def _ordered_lines(
 
 def _description_height(text: str, width: float) -> float:
     wrapped_lines = sum(
-        max(1, math.ceil(sum(
-            2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
-            for char in paragraph
-        ) / max(1, width - 2)))
+        max(
+            1,
+            math.ceil(
+                sum(
+                    2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+                    for char in paragraph
+                )
+                / max(1, width - 2)
+            ),
+        )
         for paragraph in text.split("\n")
     )
     return max(30, wrapped_lines * 18 + 6)
@@ -272,8 +280,13 @@ def _expand_subsidy_descriptions(lines: list[OutputLine], width: float) -> list[
         output.append(replace(line, description=chunks[0]))
         output.extend(
             replace(
-                line, description=chunk, display_date="", amount=Decimal(0), receipt_count=0,
-                continuation=True, detail_lines=(),
+                line,
+                description=chunk,
+                display_date="",
+                amount=Decimal(0),
+                receipt_count=0,
+                continuation=True,
+                detail_lines=(),
             )
             for chunk in chunks[1:]
         )
@@ -375,6 +388,8 @@ def generate_expense_workbook(
     ),
     compact_subsidies: bool = True,
     detail_order: ExcelDetailOrder = "current",
+    expense_labels: tuple[str, ...] = (),
+    subject_labels: tuple[str, ...] = (),
 ) -> WorkbookResult:
     workbook, worksheet = load_validated_template(template_path)
     try:
@@ -406,12 +421,15 @@ def generate_expense_workbook(
             409.5, max(worksheet.row_dimensions[project_cell.row].height or 35, header_height)
         )
 
-        description_width = sum(
-            worksheet.column_dimensions[key].width for key in ("D", "E", "F")
-        )
+        description_width = sum(worksheet.column_dimensions[key].width for key in ("D", "E", "F"))
         lines = _expand_subsidy_descriptions(
             _ordered_lines(
-                items, trip, subsidy, trips, subsidies, detailed_subsidies,
+                items,
+                trip,
+                subsidy,
+                trips,
+                subsidies,
+                detailed_subsidies,
                 attendance_description_format,
                 compact_subsidies,
                 detail_order,
@@ -419,6 +437,14 @@ def generate_expense_workbook(
             description_width,
         )
         layout = _prepare_output_layout(worksheet, len(lines))
+        if subject_labels:
+            if len(expense_labels) != len(lines) or not set(expense_labels).issubset(
+                subject_labels
+            ):
+                raise ValueError("expense rows must use the selected reimbursement subjects")
+            worksheet.data_validations.dataValidation[0].formula1 = (
+                expense_category_list_formula(subject_labels)
+            )
         for offset, line in enumerate(lines):
             row = EXCEL_TEMPLATE.detail_start_row + offset
             if line.subsidy and detailed_subsidies and (line.continuation or line.detail_lines):
@@ -433,18 +459,23 @@ def generate_expense_workbook(
                 )
             if line.continuation:
                 for column in (
-                    EXCEL_TEMPLATE.category_column, EXCEL_TEMPLATE.date_column,
-                    EXCEL_TEMPLATE.amount_column, EXCEL_TEMPLATE.currency_column,
+                    EXCEL_TEMPLATE.category_column,
+                    EXCEL_TEMPLATE.date_column,
+                    EXCEL_TEMPLATE.amount_column,
+                    EXCEL_TEMPLATE.currency_column,
                     EXCEL_TEMPLATE.receipt_count_column,
                 ):
                     worksheet[f"{column}{row}"] = None
                 write_safe_text(
                     worksheet[f"{EXCEL_TEMPLATE.description_column}{row}"],
-                    line.description, max_length=_MAX_CELL_TEXT_LENGTH,
+                    line.description,
+                    max_length=_MAX_CELL_TEXT_LENGTH,
                 )
                 worksheet.row_dimensions[row].hidden = False
                 continue
-            category_name = CATEGORY_BY_ID[line.category].name
+            category_name = (
+                expense_labels[offset] if expense_labels else CATEGORY_BY_ID[line.category].name
+            )
             write_safe_text(
                 worksheet[f"{EXCEL_TEMPLATE.category_column}{row}"],
                 category_name,
@@ -458,7 +489,9 @@ def generate_expense_workbook(
             write_safe_text(
                 worksheet[f"{EXCEL_TEMPLATE.description_column}{row}"],
                 line.description,
-                max_length=_MAX_CELL_TEXT_LENGTH if line.detail_lines else 500,
+                max_length=_MAX_CELL_TEXT_LENGTH
+                if line.detail_lines
+                else _MAX_EXPENSE_DESCRIPTION_WITH_LABEL,
             )
             worksheet[f"{EXCEL_TEMPLATE.amount_column}{row}"] = quantize_money(line.amount)
             write_safe_text(
@@ -483,7 +516,7 @@ def generate_expense_workbook(
         total_amount_cell.number_format = TOTAL_AMOUNT_NUMBER_FORMAT
         worksheet[layout.total_receipt_count_cell] = totals.receipt_count
 
-        validate_workbook_safety(workbook, layout)
+        validate_workbook_safety(workbook, layout, expense_categories=subject_labels)
         output = BytesIO()
         workbook.save(output)
         validate_xlsx_archive(output.getvalue())

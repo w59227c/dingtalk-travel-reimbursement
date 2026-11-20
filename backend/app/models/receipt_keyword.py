@@ -12,3 +12,4 @@ class ReceiptKeywordMapping(Base):
     normalized_keyword: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     category_id: Mapped[str] = mapped_column(String(64), index=True)
     transport_type: Mapped[str | None] = mapped_column(String(32))
+    welfare_type: Mapped[str | None] = mapped_column(String(16), deferred=True)

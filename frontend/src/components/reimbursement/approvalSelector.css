@@ -1,0 +1,119 @@
+.approval-filter-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; color: var(--el-text-color-secondary); font-size: 13px; }
+.travel-query-help { margin: 8px 0 0; color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.6; }
+.plain-fieldset {
+  container: approval-filters / inline-size;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.travel-approval-section {
+  margin-top: 22px;
+  padding-top: 22px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.travel-approval-heading {
+  margin-bottom: 16px;
+}
+
+.travel-approval-heading--collapsed { margin-bottom: 0; }
+
+.travel-approval-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.travel-approval-heading h2 {
+  margin: 0;
+  color: var(--el-text-color-primary);
+  font-size: 16px;
+}
+
+.travel-approval-heading--mobile .travel-approval-heading-row { gap: 8px; }
+.travel-approval-heading-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+
+.travel-query-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.travel-query-grid > *,
+.travel-query-grid > :deep(.el-date-editor) {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+
+.travel-query-grid--mobile > :nth-child(3),
+.travel-query-grid--mobile > :nth-child(4) {
+  grid-column: 1 / -1;
+}
+
+:slotted(.travel-query-alert),
+.travel-result-loading {
+  margin-top: 14px;
+}
+
+.travel-approval-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.approval-pagination {
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.travel-approval-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 10px;
+}
+
+.travel-approval-row.is-selected {
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+}
+
+.travel-approval-main {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  color: var(--el-text-color-regular);
+  line-height: 1.45;
+}
+
+.travel-approval-main small {
+  color: var(--el-text-color-secondary);
+  overflow-wrap: anywhere;
+}
+
+
+.travel-approval-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--el-text-color-primary);
+}
+
+@container approval-filters (min-width: 640px) {
+  .travel-query-grid:not(.travel-query-grid--mobile) {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) minmax(0, 1.2fr) 112px;
+  }
+}
+
+@container approval-filters (max-width: 319px) {
+  .travel-query-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -15,10 +15,7 @@ from app.services.reimbursement_context import (
     get_reimbursement_session,
     require_reimbursement_csrf,
 )
-from app.services.sessions import (
-    CurrentSession,
-    require_selected_department,
-)
+from app.services.sessions import CurrentSession
 from app.services.subsidy_calculation import calculate_trip_subsidies, request_trips
 
 router = APIRouter(tags=["reimbursement"])
@@ -36,9 +33,8 @@ def totals(
     body: TotalsRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
-    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
+    _current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
 ) -> dict[str, object]:
-    require_selected_department(current)
     max_items = request.app.state.settings.expense_max_items
     if len(body.items) > max_items:
         raise ApiError(

@@ -79,12 +79,10 @@ export const useAuthStore = defineStore('auth', () => {
   function sameSessionScope(left: AuthSession | null, right: AuthSession): boolean {
     return left?.user.userId === right.user.userId
       && actualUserId(left) === actualUserId(right)
-      && left.selectedDepartment?.id === right.selectedDepartment?.id
-      && left.selectedDepartment?.name === right.selectedDepartment?.name
   }
 
-  function applySession(value: AuthSession): void {
-    if (!sameSessionScope(session.value, value)) {
+  function applySession(value: AuthSession, preserveWorkspace = false): void {
+    if (!preserveWorkspace && !sameSessionScope(session.value, value)) {
       useReimbursementDraftStore().reset()
       if (session.value !== null) {
         useExpenseStore().reset()
@@ -99,11 +97,16 @@ export const useAuthStore = defineStore('auth', () => {
     errorMessage.value = ''
   }
 
-  function applyReimbursementContext(value: AuthSession): void {
+  function applyReimbursementContext(value: AuthSession, correctedDraftId?: string): void {
     if (!session.value || actualUserId(value) !== actualUserId(session.value)) {
       throw new Error('登录人已变化，请重新进入报销')
     }
-    applySession(value)
+    if (correctedDraftId && (useReimbursementDraftStore().currentDraft?.id !== correctedDraftId
+      || session.value.user.userId !== value.user.userId
+      || session.value.csrfToken !== value.csrfToken)) {
+      throw new Error('当前报销已变化，请重新核对')
+    }
+    applySession(value, Boolean(correctedDraftId))
     reimbursementContextNotice.value = ''
   }
 
@@ -221,6 +224,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function selectDepartmentFromTravelApproval(
     selection: ReimbursementRelatedApprovalSelection,
     selectedDepartmentId?: string,
+    keepCurrentWorkspace = false,
   ): Promise<ReimbursementDepartmentResolution & { isCurrent: () => boolean }> {
     if (!session.value) throw new Error('登录状态已失效，请重新进入')
     const origin = session.value
@@ -229,7 +233,10 @@ export const useAuthStore = defineStore('auth', () => {
       && version === departmentRequestVersion && session.value === origin
     let resolution: ReimbursementDepartmentResolution
     try {
-      resolution = await selectDepartmentFromTravelApprovalRequest(selection, selectedDepartmentId)
+      resolution = await selectDepartmentFromTravelApprovalRequest(
+        selection, selectedDepartmentId, keepCurrentWorkspace,
+        keepCurrentWorkspace ? origin.selectedDepartment?.id : undefined,
+      )
     } catch (error) {
       if (!acceptsRequest()) throw new Error('登录或部门状态已变化，请在当前页面重新选择审批', { cause: error })
       // The server may already have changed the department before the response
@@ -253,13 +260,7 @@ export const useAuthStore = defineStore('auth', () => {
       rememberContext(session.value)
     }
     if (resolution.selectedDepartment) {
-      const scopeChanged = session.value.selectedDepartment?.id !== resolution.selectedDepartment.id
-      if (scopeChanged) {
-        useExpenseStore().reset()
-        useReimbursementDraftStore().reset()
-        useReimbursementSubmissionStore().reset()
-      }
-      session.value.selectedDepartment = resolution.selectedDepartment
+        session.value.selectedDepartment = resolution.selectedDepartment
       status.value = 'authenticated'
     }
     const acceptedGeneration = scopeGeneration

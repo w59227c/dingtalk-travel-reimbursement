@@ -22,6 +22,7 @@ class ExpenseCategory(StrEnum):
     LABOR_SERVICE = "labor_service"
     CONFERENCE = "conference"
     OTHER = "other"
+    EXPRESS = "express"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,3 +60,6 @@ EXPENSE_CATEGORIES: tuple[ExpenseCategoryMetadata, ...] = (
 )
 
 CATEGORY_BY_ID = {item.id: item for item in EXPENSE_CATEGORIES}
+CATEGORY_BY_ID[ExpenseCategory.EXPRESS] = ExpenseCategoryMetadata(
+    ExpenseCategory.EXPRESS, "快递费", 18
+)

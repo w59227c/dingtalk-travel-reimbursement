@@ -23,6 +23,7 @@ class ExcelPreviewTicket:
     session_id_hash: str
     expires_at: datetime
     reimbursement_context: str | None = None
+    history: bool = False
 
 
 def issue_excel_preview_ticket(
@@ -34,6 +35,7 @@ def issue_excel_preview_ticket(
     lifetime: timedelta = timedelta(seconds=60),
     now: datetime | None = None,
     reimbursement_context: str | None = None,
+    history: bool = False,
 ) -> str:
     issued_at = _as_utc(now or datetime.now(UTC))
     if not draft_id or len(draft_id) > 128:
@@ -58,6 +60,8 @@ def issue_excel_preview_ticket(
     }
     if reimbursement_context is not None:
         payload["c"] = reimbursement_context
+    if history:
+        payload["h"] = True
     encoded = _encode_payload(payload)
     return f"{encoded}.{token_hash(encoded, secret)}"
 
@@ -81,8 +85,13 @@ def verify_excel_preview_ticket(
         payload = json.loads(_decode_payload(encoded))
     except (UnicodeDecodeError, ValueError):
         raise InvalidExcelPreviewTicket("ticket payload is invalid") from None
-    if not isinstance(payload, dict) or set(payload).difference({"c"}) != {
-        "v", "d", "r", "s", "e", "n"
+    if not isinstance(payload, dict) or set(payload).difference({"c", "h"}) != {
+        "v",
+        "d",
+        "r",
+        "s",
+        "e",
+        "n",
     }:
         raise InvalidExcelPreviewTicket("ticket claims are invalid")
     version = payload["v"]
@@ -92,9 +101,10 @@ def verify_excel_preview_ticket(
     expires_at_seconds = payload["e"]
     nonce = payload["n"]
     reimbursement_context = payload.get("c")
-    if "c" in payload and not (
-        isinstance(reimbursement_context, str) and reimbursement_context
-    ):
+    history = payload.get("h", False)
+    if not isinstance(history, bool) or (history and reimbursement_context is not None):
+        raise InvalidExcelPreviewTicket("ticket history scope is invalid")
+    if "c" in payload and not (isinstance(reimbursement_context, str) and reimbursement_context):
         raise InvalidExcelPreviewTicket("ticket reimbursement context is invalid")
     if version != _TICKET_VERSION:
         raise InvalidExcelPreviewTicket("ticket version is invalid")
@@ -120,6 +130,7 @@ def verify_excel_preview_ticket(
         session_id_hash=session_id_hash,
         expires_at=expires_at,
         reimbursement_context=reimbursement_context,
+        history=history,
     )
 
 

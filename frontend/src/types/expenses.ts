@@ -51,6 +51,9 @@ export interface TripInput {
 export type RailType = 'high_speed' | 'emu' | 'regular' | 'unknown'
 
 export interface ExpenseItem {
+  subjectValue?: string
+  welfareType?: 'express' | 'other'
+  waybillFileIds?: string[]
   id: string
   /** Stable provenance for a line created from a persisted reimbursement draft file. */
   sourceFileId?: string

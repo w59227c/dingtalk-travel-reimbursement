@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { inputSignature } from '@/utils/reimbursementInput'
+import axios from 'axios'
 import { ArrowLeft, CircleCloseFilled, InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -13,11 +14,15 @@ import ExpenseSummaryCard from '@/components/reimbursement/ExpenseSummaryCard.vu
 import ReimbursementAttentionNotice from '@/components/reimbursement/ReimbursementAttentionNotice.vue'
 import TravelApprovalSelector from '@/components/reimbursement/TravelApprovalSelector.vue'
 import TripSubsidyCard from '@/components/reimbursement/TripSubsidyCard.vue'
+import GeneralApprovalPicker from '@/components/reimbursement/GeneralApprovalPicker.vue'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
-import { getMe, prepareReimbursementContext } from '@/api/auth'
+import { getMe, prepareReimbursementContext, selectDepartmentForGeneralReimbursement } from '@/api/auth'
 import {
+  correctReimbursementDepartment,
+  openReimbursementWorkspace,
   createReimbursementDraft,
   getOaReimbursementOptions,
+  getOaReimbursementSubmissionForDraft,
   getReimbursementDraft,
   listReimbursementSubmissionHistory,
   listWorkspaceReimbursements,
@@ -31,9 +36,12 @@ import { isForeignExpense, type TripType } from '@/types/expenses'
 import type { AuthSession, ReimbursementEmployee } from '@/types/auth'
 import type {
   ReimbursementDraft,
+  ReimbursementKind,
   ReimbursementDraftInput,
+  ReimbursementDraftSummary,
   ReimbursementRelatedApproval,
   ReimbursementRelatedApprovalSelection,
+  ReimbursementSubmission,
   ReimbursementSubmissionHistoryEntry,
   ReimbursementSubmissionStatus,
   OaTravelApproval,
@@ -65,12 +73,34 @@ const drafts = useReimbursementDraftStore()
 const submission = useReimbursementSubmissionStore()
 const expenseItemsCard = ref<InstanceType<typeof ExpenseItemsCard> | null>(null)
 const approvalSelector = ref<InstanceType<typeof TravelApprovalSelector> | null>(null)
+const departmentApprovalSelector = ref<InstanceType<typeof TravelApprovalSelector> | null>(null)
 const mobileFooterDock = ref<HTMLElement | null>(null)
 const mobileFooterHeight = ref(0)
 const mobileStep = ref(0)
-const mobileSteps = ['关联审批', '范围补助', '费用材料', '核对提交'] as const
+const isGeneral = computed(() => (historyOrigin.value ? drafts.currentDraft?.kind : drafts.reimbursementKind) === 'general')
+const mobileSteps = computed(() => isGeneral.value
+  ? ['基本信息', '费用材料', '核对提交']
+  : ['关联审批', '范围补助', '费用材料', '核对提交'])
+const materialStep = computed(() => mobileSteps.value.length - 2)
+const reviewStep = computed(() => mobileSteps.value.length - 1)
 const companyValue = ref('')
 const budgetCodeValue = ref('')
+const generalDepartment = ref('')
+const generalDepartmentConfirmed = ref(false)
+const changingDepartment = ref(false)
+const legacyDrafts = ref<ReimbursementDraftSummary[]>([])
+const choosingLegacyDraft = ref(false)
+const generalDepartmentUnconfirmed = ref(false)
+const newEntryOpen = ref(false)
+const generalApprovalIds = computed(() => drafts.currentDraft?.input.generalApprovalIds ?? [])
+const generalApprovalError = ref('')
+const generalApprovalOpen = ref(false)
+const switchingKind = ref(false)
+const usedSubjects = computed(() => {
+  const selected = new Set(expense.items.map(item => item.subjectValue))
+  return expense.generalSubjects.filter(option => selected.has(option.value))
+})
+const generalScopeOptions = computed(() => drafts.reimbursementKind === 'general' ? { kind: 'general' as const } : {})
 const selectedRelatedApprovals = ref<ReimbursementRelatedApprovalSelection[]>([])
 const initializingWorkspace = ref(false)
 const initializationError = ref('')
@@ -82,6 +112,8 @@ const deniedDelegationScope = ref('')
 let reimbursementSwitchRequest: AbortController | undefined
 const bindingApprovalDepartment = ref(false)
 const pendingDepartmentApproval = ref<ReimbursementRelatedApprovalSelection | null>(null)
+const retryDepartmentApproval = ref<ReimbursementRelatedApprovalSelection | null>(null)
+const recheckApprovalDepartment = ref(false)
 const selectedDepartmentChoiceId = ref('')
 const saving = ref(false)
 const refreshingMaterialStatus = ref(false)
@@ -121,6 +153,9 @@ let recoveryGeneration = 0
 const historyRecords = ref<ReimbursementSubmissionHistoryEntry[]>([])
 const historyError = ref('')
 const historyLoading = ref(false)
+const historyDetailError = ref('')
+const historyOpeningId = ref('')
+const historicalSubmission = ref<ReimbursementSubmission | null>(null)
 const hydratedLockedDraftId = ref('')
 const receiptLoadError = ref('')
 type AttentionKind = 'save' | 'workspace' | 'options' | 'submission'
@@ -164,8 +199,9 @@ async function revealAttention(kind?: AttentionKind, explicit = false): Promise<
   if (target) { target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }) }
 }
 let historyRequest: AbortController | undefined
+let historyDetailRequest: AbortController | undefined
 const historyOrigin = ref<{
-  draftId: string
+  draftId?: string
   mobileStep: number
   pendingApproval: ReimbursementRelatedApprovalSelection | null
 } | null>(null)
@@ -197,6 +233,16 @@ const selectableDepartments = computed(() => {
     return [{ id: department.id, name }]
   })
 })
+const travelDepartmentNeedsChoice = computed(() => !isGeneral.value && selectableDepartments.value.length > 1
+  && Boolean(drafts.currentDraft?.input.accountingSourceVerified)
+  && Boolean(drafts.currentDraft?.relatedApprovals.length)
+  && (new Set(drafts.currentDraft!.relatedApprovals.map(a => a.originatorDepartmentId)).size !== 1
+    || !drafts.currentDraft!.relatedApprovals.some(approval => selectableDepartments.value.some(
+      department => department.id === approval.originatorDepartmentId,
+    ))))
+const showDepartmentChange = computed(() => isGeneral.value
+  ? selectableDepartments.value.length > 1 || draftDepartmentInvalid.value
+  : travelDepartmentNeedsChoice.value)
 const pendingDepartmentApprovalTitle = computed(() => {
   const pending = pendingDepartmentApproval.value
   if (!pending) return ''
@@ -277,6 +323,7 @@ const delegationRevoked = computed(() => Boolean(deniedDelegationScope.value
 const templateNeedsAdmin = computed(() => [
   'OA_TEMPLATE_CONFIRMATION_REQUIRED', 'OA_TEMPLATE_SCHEMA_CHANGED', 'OA_TEMPLATE_NOT_CONFIGURED',
   'INVALID_SYSTEM_CONFIGURATION',
+  'OA_GENERAL_TEMPLATE_NOT_CONFIGURED', 'OA_GENERAL_TEMPLATE_CHANGED', 'OA_GENERAL_TEMPLATE_INVALID',
 ].includes(drafts.reimbursementOptionsErrorCode))
 const draftExpired = computed(() => Boolean(drafts.currentDraft
   && (drafts.currentDraft.status === 'EXPIRED' || drafts.currentDraft.id === expiredDraftId.value)))
@@ -287,16 +334,29 @@ const canReplaceOutdatedForm = computed(() => templateMismatch.value && Boolean(
   && ['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status))
   && !trackedSubmission.value && !submitFlowPending.value && !initializingWorkspace.value && !workspaceConfirmationRequired.value
   && !switchingReimbursement.value)
-const formReadOnly = computed(() => !drafts.currentDraft || submitFlowPending.value
+const draftDepartmentInvalid = computed(() => Boolean(drafts.currentDraft
+  && !historyOrigin.value && !draftExpired.value && !drafts.currentDraft.workspaceRetired
+  && !drafts.currentDraft.recoveryPending && ['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status)
+  && !selectableDepartments.value.some(d => d.id === drafts.currentDraft?.department.id
+    && d.name === drafts.currentDraft.department.name)))
+const formOperationBlocked = computed(() => !drafts.currentDraft || submitFlowPending.value
   || Boolean(initializationError.value)
   || delegationRevoked.value
   || switchingReimbursement.value
+  || (isGeneral.value && verifyingRelatedApprovals.value)
   || bindingApprovalDepartment.value
   || workspaceConfirmationRequired.value
   || draftUnavailable.value
   || drafts.currentDraft.workspaceRetired || drafts.currentDraft.recoveryPending || recoveringReimbursement.value
   || drafts.currentDraft.status === 'LOCKED' || draftExpired.value || trackedSubmission.value
   || templateMismatch.value || reimbursementOptionsUnavailable.value || saveRequiresReload.value)
+const formReadOnly = formOperationBlocked
+const canRecoverTravelDepartmentFromApproval = computed(() => !isGeneral.value
+  && draftDepartmentInvalid.value && !formOperationBlocked.value
+  && !drafts.currentDraft?.relatedApprovals.length)
+const changingDepartmentUnconfirmed = computed(() => generalDepartmentUnconfirmed.value)
+const departmentGateError = computed(() => departmentBindingError.value || initializationError.value
+  || (changingDepartment.value ? saveError.value : ''))
 const formReadOnlyReason = computed(() => {
   if (delegationRevoked.value) return '代报权限已失效，请返回本人报销'
   if (!drafts.currentDraft) return '正在准备报销表单'
@@ -321,6 +381,15 @@ const formReadOnlyReason = computed(() => {
   return ''
 })
 const currentFormInput = computed<ReimbursementDraftInput>(() => {
+  if (isGeneral.value) return {
+    ocrDispositionVersion: 1,
+    companyValue: companyValue.value,
+    budgetCodeValue: budgetCodeValue.value,
+    generalApprovalIds: generalApprovalIds.value,
+    trip: null,
+    items: expense.buildDraftExpenseItems(),
+    dismissedOcrFileIds: [...expense.dismissedOcrFileIds],
+  }
   const trips = expense.tripPayloads()
   return {
     ocrDispositionVersion: 1,
@@ -383,6 +452,11 @@ const accountingOptionsChanged = computed(() => !formReadOnly.value && !relatedD
   && Boolean(drafts.reimbursementOptions) && selectedRelatedApprovals.value.length > 0
   && ((companyValue.value && !companyOptions.value.some((option) => option.value === companyValue.value))
     || (budgetCodeValue.value && !budgetOptions.value.some((option) => option.value === budgetCodeValue.value))))
+const checkGeneralAccounting = computed(() => isGeneral.value && !formReadOnly.value && Boolean(drafts.reimbursementOptions))
+const generalCompanyError = computed(() => checkGeneralAccounting.value && companyValue.value
+  && !companyOptions.value.some((option) => option.value === companyValue.value) ? '原报销主体已停用，请重新选择' : '')
+const generalBudgetError = computed(() => checkGeneralAccounting.value && budgetCodeValue.value
+  && !budgetOptions.value.some((option) => option.value === budgetCodeValue.value) ? '原预算代码已停用，请重新选择' : '')
 const needsApprovalReconfirmation = computed(() => Boolean(!formReadOnly.value && !accountingOptionsChanged.value
   && drafts.currentDraft?.relatedApprovals.length && !drafts.currentDraft.input.accountingSourceVerified))
 const relatedApprovalVerificationPending = computed(() => Boolean(
@@ -419,17 +493,22 @@ const awaitingMaterialUpload = computed(() => drafts.pendingUploads.length > 0
 const reimbursementSubject = computed(() => JSON.stringify([
   auth.session?.operator?.userId, auth.session?.user.userId,
 ]))
-const reimbursementSwitchBlock = computed(() => {
+const localUploadFailureReason = computed(() => expenseItemsCard.value?.hasUnpersistedFailedUploads
+  ? '请先重试或移除尚未上传成功的文件' : '')
+const reimbursementOperationBlock = computed(() => {
+  if (generalDepartmentUnconfirmed.value || (changingDepartment.value && changingDepartmentUnconfirmed.value)) {
+    return '请先确认办理部门'
+  }
   if (switchingReimbursement.value || initializingWorkspace.value || bindingApprovalDepartment.value
     || pendingDepartmentApproval.value || verifyingRelatedApprovals.value || submitFlowPending.value
     || submission.submitting || recoveringReimbursement.value || replacingTemplate.value
     || confirmingDraftReload.value) return '请等待当前操作完成'
-  if (expenseItemsCard.value?.hasUnpersistedFailedUploads) return '请先重试或移除尚未上传成功的文件'
   if (drafts.processingFiles) return '请等待本批文件上传和识别完成'
   if (expenseItemsCard.value?.hasOpenMaterialEditor) return '请先完成材料编辑'
   if (drafts.busy || saving.value || refreshingMaterialStatus.value) return '请等待当前报销操作完成'
   return ''
 })
+const reimbursementSwitchBlock = computed(() => reimbursementOperationBlock.value || localUploadFailureReason.value)
 const reimbursementSwitchRecheck = computed(() => {
   if (workspaceConfirmationRequired.value) return '请先核对当前报销，确认新开结果后再切换'
   if (awaitingMaterialUpload.value || drafts.files.some(
@@ -439,6 +518,272 @@ const reimbursementSwitchRecheck = computed(() => {
   if (drafts.currentDraft && formReadOnly.value && hasUnsavedUserChanges.value) return formReadOnlyReason.value
   return ''
 })
+
+async function switchKind(kind: ReimbursementKind): Promise<void> {
+  if (kind === drafts.reimbursementKind || switchingKind.value || reimbursementSwitchBlock.value
+    || reimbursementSwitchRecheck.value || (kind === 'general' && auth.session?.operator)) return
+  const originalScope = sessionScope()
+  switchingKind.value = true
+  try {
+    if (drafts.currentDraft && !formReadOnly.value) {
+      await flushAutosave()
+      if (formDirty.value) throw new Error('请先保存当前报销')
+    }
+    if (disposed || sessionScope() !== originalScope) return
+    newEntryOpen.value = false
+    generalDepartment.value = ''
+    generalDepartmentConfirmed.value = false
+    changingDepartment.value = false
+    departmentBindingError.value = ''
+    drafts.reset()
+    expense.reset()
+    submission.reset()
+    companyValue.value = ''
+    budgetCodeValue.value = ''
+    generalApprovalError.value = ''
+    initializationError.value = ''
+    mobileStep.value = 0
+    drafts.reimbursementKind = kind
+  } catch (error) {
+    ElMessage.error(apiErrorMessage(error, '当前报销保存失败，请重试后切换'))
+  } finally {
+    switchingKind.value = false
+  }
+}
+
+async function openDepartmentPicker(): Promise<void> {
+  const draft = drafts.currentDraft
+  if (!auth.session || !draft || !showDepartmentChange.value
+    || reimbursementOperationBlock.value || reimbursementSwitchRecheck.value) return
+  generalDepartment.value = draft.department.id
+  selectedDepartmentChoiceId.value = ''
+  departmentBindingError.value = ''
+  changingDepartment.value = true
+  await nextTick()
+  document.querySelector<HTMLElement>('[data-testid="reimbursement-department-gate"]')?.focus()
+}
+
+function closeDepartmentPicker(): void {
+  if (bindingApprovalDepartment.value || changingDepartmentUnconfirmed.value) return
+  changingDepartment.value = false
+  selectedDepartmentChoiceId.value = ''
+  departmentBindingError.value = ''
+  scheduleAutosave()
+}
+
+const generalDepartmentSelectionDisabled = computed(() => !generalDepartment.value
+  || (changingDepartment.value && !generalDepartmentUnconfirmed.value
+    && generalDepartment.value === (drafts.currentDraft?.department.id ?? auth.session?.selectedDepartment?.id)
+    && !draftDepartmentInvalid.value))
+
+async function confirmGeneralDepartment(): Promise<void> {
+  const origin = auth.session
+  if (!origin || generalDepartmentSelectionDisabled.value || bindingApprovalDepartment.value) return
+  const departmentId = generalDepartment.value
+  if (changingDepartment.value && drafts.currentDraft) {
+    await correctCurrentDepartment(departmentId)
+    return
+  }
+  const leavingEditableDraft = changingDepartment.value && !formReadOnly.value
+  const originScope = sessionScope()
+  const isCurrent = () => !disposed && isGeneral.value && auth.session === origin && sessionScope() === originScope
+  let confirmed = false
+  bindingApprovalDepartment.value = true
+  departmentBindingError.value = ''
+  try {
+    if (leavingEditableDraft && !generalDepartmentUnconfirmed.value) {
+      await flushAutosave()
+      if (!isCurrent()) return
+      if (formDirty.value) throw new Error('请先保存当前报销')
+    }
+    let boundSession: AuthSession
+    try {
+      const selectedDepartment = await selectDepartmentForGeneralReimbursement(departmentId)
+      boundSession = { ...origin, selectedDepartment }
+    } catch (error) {
+      const latest = await getMe().catch(() => null)
+      if (!isCurrent()) return
+      if (latest?.user.userId !== origin.user.userId || latest?.csrfToken !== origin.csrfToken
+        || (latest.selectedDepartment?.id !== departmentId
+          && latest.selectedDepartment?.id !== origin.selectedDepartment?.id)) {
+        generalDepartmentUnconfirmed.value = true
+        throw new Error('暂时无法确认已切换到哪个部门，请在这里重新选择并确认', { cause: error })
+      }
+      generalDepartmentUnconfirmed.value = false
+      if (latest.selectedDepartment?.id !== departmentId) throw error
+      boundSession = latest
+    }
+    if (!isCurrent()) return
+    if (boundSession.selectedDepartment?.id !== departmentId) throw new Error('办理部门已变化，请重新选择')
+    auth.applyReimbursementContext(boundSession)
+    generalDepartmentUnconfirmed.value = false
+    changingDepartment.value = false
+    generalDepartmentConfirmed.value = true
+    mobileStep.value = 0
+    confirmed = true
+  } catch (error) {
+    if (isCurrent()) departmentBindingError.value = apiErrorMessage(error, '部门确认失败，请重试')
+  } finally {
+    bindingApprovalDepartment.value = false
+  }
+  if (confirmed) {
+    await nextTick()
+    if (disposed || !isGeneral.value || auth.session?.user.userId !== origin.user.userId
+      || auth.session?.selectedDepartment?.id !== departmentId) return
+    if (newEntryOpen.value) await finishNewEntry()
+    else await initializeWorkspace()
+  }
+}
+
+async function correctCurrentDepartment(
+  departmentId?: string, selection?: ReimbursementRelatedApprovalSelection,
+): Promise<void> {
+  const origin = auth.session
+  const draft = drafts.currentDraft
+  let scope = sessionScope()
+  if (!origin || !draft || bindingApprovalDepartment.value) return
+  const accepts = () => !disposed && scope === sessionScope() && drafts.currentDraft?.id === draft.id
+  bindingApprovalDepartment.value = true
+  departmentBindingError.value = ''
+  try {
+    await flushAutosave()
+    if (!accepts()) return
+    if (formDirty.value) throw new Error('请先保存当前报销')
+    const expectedRevision = drafts.currentDraft!.revision
+    const expectedInput = drafts.currentDraft!.input
+    const approvalKey = (approval: { processInstanceId: string; profileKey: string }) =>
+      [approval.processInstanceId, approval.profileKey]
+    const expectedApprovals = JSON.stringify((selection ? [selection] : drafts.currentDraft!.relatedApprovals).map(approvalKey))
+    let result
+    try {
+      result = await correctReimbursementDepartment(draft.id, expectedRevision, departmentId, selection)
+    } catch (error) {
+      if (apiErrorCode(error) === 'REIMBURSEMENT_DEPARTMENT_CHOICE_REQUIRED' && selection) {
+        pendingDepartmentApproval.value = selection
+        selectedDepartmentChoiceId.value = ''
+        return
+      }
+      if (apiErrorCode(error) && axios.isAxiosError(error) && error.response && error.response.status < 500) {
+        if (['REIMBURSEMENT_DRAFT_REVISION_CONFLICT', 'REIMBURSEMENT_DRAFT_REPLACED',
+          'REIMBURSEMENT_DRAFT_LOCKED', 'REIMBURSEMENT_RECOVERY_PENDING',
+          'REIMBURSEMENT_DRAFT_EXPIRED', 'REIMBURSEMENT_WORKSPACE_SELECTION_REQUIRED'].includes(apiErrorCode(error)!)) {
+          saveRequiresReload.value = true
+        }
+        throw error
+      }
+      // A successful write may lose its response. Read the same record and the
+      // actual Session before deciding; never create a replacement on retry.
+      const [latest, session] = await Promise.all([
+        getReimbursementDraft(draft.id), getMe(),
+      ]).catch(() => [null, null] as const)
+      if (!accepts()) return
+      const businessInput = (input: ReimbursementDraftInput) => inputSignature(!isGeneral.value
+        ? { ...input, companyValue: '', budgetCodeValue: '', project: null, accountingSourceVerified: false }
+        : input)
+      if (!latest || !session || session.user.userId !== origin.user.userId
+        || session.csrfToken !== origin.csrfToken || latest.id !== draft.id
+        || session.operator?.userId !== origin.operator?.userId
+        || latest.revision !== expectedRevision + 1
+        || latest.workspaceRetired || latest.recoveryPending || !['DRAFT', 'REVIEW_READY'].includes(latest.status)
+        || businessInput(latest.input) !== businessInput(expectedInput)
+        || latest.department.id !== (departmentId ?? latest.department.id)
+        || JSON.stringify(latest.relatedApprovals.map(approvalKey)) !== expectedApprovals) {
+        saveRequiresReload.value = true
+        throw error
+      }
+      result = { draft: latest, selectedDepartment: latest.department,
+        reimbursementContext: session.reimbursementContext }
+    }
+    if (!accepts()) return
+    // Suppress workspace reinitialization while adopting this same record.
+    bindingApprovalDepartment.value = true
+    auth.applyReimbursementContext({ ...origin, selectedDepartment: result.selectedDepartment,
+      ...(result.reimbursementContext ? { reimbursementContext: result.reimbursementContext } : {}) }, draft.id)
+    scope = sessionScope()
+    await nextTick()
+    if (disposed || scope !== sessionScope()) return
+    drafts.currentDraft = result.draft
+    hydrate(result.draft)
+    changingDepartment.value = false
+    generalDepartmentConfirmed.value = true
+    selectedDepartmentChoiceId.value = ''
+    pendingDepartmentApproval.value = null
+    initializedScope = scope
+  } catch (error) {
+    if (accepts()) departmentBindingError.value = apiErrorMessage(error, '部门更正失败，请核对当前报销后重试')
+  } finally {
+    if (!disposed && scope === sessionScope()) {
+      bindingApprovalDepartment.value = false
+      verifyingRelatedApprovals.value = false
+      scheduleAutosave()
+    }
+  }
+}
+
+async function openSavedWorkspace(
+  chosen: ReimbursementDraftSummary, candidates: ReimbursementDraftSummary[], confirm = false,
+): Promise<void> {
+  const origin = auth.session
+  const scope = sessionScope()
+  if (!origin || choosingLegacyDraft.value) return
+  choosingLegacyDraft.value = true
+  try {
+    if (confirm) await ElMessageBox.confirm(
+      `保留「${chosen.department?.name ?? '原部门'}」这笔报销。其余 ${candidates.length - 1} 笔旧报销将退出工作区，普通未提交材料会清理；已提交记录及在途任务继续保留。`,
+      '选择保留的当前报销', { confirmButtonText: '保留这笔', cancelButtonText: '返回核对', type: 'warning' },
+    )
+    if (disposed || scope !== sessionScope()) return
+    const result = await openReimbursementWorkspace(chosen.id,
+      candidates.map(d => ({ id: d.id, revision: d.revision })), generalScopeOptions.value)
+    if (disposed || scope !== sessionScope()) return
+    bindingApprovalDepartment.value = true
+    auth.applyReimbursementContext({ ...origin, ...result })
+    generalDepartmentConfirmed.value = true
+    legacyDrafts.value = []
+    await nextTick()
+    bindingApprovalDepartment.value = false
+    initializedScope = ''
+    // The previous read belongs to the old department scope; start a fresh one.
+    initializationScope = ''
+    initializationPromise = null
+    await initializeWorkspace(true)
+  } catch (error) {
+    if (!disposed && auth.session?.user.userId === origin.user.userId && error !== 'cancel' && error !== 'close') {
+      initializationError.value = apiErrorMessage(error, '无法打开保留的报销，请重新加载后核对')
+    }
+  } finally { choosingLegacyDraft.value = false }
+}
+
+async function saveGeneralApprovalSelection(ids: string[]): Promise<void> {
+  if (!isGeneral.value || formReadOnly.value || drafts.busy || verifyingRelatedApprovals.value) return
+  const scope = sessionScope()
+  const draftId = drafts.currentDraft?.id
+  verifyingRelatedApprovals.value = true
+  generalApprovalError.value = ''
+  try {
+    await flushAutosave()
+    if (!draftId || drafts.currentDraft?.id !== draftId || scope !== sessionScope() || formDirty.value) return
+    const saved = await drafts.saveGeneralApprovals(ids)
+    if (scope === sessionScope() && drafts.currentDraft?.id === draftId) hydrate(saved)
+  } catch (error) {
+    if (scope === sessionScope() && drafts.currentDraft?.id === draftId) {
+      const latest = drafts.currentDraft
+      if (latest && ['DRAFT', 'REVIEW_READY'].includes(latest.status)
+        && !latest.workspaceRetired && !latest.recoveryPending
+        && JSON.stringify(latest.input.generalApprovalIds ?? []) === JSON.stringify(ids)
+        && inputSignature(currentFormInput.value) === inputSignature(latest.input)) {
+        drafts.mutationError = ''
+        hydrate(latest)
+      } else {
+        generalApprovalError.value = apiErrorMessage(error, '关联审批保存失败，请重试')
+        if (drafts.revisionConflict) saveRequiresReload.value = true
+        void refreshOptionsAfterError(error)
+      }
+    }
+  } finally {
+    if (scope === sessionScope()) verifyingRelatedApprovals.value = false
+  }
+}
 const attachmentNames = computed(() => {
   const draft = drafts.currentDraft
   if (draft?.status === 'LOCKED') {
@@ -450,23 +795,28 @@ const attachmentNames = computed(() => {
 })
 const attachmentPendingHint = computed(() => awaitingMaterialUpload.value
   ? '材料上传完成后会显示附件清单。'
-  : expense.items.length ? '请先上传报销材料。' : '填写费用明细或核对出差补助后会显示附件清单。')
+  : expense.items.length ? '请先上传报销材料。' : isGeneral.value
+    ? '填写费用明细后会显示附件清单。' : '填写费用明细或核对出差补助后会显示附件清单。')
 const submissionButtonReason = computed(() => formReadOnlyReason.value
+  || localUploadFailureReason.value
+  || generalCompanyError.value || generalBudgetError.value
   || (accountingOptionsChanged.value ? '请重新关联出差审批' : '')
   || (needsApprovalReconfirmation.value ? '请先重新确认出差审批' : '')
   || subsidyInputError.value || expense.subsidyCalculationReason || submissionServiceReason.value
-  || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
+  || (relatedApprovalVerificationPending.value ? '正在核验关联审批，请稍候' : '')
   || (drafts.busy ? '请等待材料处理完成' : '')
   || (drafts.pendingUploads.length ? '有材料尚未完成上传，请查看上传进度' : '')
   || (materialSubmissionIssues.value.length
     ? `还有 ${materialSubmissionIssues.value.length} 份材料需处理后才能提交 OA` : '')
   || (missingMaterialItems.value.length ? `还有 ${missingMaterialItems.value.length} 笔费用需补材料` : ''))
-const mobileNextLabel = computed(() => mobileStep.value === mobileSteps.length - 1
+const mobileNextLabel = computed(() => mobileStep.value === mobileSteps.value.length - 1
   ? '提交 OA'
-  : `下一步：${mobileSteps[mobileStep.value + 1]}`)
+  : `下一步：${mobileSteps.value[mobileStep.value + 1]}`)
 const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({ item, missing: missingExpenseMaterials(item, drafts.files) }))
   .filter((entry) => entry.missing.length))
 const previewDisabledReason = computed(() => (initializationError.value ? '请先重新加载当前报销' : '')
+  || localUploadFailureReason.value
+  || (drafts.processingFiles ? '请等待本批文件上传和识别完成后再预览 Excel' : '')
   || (draftUnavailable.value ? '当前报销记录已不可用，请新开一笔重新填写' : '')
   || (drafts.currentDraft?.recoveryPending && draftExpired.value
   ? '保留的材料已过期，请新开报销并重新上传材料' : '')
@@ -474,7 +824,12 @@ const previewDisabledReason = computed(() => (initializationError.value ? '请�
   ? '请等待材料恢复完成后再预览 Excel' : '')
   || (workspaceConfirmationRequired.value ? '请先核对当前报销，确认新开结果后再预览 Excel' : '')
   || (drafts.currentDraft?.workspaceRetired && drafts.currentDraft.status !== 'LOCKED' ? '请先打开当前报销' : '')
+  || (isGeneral.value && templateMismatch.value && drafts.currentDraft?.status !== 'LOCKED'
+    ? 'OA 表单已更新，请按新表单重新填写' : '')
+  || generalCompanyError.value || generalBudgetError.value
   || expense.itemReadinessError
+  || (isGeneral.value && !formReadOnly.value
+    ? (!expense.items.length ? '请先添加费用明细' : !hasActiveMaterials.value ? '请先上传报销材料' : '') : '')
   || (saveRequiresReload.value ? '请先核对最新报销内容' : '')
   || (accountingOptionsChanged.value ? '请重新关联出差审批' : '')
   || subsidyInputError.value
@@ -482,8 +837,9 @@ const previewDisabledReason = computed(() => (initializationError.value ? '请�
   || (!formReadOnly.value && drafts.pendingUploads.length ? '请等待材料上传完成后再预览 Excel' : '')
   || (!formReadOnly.value && materialSubmissionIssues.value.length
     ? '请先处理全部待确认或未完成的材料（含待关联材料），再预览 Excel' : '')
+  || (isGeneral.value && !companyValue.value ? '请先选择报销主体' : '')
   || (!budgetCodeValue.value ? '请先选择预算代码' : '')
-  || (relatedApprovalVerificationPending.value ? '正在核验出差审批，请稍候' : '')
+  || (relatedApprovalVerificationPending.value ? '正在核验关联审批，请稍候' : '')
   || (props.mobile && !formReadOnly.value && saveError.value ? '保存失败，请重试保存后再打开 Excel' : '')
   || (props.mobile && !formReadOnly.value && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
   || (submitFlowPending.value ? '正在提交，请稍候' : ''))
@@ -501,22 +857,30 @@ const hasRestartableReimbursement = computed(() => Boolean(drafts.currentDraft
   && (trackedSubmission.value || drafts.currentDraft.status === 'LOCKED' || draftExpired.value
     || draftUnavailable.value || drafts.currentDraft.recoveryPending || expense.items.length
     || selectedRelatedApprovals.value.length || drafts.files.length || drafts.pendingUploads.length
+    || (isGeneral.value && (companyValue.value || budgetCodeValue.value
+      || generalApprovalIds.value.length))
     || expense.includeSubsidy)))
 const canStartNewReimbursement = computed(() => Boolean(drafts.currentDraft && !historyOrigin.value
   && hasRestartableReimbursement.value && !initializingWorkspace.value && !drafts.currentDraft.workspaceRetired
+
   && !switchingReimbursement.value && !bindingApprovalDepartment.value && !verifyingRelatedApprovals.value && !pendingDepartmentApproval.value
   && !workspaceConfirmationRequired.value && !recoveringReimbursement.value && !submitFlowPending.value && !submission.submitting))
-const submittedResult = computed(() => trackedSubmission.value && submission.succeeded
-  ? submission.submission : null)
+const submittedResult = computed(() => historyOrigin.value ? historicalSubmission.value
+  : trackedSubmission.value && submission.succeeded ? submission.submission : null)
 const submittedReimbursement = computed(() => drafts.currentDraft?.status === 'LOCKED'
   && hydratedLockedDraftId.value === drafts.currentDraft.id ? submittedResult.value : null)
 const receiptDetails = computed(() => drafts.currentDraft?.submittedDetails)
-const canOpenHistory = computed(() => Boolean(drafts.currentDraft && !historyOrigin.value
-  && !switchingReimbursement.value
+const hasReimbursementLogin = computed(() => auth.status === 'authenticated' || auth.status === 'department_required')
+const generalDepartmentRequired = computed(() => isGeneral.value && selectableDepartments.value.length > 1
+  && !generalDepartmentConfirmed.value)
+const needsReimbursementDepartment = computed(() => auth.status === 'department_required'
+  && !drafts.currentDraft || generalDepartmentRequired.value || changingDepartment.value || newEntryOpen.value)
+const canOpenHistory = computed(() => Boolean(hasReimbursementLogin.value && !historyOrigin.value
+  && !switchingReimbursement.value && !changingDepartment.value
   && !bindingApprovalDepartment.value && !verifyingRelatedApprovals.value && !pendingDepartmentApproval.value
-  && !workspaceConfirmationRequired.value && !submitFlowPending.value && !submission.submitting && !recoveringReimbursement.value))
-const showHeaderNewReimbursement = computed(() => auth.status === 'authenticated' && drafts.currentDraft
-  && !historyOrigin.value)
+  && !workspaceConfirmationRequired.value && !submitFlowPending.value && !submission.submitting && !recoveringReimbursement.value
+  && !localUploadFailureReason.value))
+const showHeaderNewReimbursement = computed(() => hasReimbursementLogin.value && !historyOrigin.value)
 async function showWorkspaceReimbursement(restored: ReimbursementDraft): Promise<void> {
   submission.abort()
   hydrate(restored)
@@ -573,7 +937,7 @@ async function recoverFailedReimbursement(): Promise<void> {
     recoveryErrorOwner.value = { sourceId, scope, generation }
     // The server may have durably begun a copy before a response was lost.
     try {
-      const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined })
+      const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value })
       const latest = workspace.items[0]
       if (acceptsRecovery() && drafts.currentDraft?.id === current.id
         && latest?.recoverySourceDraftId === sourceId) {
@@ -643,9 +1007,8 @@ function formatRecordTime(value: string): string {
 
 function sessionIdentity(): string {
   const user = auth.session?.user.userId
-  const department = auth.session?.selectedDepartment
-  return auth.status === 'authenticated' && user && department
-    ? JSON.stringify([user, auth.session?.operator?.userId, department.id, department.name]) : ''
+  return ['authenticated', 'department_required'].includes(auth.status) && user
+    ? JSON.stringify([user, auth.session?.operator?.userId, auth.session?.csrfToken, drafts.reimbursementKind]) : ''
 }
 function sessionScope(): string {
   const identity = sessionIdentity()
@@ -653,6 +1016,7 @@ function sessionScope(): string {
 }
 function relatedSignature(selections: ReimbursementRelatedApprovalSelection[]): string { return JSON.stringify(selections) }
 function acceptDerivedAccounting(): void {
+  if (isGeneral.value) return
   const input = drafts.currentDraft?.input
   if (!input) return
   companyValue.value = input.companyValue
@@ -794,7 +1158,9 @@ async function retrySave(): Promise<void> {
 async function prepareExcelPreview(): Promise<void> {
   const scope = sessionScope(), draftId = drafts.currentDraft?.id
   try {
+    if (localUploadFailureReason.value) throw new Error(localUploadFailureReason.value)
     await flushAutosave()
+    if (localUploadFailureReason.value) throw new Error(localUploadFailureReason.value)
     if (disposed || scope !== sessionScope() || draftId !== drafts.currentDraft?.id) {
       throw new DOMException('当前报销已变化，已取消原预览', 'AbortError')
     }
@@ -856,8 +1222,9 @@ async function loadSubmittedReceipt(): Promise<void> {
   hydrate(locked)
 }
 async function readReplacementResult(previousId: string, context: WorkspaceReadContext): Promise<ReplacementReadResult> {
-  const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined })
+  const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value })
   if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== previousId) return { kind: 'stale' }
+  if (workspace.items.length > 1) throw new Error('发现多笔旧报销，请重新加载并选择保留哪一笔')
   const latest = workspace.items[0], previous = drafts.currentDraft
   if (!latest) return { kind: 'empty' }
   if (latest.id === previousId && latest.revision === previous.revision && latest.status === previous.status
@@ -924,6 +1291,10 @@ async function confirmCurrentWorkspace(): Promise<void> {
   }
 }
 function emptyReimbursementInput(): ReimbursementDraftInput {
+  if (drafts.reimbursementKind === 'general') return {
+    ocrDispositionVersion: 1, companyValue: '', budgetCodeValue: '',
+    trip: null, items: [], dismissedOcrFileIds: [],
+  }
   return {
     ocrDispositionVersion: 1,
     companyValue: '',
@@ -947,6 +1318,7 @@ async function openEditableReimbursement(
   replaceCurrent = false,
   context = beginWorkspaceRead(),
 ): Promise<boolean> {
+  if (legacyDrafts.value.length > 1) throw new Error('请先选择保留哪一笔当前报销')
   const previous = replaceCurrent && drafts.currentDraft
     ? { id: drafts.currentDraft.id, revision: drafts.currentDraft.revision } : undefined
   let created: ReimbursementDraft
@@ -975,22 +1347,30 @@ async function openEditableReimbursement(
 }
 
 async function prepareReimbursementWorkspace(target: AuthSession, signal: AbortSignal) {
-  if (!target.selectedDepartment) return null
   const request = { signal, reimbursementContext: target.reimbursementContext ?? null }
-  const expectedDepartment = target.selectedDepartment
   const [workspace, options] = await Promise.allSettled([
-    listWorkspaceReimbursements({ ...request, expectedDepartment }),
-    getOaReimbursementOptions(request),
+    listWorkspaceReimbursements(request), getOaReimbursementOptions(request),
   ])
   if (workspace.status === 'rejected') throw workspace.reason
+  if (workspace.value.items.length > 1) return null
   const current = workspace.value.items[0]
+  if (!current && !target.selectedDepartment) return null
+  if (current && (current.department.id !== target.selectedDepartment?.id
+    || current.department.name !== target.selectedDepartment?.name)) {
+    const restored = await openReimbursementWorkspace(current.id, [current], request)
+    target.selectedDepartment = restored.selectedDepartment
+    if (restored.reimbursementContext) {
+      target.reimbursementContext = restored.reimbursementContext
+      request.reimbursementContext = restored.reimbursementContext
+    }
+  }
+  const expectedDepartment = target.selectedDepartment!
   if (!current && options.status === 'rejected') throw options.reason
   const recent = current ?? await createReimbursementDraft(emptyReimbursementInput(), {
     ...request, reuseExisting: true, expectedDepartment,
   })
   const read = await readConsistentDraft(recent.id, request)
-  if (read.draft.workspaceRetired || read.draft.department.id !== expectedDepartment.id
-    || read.draft.department.name !== expectedDepartment.name) {
+  if (read.draft.workspaceRetired) {
     throw new Error('目标报销已发生变化，请重新选择报销人')
   }
   return { read, options }
@@ -1100,7 +1480,7 @@ function openReimbursementEmployeePicker(): void {
 function chooseReimbursementEmployee(employee: ReimbursementEmployee): void {
   void switchReimbursementEmployee(employee.userId === auth.session?.operator?.userId ? null : employee.userId)
 }
-async function runWorkspaceInitialization(scope: string): Promise<void> {
+async function runWorkspaceInitialization(scope: string, reservedDraftId?: string): Promise<void> {
   const context = beginWorkspaceRead()
   if (context.scope !== scope) return
   initializingWorkspace.value = true
@@ -1108,14 +1488,39 @@ async function runWorkspaceInitialization(scope: string): Promise<void> {
   try {
     const [, , , workspace] = await Promise.all([
       expense.loadCategories(), drafts.loadReimbursementOptions(),
-      drafts.loadDrafts(0, 50, auth.session?.selectedDepartment ?? undefined),
-      listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined }),
+      auth.session?.selectedDepartment ? drafts.loadDrafts(0, 50, auth.session.selectedDepartment) : Promise.resolve(),
+      listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value }),
     ])
     if (!acceptsWorkspaceRead(context)) return
     if (drafts.listError) throw new Error(drafts.listError)
     // Only the current reimbursement is restored; replaced work is never
     // rediscovered merely because a background submission changed status.
+    legacyDrafts.value = workspace.items.length > 1 ? workspace.items : []
+    if (legacyDrafts.value.length) return
     const recent = workspace.items[0]
+    const currentDepartment = selectableDepartments.value.find(d => d.id === recent?.department.id)
+    if (recent && (!auth.session?.selectedDepartment || (currentDepartment
+      && (currentDepartment.id !== auth.session.selectedDepartment.id
+        || currentDepartment.name !== auth.session.selectedDepartment.name)))) {
+      await openSavedWorkspace(recent, [recent])
+      return
+    }
+    if (recent) generalDepartmentConfirmed.value = true
+    if (!recent && (auth.status === 'department_required' || generalDepartmentRequired.value)) {
+      // The gate can mount before workspace options finish loading. A newer
+      // options observation correctly invalidates that first query; perform the
+      // initial lookup after initialization rather than showing a false empty list.
+      if (!isGeneral.value && !drafts.reimbursementOptionsError
+        && !drafts.travelApprovals.length && !drafts.travelApprovalsError) {
+        await nextTick()
+        if (!acceptsWorkspaceRead(context)) return
+        await departmentApprovalSelector.value?.search()
+      }
+      return
+    }
+    if (reservedDraftId && recent?.id !== reservedDraftId) {
+      throw new Error('目标部门的报销已在其他页面更新，请确认后重新加载')
+    }
     if (recent) {
       const adopted = await drafts.loadDraft(recent.id, true, (incoming) => acceptsWorkspaceRead(context) && !incoming.workspaceRetired)
       if (!acceptsWorkspaceRead(context)) return
@@ -1138,12 +1543,13 @@ async function runWorkspaceInitialization(scope: string): Promise<void> {
     if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
-function initializeWorkspace(force = false): Promise<void> {
+function initializeWorkspace(force = false, reservedDraftId?: string): Promise<void> {
   const scope = sessionScope()
-  if (!scope || disposed || (!force && initializedScope === scope)) return Promise.resolve()
+  if (!scope || disposed || changingDepartment.value
+    || (!force && initializedScope === scope)) return Promise.resolve()
   if (initializationPromise && initializationScope === scope) return initializationPromise
   initializationScope = scope
-  const running = runWorkspaceInitialization(scope).finally(() => {
+  const running = runWorkspaceInitialization(scope, reservedDraftId).finally(() => {
     if (initializationPromise === running) initializationPromise = null
   })
   initializationPromise = running
@@ -1170,7 +1576,7 @@ async function openCurrentWorkspace(): Promise<void> {
 }
 function scheduleAutosave(): void {
   if (autosaveTimer) clearTimeout(autosaveTimer)
-  if (disposed || !sessionScope() || initializingWorkspace.value || formReadOnly.value
+  if (disposed || !sessionScope() || changingDepartment.value || initializingWorkspace.value || formReadOnly.value
     || drafts.busy || confirmingDraftReload.value || verifyingRelatedApprovals.value || bindingApprovalDepartment.value
     || pendingDepartmentApproval.value || !formDirty.value) return
   autosaveTimer = setTimeout(() => { void flushAutosave().catch(() => undefined) }, 600)
@@ -1225,6 +1631,10 @@ async function flushAutosave(options: { includeRelated?: boolean } = {}): Promis
   })
 }
 onBeforeRouteLeave(async (to) => {
+  if (localUploadFailureReason.value) {
+    ElMessage.warning(localUploadFailureReason.value)
+    return false
+  }
   if (switchingReimbursement.value || recoveringReimbursement.value || submitFlowPending.value || bindingApprovalDepartment.value || replacingTemplate.value
     || initializingWorkspace.value || verifyingRelatedApprovals.value || pendingDepartmentApproval.value) {
     ElMessage.warning('请等待当前操作完成，或先完成部门选择')
@@ -1272,34 +1682,40 @@ onBeforeRouteLeave(async (to) => {
 interface SubmissionValidationIssue { message: string; step: number; itemId?: string; fileId?: string }
 function validateSubmission(): SubmissionValidationIssue | null {
   const issue = (message: string, step: number, itemId?: string, fileId?: string) => ({ message, step, itemId, fileId })
-  if (!companyOptions.value.some((option) => option.value === companyValue.value)) return issue('请选择所属公司', 0)
+  if (localUploadFailureReason.value) return issue(localUploadFailureReason.value, materialStep.value)
+  if (generalCompanyError.value || generalBudgetError.value) return issue(generalCompanyError.value || generalBudgetError.value, 0)
+  if (!companyOptions.value.some((option) => option.value === companyValue.value)) {
+    return issue(isGeneral.value ? '请选择报销主体' : '请选择所属公司', 0)
+  }
   if (!budgetOptions.value.some((option) => option.value === budgetCodeValue.value)) return issue('请选择预算代码', 0)
   if (expense.includeSubsidy && expense.tripPayloads().length !== selectedRelatedApprovals.value.length) {
     return issue(expense.policyInputError || '请完整确认每个补助项的出发和返回时段', 1)
   }
   if (expense.subsidyCalculationReason) return issue(expense.subsidyCalculationReason, 1)
-  if (expense.items.length && (expense.categoryLoadError || !expense.categories.length)) return issue('请先加载费用类别', 2)
-  if (!expense.items.length && !hasValidSubsidy.value) return issue('请添加费用明细或申请有效的出差补助', 2)
-  if (expense.itemReadinessError) return issue(expense.itemReadinessError, 2)
+  if (!isGeneral.value && expense.items.length && (expense.categoryLoadError || !expense.categories.length)) return issue('请先加载费用类别', materialStep.value)
+  if (!expense.items.length && !hasValidSubsidy.value) {
+    return issue(isGeneral.value ? '请添加费用明细' : '请添加费用明细或申请有效的出差补助', materialStep.value)
+  }
+  if (expense.itemReadinessError) return issue(expense.itemReadinessError, materialStep.value)
   if (materialSubmissionIssues.value.length) {
     const material = materialSubmissionIssues.value[0]!
-    return issue(`请先处理“${material.file.name}”：${material.reason}`, 2, material.itemId, material.itemId ? undefined : material.file.id)
+    return issue(`请先处理“${material.file.name}”：${material.reason}`, materialStep.value, material.itemId, material.itemId ? undefined : material.file.id)
   }
-  if (!selectedRelatedApprovals.value.length) return issue('请至少关联一张已通过的出差审批', 0)
-  if (!hasActiveMaterials.value && !excelOnlySubmission.value) return issue('请上传报销材料', 2)
+  if (!isGeneral.value && !selectedRelatedApprovals.value.length) return issue('请至少关联一张已通过的出差审批', 0)
+  if (!hasActiveMaterials.value && !excelOnlySubmission.value) return issue('请上传报销材料', materialStep.value)
   for (const item of expense.items) {
     if (item.category === 'lodging' && !item.hotelBillFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'hotel_bill')),
-    )) return issue(`“${item.description || '住宿费用'}”缺少住宿明细，请补充后提交`, 2, item.id)
+    )) return issue(`“${item.description || '住宿费用'}”缺少住宿明细，请补充后提交`, materialStep.value, item.id)
     if (item.transportType !== 'taxi' && (item.requiresItinerary || item.transportType === 'ride_hailing') && !item.itineraryFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'itinerary')),
-    )) return issue(`“${item.description || '网约车费用'}”缺少对应行程单，请点击编辑补齐`, 2, item.id)
+    )) return issue(`“${item.description || '网约车费用'}”缺少对应行程单，请点击编辑补齐`, materialStep.value, item.id)
     if (isForeignExpense(item) && !item.cnyAmountConfirmed) {
-      return issue(`请确认“${item.description || '国外票据'}”的人民币报销金额`, 2, item.id)
+      return issue(`请确认“${item.description || '国外票据'}”的人民币报销金额`, materialStep.value, item.id)
     }
     if (requiresPaymentProof(item) && !item.paymentProofFileIds?.some((id) =>
       drafts.files.some((file) => file.id === id && isActiveProof(file, 'payment_proof')),
-    )) return issue(`“${item.description || '本行费用'}”超过 500 元，请补充付款凭证`, 2, item.id)
+    )) return issue(`“${item.description || '本行费用'}”超过 500 元，请补充付款凭证`, materialStep.value, item.id)
   }
   return null
 }
@@ -1311,12 +1727,14 @@ async function revealValidationIssue(issue: SubmissionValidationIssue): Promise<
   const panel = document.getElementById(`reimbursement-step-${issue.step}`)
   const target = panel?.querySelector<HTMLElement>('.mobile-step-heading') ?? panel
   target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
-  if (issue.itemId || issue.fileId) expenseItemsCard.value?.focusMaterial?.(issue.itemId, issue.fileId)
+  if (issue.itemId || issue.fileId || localUploadFailureReason.value) expenseItemsCard.value?.focusMaterial?.(issue.itemId, issue.fileId)
 }
 async function focusReviewApprovals(): Promise<void> {
+  if (isGeneral.value) generalApprovalOpen.value = true
   if (props.mobile) selectMobileStep(0)
   await nextTick()
-  document.getElementById('travel-approval-heading')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+  document.getElementById(isGeneral.value ? 'general-approval-heading' : 'travel-approval-heading')
+    ?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
 }
 async function confirmAndSubmit(): Promise<void> {
   if (submissionButtonReason.value) return
@@ -1325,6 +1743,12 @@ async function confirmAndSubmit(): Promise<void> {
   const scope = sessionScope(), draftId = drafts.currentDraft?.id
   const acceptsSubmit = () => !disposed && scope === sessionScope() && draftId === drafts.currentDraft?.id
   const confirmedInput = inputSignature(currentFormInput.value)
+  const confirmedDepartment = { ...drafts.currentDraft!.department }
+  const requireConfirmedDepartment = (draft: ReimbursementDraft): void => {
+    if (draft.department.id !== confirmedDepartment.id || draft.department.name !== confirmedDepartment.name) {
+      throw new Error('报销部门已更新，请核对后重新提交')
+    }
+  }
   const confirmedTotalAmount = expense.displayTotal
   const confirmedTotals = JSON.stringify([expense.displayExpenseTotal, expense.displaySubsidyTotal,
     expense.displayTotal, expense.displayReceiptCount])
@@ -1332,7 +1756,7 @@ async function confirmAndSubmit(): Promise<void> {
   submitFlowPending.value = true
   try {
     const subject = auth.session?.operator
-      ? `报销人：${auth.session.user.name}（${auth.session.selectedDepartment?.name ?? ''}）。` : ''
+      ? `报销人：${auth.session.user.name}（${confirmedDepartment.name}）。` : ''
     await ElMessageBox.confirm(
       subject + (excelOnlySubmission.value
         ? '核对无误后将生成报销单 Excel，并正式提交钉钉 OA。提交后内容将锁定。'
@@ -1343,8 +1767,11 @@ async function confirmAndSubmit(): Promise<void> {
     workspaceActionError.value = ''
     await flushAutosave()
     if (!acceptsSubmit()) return
+    requireConfirmedDepartment(drafts.currentDraft!)
+    if (localUploadFailureReason.value) throw new Error(localUploadFailureReason.value)
     const ready = await drafts.markReviewReady()
     if (!acceptsSubmit() || ready.id !== draftId) return
+    requireConfirmedDepartment(ready)
     if (confirmedInput !== inputSignature(currentFormInput.value)) {
       throw new Error('报销内容已更新，请核对后重新提交')
     }
@@ -1382,6 +1809,33 @@ async function confirmAndSubmit(): Promise<void> {
   }
 }
 async function newReimbursement(): Promise<void> {
+  if (needsReimbursementDepartment.value) {
+    if (!newEntryOpen.value) generalDepartment.value = ''
+    newEntryOpen.value = true
+    await nextTick()
+    const target = document.querySelector<HTMLElement>('[data-testid="reimbursement-department-gate"]')
+    target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+    target?.focus({ preventScroll: true })
+    return
+  }
+  await startNewInDepartment()
+}
+
+async function finishNewEntry(selection?: ReimbursementRelatedApprovalSelection): Promise<void> {
+  const scope = sessionScope()
+  if (!scope || !newEntryOpen.value) return
+  await initializeWorkspace()
+  if (disposed || scope !== sessionScope() || !newEntryOpen.value) return
+  if (canStartNewReimbursement.value) {
+    await startNewInDepartment(selection)
+    if (!disposed && scope === sessionScope()) newEntryOpen.value = false
+    return
+  }
+  newEntryOpen.value = false
+  if (selection && !formReadOnly.value) await verifyRelatedApprovals([selection])
+}
+
+async function startNewInDepartment(newSelection?: ReimbursementRelatedApprovalSelection): Promise<void> {
   if (!canStartNewReimbursement.value || initializingWorkspace.value || drafts.busy
     || reimbursementOptionsUnavailable.value || confirmingDraftReload.value) return
   const scope = sessionScope()
@@ -1404,7 +1858,7 @@ async function newReimbursement(): Promise<void> {
     if (disposed || scope !== sessionScope() || generation !== workspaceReadGeneration || draftId !== drafts.currentDraft?.id
       || !canStartNewReimbursement.value || drafts.busy || reimbursementOptionsUnavailable.value) return
   }
-  const selection = pendingNewApproval.value
+  const selection = newSelection ?? pendingNewApproval.value
   const context = beginWorkspaceRead()
   workspaceActionError.value = ''
   initializingWorkspace.value = true
@@ -1419,7 +1873,7 @@ async function newReimbursement(): Promise<void> {
     if (selection && !opened.relatedApprovals.length) {
       await verifyRelatedApprovals([selection])
     } else if (selection && !opened.relatedApprovals.some((approval) => approval.processInstanceId === selection.processInstanceId)) {
-      ElMessage.warning('已打开这笔部门草稿并保留原有关联，请在出差审批中核对后再调整。')
+      ElMessage.warning('已打开当前报销并保留原有关联，请在出差审批中核对后再调整。')
     }
   }
   catch (error) {
@@ -1461,7 +1915,8 @@ async function refreshFormOptions(): Promise<void> {
 
 function openTemplateSettings(): void {
   if (!auth.isAdmin) return
-  void router.push({ path: props.mobile ? '/m/settings' : '/admin/settings', hash: '#oa-template-catalog' })
+  void router.push({ path: props.mobile ? '/m/settings' : '/admin/settings',
+    hash: isGeneral.value ? '#general-oa-template' : '#oa-template-catalog' })
 }
 
 async function recoverAccountingOptions(): Promise<void> {
@@ -1473,31 +1928,34 @@ async function refreshOptionsAfterError(error: unknown): Promise<void> {
   if ([
     'OA_TEMPLATE_CONFIGURATION_CHANGED', 'OA_TEMPLATE_SCHEMA_CHANGED', 'OA_TEMPLATE_CONFIRMATION_REQUIRED',
     'OA_TEMPLATE_NOT_CONFIGURED',
+    'OA_GENERAL_TEMPLATE_NOT_CONFIGURED', 'OA_GENERAL_TEMPLATE_CHANGED', 'OA_GENERAL_TEMPLATE_INVALID',
     'REIMBURSEMENT_DRAFT_TEMPLATE_CHANGED', 'REIMBURSEMENT_COMPANY_OPTION_INVALID',
-    'REIMBURSEMENT_BUDGET_OPTION_INVALID',
+    'REIMBURSEMENT_BUDGET_OPTION_INVALID', 'REIMBURSEMENT_SUBJECT_OPTION_INVALID',
+    'REIMBURSEMENT_SUBJECT_CATEGORY_CHANGED',
   ].includes(apiErrorCode(error) ?? '')) await refreshFormOptions()
 }
 
-async function openSavedReimbursement(draftId: string, action?: 'history'): Promise<void> {
-  const scope = sessionScope()
+async function openSavedReimbursement(draftId: string, history?: AbortSignal): Promise<void> {
+  const scope = history ? historyScope() : sessionScope()
+  const acceptsRead = () => !disposed && !history?.aborted && scope === (history ? historyScope() : sessionScope())
   const previousId = drafts.currentDraft?.id
   if (!scope || initializingWorkspace.value || drafts.busy || saving.value
     || submitFlowPending.value || confirmingDraftReload.value || submission.submitting) return
-  if (action === 'history' && (!previousId || !canOpenHistory.value || bindingApprovalDepartment.value
+  if (history && (!canOpenHistory.value || bindingApprovalDepartment.value
     || verifyingRelatedApprovals.value || pendingDepartmentApproval.value)) return
-  if (!action && draftId !== previousId) return
-  if (action && !trackedSubmission.value && formDirty.value && !formReadOnly.value) {
+  if (!history && draftId !== previousId) return
+  if (history && !trackedSubmission.value && formDirty.value && !formReadOnly.value) {
     try {
       await flushAutosave()
       if (formDirty.value) throw new Error('报销内容尚未保存，请核对后再查看记录')
     } catch (error) {
-      if (scope === sessionScope() && previousId === drafts.currentDraft?.id) {
+      if (acceptsRead() && previousId === drafts.currentDraft?.id) {
         workspaceActionError.value = error instanceof Error ? error.message : '保存失败，请重试'
       }
       return
     }
   }
-  if (disposed || scope !== sessionScope() || previousId !== drafts.currentDraft?.id) return
+  if (!acceptsRead() || previousId !== drafts.currentDraft?.id) return
   if (previousId && hasUnsavedUserChanges.value) {
     confirmingDraftReload.value = true
     if (autosaveTimer) clearTimeout(autosaveTimer)
@@ -1508,37 +1966,50 @@ async function openSavedReimbursement(draftId: string, action?: 'history'): Prom
         { confirmButtonText: '读取已保存内容', cancelButtonText: '保留本页', type: 'warning' },
       )
     } catch { return }
-    finally { if (scope === sessionScope()) { confirmingDraftReload.value = false; scheduleAutosave() } }
+    finally { if (scope === (history ? historyScope() : sessionScope())) { confirmingDraftReload.value = false; scheduleAutosave() } }
   }
-  if (disposed || scope !== sessionScope() || previousId !== drafts.currentDraft?.id
-    || drafts.busy || saving.value || (action === 'history' && !canOpenHistory.value)) return
+  if (!acceptsRead() || previousId !== drafts.currentDraft?.id
+    || drafts.busy || saving.value || (history && !canOpenHistory.value)) return
   if (autosaveTimer) clearTimeout(autosaveTimer)
   initializingWorkspace.value = true
   workspaceActionError.value = ''
   try {
-    await drafts.loadDraft(draftId, true)
-    if (disposed || scope !== sessionScope()) return
+    const receipt = history ? await getOaReimbursementSubmissionForDraft(draftId, { history: true, signal: history }) : null
+    if (!acceptsRead()) return
+    if (history && (receipt?.status !== 'SUBMITTED' || receipt.draftId !== draftId)) {
+      throw new Error('这笔报销的成功回执暂不可用，请重新加载')
+    }
+    await drafts.loadDraft(draftId, true,
+      history ? incoming => acceptsRead() && incoming.status === 'LOCKED' : undefined, Boolean(history))
+    if (!acceptsRead()) return
     const opened = drafts.currentDraft
     if (!opened || opened.id !== draftId || drafts.loadError) {
-      workspaceActionError.value = drafts.loadError || '这笔报销已不可用，请重新加载报销列表'
+      const message = drafts.loadError || '这笔报销已不可用，请重新加载报销列表'
+      if (history) historyDetailError.value = message
+      else workspaceActionError.value = message
       return
     }
-    if (action === 'history' && previousId) {
+    if (history) {
       historyOrigin.value = { draftId: previousId, mobileStep: mobileStep.value, pendingApproval: pendingNewApproval.value }
+      pendingNewApproval.value = null
     }
-    if (action) pendingNewApproval.value = null
     drafts.mutationError = ''
     hydrate(opened)
-    try {
-      await submission.restore(opened.id, opened.status === 'LOCKED'
-        ? { discoverByDraft: true, expectedRevision: opened.revision } : undefined)
-    } catch { /* The submission panel shows the recovery action. */ }
-    if (disposed || scope !== sessionScope() || drafts.currentDraft?.id !== draftId) return
+    if (history) historicalSubmission.value = receipt
+    else {
+      try {
+        await submission.restore(opened.id, opened.status === 'LOCKED'
+          ? { discoverByDraft: true, expectedRevision: opened.revision } : undefined)
+      } catch { /* The submission panel shows the recovery action. */ }
+    }
+    if (!acceptsRead() || drafts.currentDraft?.id !== draftId) return
     if (previousId !== draftId) {
       await returnToApprovalStep()
     }
+  } catch (error) {
+    if (acceptsRead() && history) historyDetailError.value = apiErrorMessage(error, '报销明细加载失败，请重试')
   } finally {
-    if (scope === sessionScope()) { initializingWorkspace.value = false; scheduleAutosave() }
+    if (scope === (history ? historyScope() : sessionScope())) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
 async function reconcileMaterialRevision(): Promise<void> {
@@ -1576,22 +2047,30 @@ function openHistory(): void {
   historyVisible.value = true
   void loadHistory()
 }
+function historyScope(): string {
+  const session = auth.session
+  return hasReimbursementLogin.value && session ? JSON.stringify([
+    sessionGeneration.value, session.operator?.userId ?? session.user.userId, session.csrfToken,
+  ]) : ''
+}
 async function loadHistory(): Promise<void> {
   if (!historyVisible.value || historyLoading.value) return
-  const scope = sessionScope()
+  const scope = historyScope()
+  if (!scope) return
   const request = new AbortController()
   historyRequest = request
   historyRecords.value = []
   historyLoading.value = true
   historyError.value = ''
+  historyDetailError.value = ''
   try {
     const records = await listReimbursementSubmissionHistory({
-      signal: request.signal, expectedDepartment: auth.session?.selectedDepartment ?? undefined,
+      signal: request.signal,
     })
-    if (request.signal.aborted || scope !== sessionScope()) return
+    if (request.signal.aborted || scope !== historyScope()) return
     historyRecords.value = records
   } catch (error) {
-    if (!request.signal.aborted && scope === sessionScope()) {
+    if (!request.signal.aborted && scope === historyScope()) {
       historyError.value = apiErrorMessage(error, '报销记录加载失败，请重试')
     }
   } finally {
@@ -1601,25 +2080,65 @@ async function loadHistory(): Promise<void> {
     }
   }
 }
-function chooseHistoryRecord(draftId: string): void {
-  historyVisible.value = false
-  void openSavedReimbursement(draftId, 'history')
+async function chooseHistoryRecord(draftId: string): Promise<void> {
+  if (historyOpeningId.value) return
+  const request = new AbortController()
+  historyDetailRequest = request
+  historyOpeningId.value = draftId
+  historyDetailError.value = ''
+  try { await openSavedReimbursement(draftId, request.signal) }
+  finally {
+    if (historyDetailRequest === request) {
+      historyDetailRequest = undefined
+      historyOpeningId.value = ''
+      if (historyOrigin.value) historyVisible.value = false
+    }
+  }
 }
 async function returnFromHistory(): Promise<void> {
   const origin = historyOrigin.value
   const historicalId = drafts.currentDraft?.id
   if (!origin || !historicalId || initializingWorkspace.value || drafts.busy || saving.value
     || submitFlowPending.value || submission.submitting || confirmingDraftReload.value) return
+  if (!sessionScope()) {
+    historyOrigin.value = null
+    historicalSubmission.value = null
+    drafts.reset()
+    expense.reset()
+    return
+  }
   const context = beginWorkspaceRead()
   initializingWorkspace.value = true
   workspaceActionError.value = ''
   try {
-    const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined })
+    const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value })
     if (!acceptsWorkspaceRead(context) || historyOrigin.value !== origin || drafts.currentDraft?.id !== historicalId) return
+    if (workspace.items.length > 1) {
+      legacyDrafts.value = workspace.items
+      historyOrigin.value = null
+      historicalSubmission.value = null
+      drafts.reset()
+      expense.reset()
+      return
+    }
     const latest = workspace.items[0]
     if (!latest) {
+      // History's type only controls its display. First-entry department
+      // selection belongs to the original workspace and must follow this read.
+      const needsFirstGeneralDepartment = drafts.reimbursementKind === 'general'
+        && selectableDepartments.value.length > 1 && !generalDepartmentConfirmed.value
+      if (!auth.session?.selectedDepartment || needsFirstGeneralDepartment) {
+        historyOrigin.value = null
+        historicalSubmission.value = null
+        drafts.reset()
+        expense.reset()
+        pendingNewApproval.value = null
+        mobileStep.value = 0
+        return
+      }
       if (!await openEditableReimbursement(false, context) || !acceptsWorkspaceRead(context)) return
       historyOrigin.value = null
+      historicalSubmission.value = null
       pendingNewApproval.value = null
       await returnToApprovalStep()
       return
@@ -1629,7 +2148,9 @@ async function returnFromHistory(): Promise<void> {
     if (!adopted || drafts.currentDraft?.id !== latest.id || drafts.loadError) {
       throw new Error(drafts.loadError || '当前报销已变化，请重新返回')
     }
+    if (drafts.reimbursementKind === 'general') generalDepartmentConfirmed.value = true
     historyOrigin.value = null
+    historicalSubmission.value = null
     await showWorkspaceReimbursement(drafts.currentDraft)
     if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== latest.id) return
     pendingNewApproval.value = latest.id === origin.draftId ? origin.pendingApproval : null
@@ -1714,27 +2235,34 @@ async function resolveDepartmentForApproval(
   selectedDepartmentId?: string,
 ): Promise<void> {
   if (bindingApprovalDepartment.value) return
+  if (drafts.currentDraft && !newEntryOpen.value && (!formReadOnly.value || draftDepartmentInvalid.value)) {
+    await correctCurrentDepartment(selectedDepartmentId, selection)
+    return
+  }
   const generation = ++departmentBindingGeneration
   let scope = sessionScope()
   const acceptsBinding = () => !disposed && generation === departmentBindingGeneration && scope === sessionScope()
   const requestedSelections = [selection]
+  const explicitSwitch = changingDepartment.value && !isGeneral.value
+  const saveSource = explicitSwitch ? !formReadOnly.value && formDirty.value : inputDirty.value
   if (autosaveTimer) clearTimeout(autosaveTimer)
   relatedApprovalVerificationError.value = ''
   verifyingRelatedApprovals.value = true
-  selectedRelatedApprovals.value = requestedSelections
+  if (!explicitSwitch) selectedRelatedApprovals.value = requestedSelections
   bindingApprovalDepartment.value = true
   departmentBindingError.value = ''
+  retryDepartmentApproval.value = null
   try {
-    if (auth.status === 'authenticated' && drafts.currentDraft && inputDirty.value) {
-      // Preserve edits in the previous department, but never attach the newly
-      // selected approval to that department while its destination is unresolved.
-      await flushAutosave({ includeRelated: false })
+    const preserveInput = auth.status === 'authenticated' && drafts.currentDraft && saveSource
+    if (preserveInput) {
+      await flushAutosave({ includeRelated: explicitSwitch })
       if (!acceptsBinding()) return
     }
     const previousScope = sessionScope()
     const resolution = await auth.selectDepartmentFromTravelApproval(
       selection,
       selectedDepartmentId,
+      Boolean(drafts.currentDraft && !newEntryOpen.value),
     )
     if (disposed || generation !== departmentBindingGeneration || !resolution.isCurrent()) return
     // Selecting the approval can legitimately change the department. Adopt only
@@ -1747,15 +2275,28 @@ async function resolveDepartmentForApproval(
       selectedDepartmentChoiceId.value = ''
       return
     }
+    recheckApprovalDepartment.value = false
     pendingDepartmentApproval.value = null
     selectedDepartmentChoiceId.value = ''
+    if (explicitSwitch) {
+      changingDepartment.value = false
+        mobileStep.value = 0
+      if (scope === previousScope) return
+    }
     if (!drafts.currentDraft || sessionScope() !== previousScope) {
       initializedScope = ''
-      await initializeWorkspace(true)
+      await initializeWorkspace(true, resolution.reservedDraftId)
       if (!acceptsBinding()) return
     }
     const opened = drafts.currentDraft
     if (!opened) throw new Error(initializationError.value || '报销表单加载失败，请重试')
+    if (newEntryOpen.value) {
+      acceptAuthoritativeRelatedApprovals()
+      bindingApprovalDepartment.value = false
+      verifyingRelatedApprovals.value = false
+      await finishNewEntry(selection)
+      return
+    }
     const alreadyLinked = opened.relatedApprovals.some(
       (item) => item.processInstanceId === selection.processInstanceId,
     )
@@ -1772,19 +2313,25 @@ async function resolveDepartmentForApproval(
     }
     if (opened.relatedApprovals.length) {
       acceptAuthoritativeRelatedApprovals()
-      ElMessage.warning('已打开这笔部门草稿并保留原有关联，请在出差审批中核对后再调整。')
+      ElMessage.warning('已打开当前报销并保留原有关联，请在出差审批中核对后再调整。')
       return
     }
     await verifyRelatedApprovals(requestedSelections)
   } catch (error) {
     if (!acceptsBinding()) return
-    acceptAuthoritativeRelatedApprovals()
+    if (!explicitSwitch) acceptAuthoritativeRelatedApprovals()
     verifyingRelatedApprovals.value = false
     const message = error instanceof Error
       ? error.message
       : '无法读取出差审批的所在部门，请重试'
-    if (auth.status === 'authenticated' && !drafts.currentDraft) initializationError.value = message
-    else if (!saveError.value && !saveRequiresReload.value) departmentBindingError.value = message
+    if (auth.status === 'authenticated' && !drafts.currentDraft) {
+      initializationError.value = message
+      if (newEntryOpen.value) retryDepartmentApproval.value = selection
+    }
+    else if (!saveError.value && !saveRequiresReload.value) {
+      if (drafts.currentDraft) recheckApprovalDepartment.value = true
+      departmentBindingError.value = message
+    }
   } finally {
     if (acceptsBinding()) {
       bindingApprovalDepartment.value = false
@@ -1796,18 +2343,23 @@ async function resolveDepartmentForApproval(
 function updateRelatedApprovals(
   selections: ReimbursementRelatedApprovalSelection[],
 ): void {
+  if (canRecoverTravelDepartmentFromApproval.value) {
+    const selection = selections.at(-1)
+    if (selection) void resolveDepartmentForApproval(selection)
+    return
+  }
   const firstSelection = selections.length === 1 && selectedRelatedApprovals.value.length === 0
     ? selections[0]
     : undefined
-  if (!firstSelection || selectableDepartments.value.length <= 1) {
+  if (!firstSelection || (selectableDepartments.value.length <= 1 && !draftDepartmentInvalid.value)) {
     void persistRelatedApprovalsImmediately(selections)
     return
   }
   const candidate = drafts.travelApprovals.find(
     (approval) => approval.processInstanceId === firstSelection.processInstanceId,
   )
-  const currentDepartmentId = auth.session?.selectedDepartment?.id
-  if (candidate?.originatorDepartmentId === currentDepartmentId) {
+  const currentDepartmentId = drafts.currentDraft?.department.id ?? auth.session?.selectedDepartment?.id
+  if (!recheckApprovalDepartment.value && candidate?.originatorDepartmentId === currentDepartmentId) {
     void persistRelatedApprovalsImmediately(selections)
     return
   }
@@ -1820,6 +2372,7 @@ function confirmDepartmentChoice(): void {
 }
 function cancelDepartmentChoice(): void {
   pendingDepartmentApproval.value = null
+  retryDepartmentApproval.value = null
   selectedDepartmentChoiceId.value = ''
   acceptAuthoritativeRelatedApprovals()
   verifyingRelatedApprovals.value = false
@@ -1827,22 +2380,22 @@ function cancelDepartmentChoice(): void {
   scheduleAutosave()
 }
 function selectMobileStep(step: number): void {
-  if (!props.mobile || step < 0 || step >= mobileSteps.length) return
+  if (!props.mobile || step < 0 || step >= mobileSteps.value.length) return
   mobileStep.value = step
 }
 async function advanceMobileStep(): Promise<void> {
-  if (mobileStep.value === 0 && !selectedRelatedApprovals.value.length) {
+  if (!isGeneral.value && mobileStep.value === 0 && !selectedRelatedApprovals.value.length) {
     ElMessage.warning('请至少关联一张已通过的出差审批')
     return
   }
-  if (mobileStep.value < mobileSteps.length - 1) {
+  if (mobileStep.value < mobileSteps.value.length - 1) {
     selectMobileStep(mobileStep.value + 1)
     return
   }
   await confirmAndSubmit()
 }
 async function handleMobilePrimaryAction(): Promise<void> {
-  if (mobileStep.value === mobileSteps.length - 1 && canReplaceOutdatedForm.value) {
+  if (mobileStep.value === mobileSteps.value.length - 1 && canReplaceOutdatedForm.value) {
     await replaceOutdatedForm()
     return
   }
@@ -1854,7 +2407,7 @@ async function handleMobilePrimaryAction(): Promise<void> {
 }
 async function focusMobileMaterial(itemId?: string, fileId?: string): Promise<void> {
   if (props.mobile) {
-    mobileStep.value = 2
+    mobileStep.value = materialStep.value
     await nextTick()
   }
   expenseItemsCard.value?.focusMaterial(itemId, fileId)
@@ -1893,13 +2446,25 @@ onMounted(async () => { void health.check(); await auth.bootstrap(); await initi
 // Increment synchronously even for A -> B -> A within one tick. The asynchronous
 // view callbacks use this opaque scope, independently of store request guards.
 watch(sessionIdentity, () => { sessionGeneration.value++ }, { flush: 'sync' })
-watch(() => sessionScope(), () => {
+watch(reimbursementSubject, () => {
+  newEntryOpen.value = false
+  generalDepartmentConfirmed.value = false
+  changingDepartment.value = false
+  legacyDrafts.value = []
+  generalDepartmentUnconfirmed.value = false
+})
+watch(() => drafts.currentDraft?.id, () => { generalApprovalOpen.value = false })
+watch([sessionScope, reimbursementSubject], ([currentScope, subject], [, previousSubject]) => {
+  const resolvingTravelDepartment = subject === previousSubject
+    && bindingApprovalDepartment.value
   if (autosaveTimer) clearTimeout(autosaveTimer)
   saving.value = false
   savePromise = null
   verifyingRelatedApprovals.value = false
   bindingApprovalDepartment.value = false
   pendingDepartmentApproval.value = null
+  retryDepartmentApproval.value = null
+  recheckApprovalDepartment.value = false
   selectedDepartmentChoiceId.value = ''
   departmentBindingError.value = ''
   submitFlowPending.value = false
@@ -1914,10 +2479,16 @@ watch(() => sessionScope(), () => {
   pendingNewApproval.value = null
   historyVisible.value = false
   historyOrigin.value = null
+  historicalSubmission.value = null
   workspaceActionError.value = ''
   deferredMaterialRevision.value = null
-  if (sessionScope()) void initializeWorkspace()
+  if (currentScope && !resolvingTravelDepartment) void initializeWorkspace()
   else { initializedScope = ''; initializationScope = '' }
+})
+watch(historyScope, () => {
+  historyVisible.value = false
+  historyOrigin.value = null
+  historicalSubmission.value = null
 })
 watch(() => expenseItemsCard.value?.hasOpenMaterialEditor, (open) => {
   if (open === false && deferredMaterialRevision.value === drafts.currentDraft?.id) {
@@ -1936,6 +2507,9 @@ watch(historyVisible, (visible) => {
   if (visible) return
   historyRequest?.abort()
   historyRequest = undefined
+  historyDetailRequest?.abort()
+  historyDetailRequest = undefined
+  historyOpeningId.value = ''
   historyLoading.value = false
   historyRecords.value = []
 }, { flush: 'sync' })
@@ -1983,7 +2557,7 @@ watch(() => [
   }, 250)
 }, { deep: true })
 function warnBeforeUnload(event: BeforeUnloadEvent): void {
-  if (drafts.currentDraft && hasUnsavedUserChanges.value) {
+  if (drafts.currentDraft && (hasUnsavedUserChanges.value || localUploadFailureReason.value)) {
     event.preventDefault()
     event.returnValue = ''
   }
@@ -2022,6 +2596,7 @@ onBeforeUnmount(() => {
   disposed = true
   reimbursementSwitchRequest?.abort()
   historyRequest?.abort()
+  historyDetailRequest?.abort()
   if (calculationTimer) clearTimeout(calculationTimer)
   if (autosaveTimer) clearTimeout(autosaveTimer)
   mobileFooterResizeObserver?.disconnect()
@@ -2065,7 +2640,7 @@ onBeforeUnmount(() => {
               系统设置
             </RouterLink>
             <el-button
-              v-if="auth.status === 'authenticated' && historyOrigin"
+              v-if="historyOrigin"
               link
               type="primary"
               class="hero-link hero-return-link"
@@ -2077,7 +2652,7 @@ onBeforeUnmount(() => {
               返回当前报销
             </el-button>
             <button
-              v-else-if="auth.status === 'authenticated' && drafts.currentDraft"
+              v-else-if="hasReimbursementLogin"
               type="button"
               class="hero-link"
               aria-haspopup="dialog"
@@ -2090,20 +2665,48 @@ onBeforeUnmount(() => {
               v-if="showHeaderNewReimbursement"
               type="button"
               class="hero-link"
-              :disabled="!canStartNewReimbursement || drafts.busy || saving || reimbursementOptionsUnavailable"
-              :title="hasRestartableReimbursement ? undefined : '当前已是空白报销，可直接填写'"
+              :disabled="changingDepartment || generalDepartmentUnconfirmed
+                || (needsReimbursementDepartment ? bindingApprovalDepartment || switchingKind
+                  : !canStartNewReimbursement || drafts.busy || saving || reimbursementOptionsUnavailable)"
+              :title="needsReimbursementDepartment || hasRestartableReimbursement ? undefined : '当前已是空白报销，可直接填写'"
               @click="newReimbursement"
             >
               新开一笔
             </button>
           </div>
         </div>
+        <nav
+          v-if="hasReimbursementLogin && !historyOrigin"
+          class="reimbursement-kind-selector"
+          aria-label="报销类型"
+        >
+          <el-button-group class="reimbursement-kind-buttons">
+            <el-button
+              :type="!isGeneral ? 'primary' : 'default'"
+              :aria-pressed="!isGeneral"
+              :disabled="switchingKind || Boolean(reimbursementSwitchBlock || reimbursementSwitchRecheck)"
+              data-testid="switch-travel"
+              @click="switchKind('travel')"
+            >
+              差旅报销
+            </el-button>
+            <el-button
+              :type="isGeneral ? 'primary' : 'default'"
+              :aria-pressed="isGeneral"
+              :disabled="switchingKind || Boolean(auth.session?.operator || reimbursementSwitchBlock || reimbursementSwitchRecheck)"
+              data-testid="switch-general"
+              @click="switchKind('general')"
+            >
+              普通费用报销
+            </el-button>
+          </el-button-group>
+        </nav>
         <div class="hero-title">
           <h1 id="page-title">
-            {{ auth.appTitle }}
+            {{ isGeneral ? '普通费用报销申请' : auth.appTitle }}
           </h1>
           <span
-            v-if="auth.status === 'authenticated' && !initializingWorkspace && !formReadOnly && !saveError"
+            v-if="auth.status === 'authenticated' && !needsReimbursementDepartment && !initializingWorkspace && !formReadOnly && !saveError"
             class="save-indicator"
             :data-state="saveState"
             data-testid="autosave-status"
@@ -2116,13 +2719,13 @@ onBeforeUnmount(() => {
           v-if="!submittedResult"
           class="summary"
         >
-          {{ props.mobile
+          {{ isGeneral ? '选择报销主体与预算代码，整理费用和材料，再提交 OA。' : props.mobile
             ? '关联审批、核对补助、整理材料，最后统一提交 OA。'
             : '关联审批、核对补助和费用，自动生成报销单并提交 OA。' }}
         </p>
         <div
-          v-if="(auth.session?.canDelegateReimbursements || auth.session?.operator)
-            && ['authenticated', 'department_required'].includes(auth.status)"
+          v-if="!isGeneral && (auth.session?.canDelegateReimbursements || auth.session?.operator)
+            && hasReimbursementLogin && !historyOrigin"
           class="reimbursement-subject"
           aria-label="为谁报销"
         >
@@ -2213,684 +2816,956 @@ onBeforeUnmount(() => {
       </el-result>
     </el-card>
     <el-card
-      v-else-if="auth.status === 'department_required'"
-      shadow="never"
+      v-else-if="legacyDrafts.length"
+      data-testid="legacy-drafts"
       class="content-card"
     >
-      <template #header>
-        <strong>选择本次出差申请</strong>
-      </template>
-      <p class="field-help">
-        请选择本次报销对应的已通过出差审批。系统优先匹配审批的发起部门，无法匹配当前部门时再请你确认。
+      <p>发现同一种报销有多笔跨部门旧稿。请先核对并选择保留哪一笔，选择前不会删除内容。</p>
+      <p
+        v-if="initializationError"
+        role="alert"
+      >
+        {{ initializationError }}
       </p>
-      <TravelApprovalSelector
-        :key="reimbursementSubject"
-        :model-value="selectedRelatedApprovals"
-        :mobile="props.mobile"
-        :busy="bindingApprovalDepartment || switchingReimbursement"
-        :delegated="Boolean(auth.session?.operator)"
-        single
-        @update:model-value="chooseTravelApprovalForDepartment"
-      />
-      <el-alert
-        v-if="departmentBindingError"
-        :title="departmentBindingError"
-        type="error"
-        :closable="false"
-        show-icon
-        class="workspace-alert"
-      />
+      <div
+        v-for="draft in legacyDrafts"
+        :key="draft.id"
+        class="legacy-draft-choice"
+      >
+        <p>{{ draft.department?.name }} · {{ draft.status === 'LOCKED' ? '已进入提交处理' : draft.status === 'EXPIRED' ? '已过期' : '未提交' }} · {{ formatRecordTime(draft.updatedAt) }}</p>
+        <p>{{ draft.itemCount ?? 0 }} 笔费用 · {{ draft.fileCount ?? 0 }} 份材料 · {{ draft.relatedApprovalCount }} 张关联审批</p>
+        <p v-if="draft.itemDescriptions?.length">
+          {{ draft.itemDescriptions.join('、') }}
+        </p>
+        <el-button
+          :disabled="choosingLegacyDraft"
+          @click="openSavedWorkspace(draft, legacyDrafts, true)"
+        >
+          保留这笔
+        </el-button>
+      </div>
+      <el-button
+        :disabled="choosingLegacyDraft"
+        @click="initializeWorkspace(true)"
+      >
+        重新加载核对
+      </el-button>
     </el-card>
-    <template v-else-if="auth.status === 'authenticated'">
+
+    <template v-else-if="hasReimbursementLogin || historyOrigin">
       <el-card
-        v-if="initializingWorkspace"
+        v-if="needsReimbursementDepartment && !historyOrigin"
+        data-testid="reimbursement-department-gate"
+        tabindex="-1"
         shadow="never"
         class="content-card"
-        aria-busy="true"
       >
-        <el-skeleton
-          :rows="6"
-          animated
-        />
-      </el-card>
-      <template v-else>
-        <el-alert
-          v-if="initializationError || departmentBindingError"
-          :title="initializationError || departmentBindingError"
-          type="error"
-          :closable="false"
-          class="workspace-alert"
+        <template
+          v-if="isGeneral || changingDepartment"
+          #header
         >
-          <template #default>
+          <div class="department-gate-heading">
+            <strong>{{ changingDepartment ? '更换报销部门' : '选择本次报销部门' }}</strong>
             <el-button
-              v-if="initializationError"
+              v-if="changingDepartment"
               link
               type="primary"
-              @click="initializeWorkspace(true)"
+              :disabled="bindingApprovalDepartment || changingDepartmentUnconfirmed"
+              @click="closeDepartmentPicker"
             >
-              重新加载
+              取消
             </el-button>
-          </template>
-        </el-alert>
+            <el-button
+              v-else-if="newEntryOpen && auth.status === 'authenticated'"
+              link
+              type="primary"
+              :disabled="bindingApprovalDepartment || Boolean(pendingDepartmentApproval)"
+              @click="newEntryOpen = false"
+            >
+              返回当前报销
+            </el-button>
+          </div>
+        </template>
+        <p
+          v-if="changingDepartment"
+          class="field-help department-switch-help"
+        >
+          {{ isGeneral ? '确认后更正本笔报销的办理部门，已填明细和已上传材料会保留。'
+            : '所选出差审批无法对应当前有效部门，请选择本笔报销的办理部门。已选审批、费用明细和材料会保留。' }}
+        </p>
+        <el-form
+          v-if="isGeneral || changingDepartment"
+          label-position="top"
+          @submit.prevent="confirmGeneralDepartment"
+        >
+          <el-form-item label="所属部门">
+            <el-select
+              v-model="generalDepartment"
+              aria-label="所属部门"
+              placeholder="请选择部门"
+              :disabled="bindingApprovalDepartment"
+              class="full-width"
+            >
+              <el-option
+                v-for="department in selectableDepartments"
+                :key="department.id"
+                :value="department.id"
+                :label="department.name"
+              />
+            </el-select>
+          </el-form-item>
+          <el-button
+            type="primary"
+            :loading="bindingApprovalDepartment"
+            :disabled="generalDepartmentSelectionDisabled"
+            @click="confirmGeneralDepartment"
+          >
+            {{ changingDepartment ? '确认更换' : '确认部门' }}
+          </el-button>
+        </el-form>
+        <template v-else>
+          <TravelApprovalSelector
+            ref="departmentApprovalSelector"
+            :key="reimbursementSubject"
+            :model-value="newEntryOpen && !bindingApprovalDepartment ? [] : selectedRelatedApprovals"
+            :mobile="props.mobile"
+            :busy="bindingApprovalDepartment || switchingReimbursement"
+            :delegated="Boolean(auth.session?.operator)"
+            single
+            class="department-gate-approvals"
+            @update:model-value="chooseTravelApprovalForDepartment"
+          />
+        </template>
         <el-alert
-          v-if="workspaceActionError"
-          data-attention-target="workspace"
-          :title="workspaceActionError"
+          v-if="departmentGateError"
+          :title="departmentGateError"
           type="error"
           :closable="false"
+          show-icon
           class="workspace-alert"
         >
           <el-button
-            v-if="workspaceConfirmationRequired"
+            v-if="retryDepartmentApproval"
+            link
             type="primary"
-            @click="confirmCurrentWorkspace"
-          >
-            核对当前报销
-          </el-button>
-        </el-alert>
-        <el-alert
-          v-if="!drafts.currentDraft && !initializationError"
-          title="当前报销记录已不可用"
-          type="warning"
-          :closable="false"
-          class="workspace-alert"
-        >
-          <el-button
-            type="primary"
-            @click="initializeWorkspace(true)"
+            :disabled="bindingApprovalDepartment"
+            @click="resolveDepartmentForApproval(retryDepartmentApproval, auth.session?.selectedDepartment?.id)"
           >
             重新加载报销
           </el-button>
         </el-alert>
-        <el-alert
-          v-if="drafts.currentDraft && reimbursementOptionsUnavailable"
-          data-attention-target="options"
-          :title="templateNeedsAdmin ? (auth.isAdmin ? '请前往系统设置确认 OA 表单' : '请联系管理员确认 OA 表单') : '暂时无法读取报销表单'"
-          :description="drafts.reimbursementOptionsError"
-          type="warning"
-          :closable="false"
-          class="workspace-alert"
+      </el-card>
+      <div
+        v-show="!needsReimbursementDepartment || Boolean(historyOrigin)"
+        class="workspace-content"
+      >
+        <el-card
+          v-if="initializingWorkspace"
+          shadow="never"
+          class="content-card"
+          aria-busy="true"
         >
-          <div class="form-options-actions">
-            <el-button
-              v-if="templateNeedsAdmin && auth.isAdmin"
-              type="primary"
-              @click="openTemplateSettings"
-            >
-              前往系统设置确认表单
-            </el-button>
-            <el-button
-              :type="templateNeedsAdmin && auth.isAdmin ? 'default' : 'primary'"
-              :loading="drafts.loadingReimbursementOptions"
-              @click="refreshFormOptions"
-            >
-              {{ templateNeedsAdmin ? '重新检查表单' : '刷新表单与审批' }}
-            </el-button>
-          </div>
-        </el-alert>
-        <section
-          v-if="accountingOptionsChanged || needsApprovalReconfirmation"
-          class="accounting-verification-alert"
-          data-testid="accounting-options-recovery"
-        >
-          <p>{{ accountingOptionsChanged ? '所属公司或预算选项已变化，请刷新并重新关联出差审批。' : '此报销需重新核验关联审批的所属公司和预算代码。' }}</p>
-          <el-button
-            v-if="accountingOptionsChanged"
-            :disabled="drafts.busy || saving"
-            @click="recoverAccountingOptions"
-          >
-            刷新表单与审批
-          </el-button>
-          <el-button
-            v-else
-            :loading="verifyingRelatedApprovals"
-            :disabled="drafts.busy || saving"
-            @click="reconfirmRelatedApprovals"
-          >
-            重新确认出差审批
-          </el-button>
-        </section>
-        <template v-if="drafts.currentDraft">
-          <el-alert
-            v-if="draftUnavailable"
-            title="当前报销记录已不可用"
-            description="本页内容仅供核对，请从右上角新开一笔，重新填写并上传材料。"
-            type="warning"
-            :closable="false"
-            class="workspace-alert"
-            data-attention-target="workspace"
+          <el-skeleton
+            :rows="6"
+            animated
           />
+        </el-card>
+        <template v-else>
           <el-alert
-            v-if="drafts.currentDraft.workspaceRetired && !historyOrigin"
-            title="已新开另一笔报销"
-            type="info"
+            v-if="initializationError || departmentBindingError || draftDepartmentInvalid"
+            :title="initializationError || departmentBindingError || (isGeneral || travelDepartmentNeedsChoice ? '原办理部门已变更，可通过更换部门更新本笔报销，当前内容和材料会保留' : '原办理部门已变更，可按出差审批更新部门，当前内容和材料会保留')"
+            :type="initializationError || departmentBindingError ? 'error' : 'info'"
             :closable="false"
             class="workspace-alert"
+          >
+            <template #default>
+              <el-button
+                v-if="canRecoverTravelDepartmentFromApproval"
+                link
+                type="primary"
+                @click="returnToApprovalStep()"
+              >
+                选择出差审批
+              </el-button>
+              <el-button
+                v-if="draftDepartmentInvalid && !isGeneral && !travelDepartmentNeedsChoice && drafts.currentDraft?.relatedApprovals.length"
+                link
+                type="primary"
+                :loading="bindingApprovalDepartment"
+                @click="correctCurrentDepartment()"
+              >
+                按出差审批重新确认部门
+              </el-button>
+              <el-button
+                v-if="initializationError"
+                link
+                type="primary"
+                @click="initializeWorkspace(true)"
+              >
+                重新加载
+              </el-button>
+            </template>
+          </el-alert>
+          <el-alert
+            v-if="workspaceActionError"
             data-attention-target="workspace"
+            :title="workspaceActionError"
+            type="error"
+            :closable="false"
+            class="workspace-alert"
           >
             <el-button
-              :disabled="drafts.busy || saving || confirmingDraftReload"
-              @click="openCurrentWorkspace"
+              v-if="workspaceConfirmationRequired"
+              type="primary"
+              @click="confirmCurrentWorkspace"
             >
-              打开当前报销
+              核对当前报销
             </el-button>
           </el-alert>
           <el-alert
-            v-if="activeMaterialRecovery"
-            title="报销内容已保留，材料尚在恢复"
-            type="info"
+            v-if="!drafts.currentDraft && !initializationError"
+            title="当前报销记录已不可用"
+            type="warning"
             :closable="false"
             class="workspace-alert"
           >
-            <p>请等待原材料恢复完成后再编辑；中断后可以继续恢复。</p>
-            <div class="submission-feedback-actions">
+            <el-button
+              type="primary"
+              @click="initializeWorkspace(true)"
+            >
+              重新加载报销
+            </el-button>
+          </el-alert>
+          <el-alert
+            v-if="drafts.currentDraft && reimbursementOptionsUnavailable && !historyOrigin"
+            data-attention-target="options"
+            :title="templateNeedsAdmin ? (auth.isAdmin ? '请前往系统设置确认 OA 表单' : '请联系管理员确认 OA 表单') : '暂时无法读取报销表单'"
+            :description="drafts.reimbursementOptionsError"
+            type="warning"
+            :closable="false"
+            class="workspace-alert"
+          >
+            <div class="form-options-actions">
               <el-button
+                v-if="templateNeedsAdmin && auth.isAdmin"
                 type="primary"
-                :loading="recoveringReimbursement"
-                :disabled="workspaceConfirmationRequired || drafts.busy"
-                @click="recoverFailedReimbursement"
+                @click="openTemplateSettings"
               >
-                继续恢复材料
+                前往系统设置确认表单
+              </el-button>
+              <el-button
+                :type="templateNeedsAdmin && auth.isAdmin ? 'default' : 'primary'"
+                :loading="drafts.loadingReimbursementOptions"
+                @click="refreshFormOptions"
+              >
+                {{ templateNeedsAdmin ? '重新检查表单' : '刷新表单与审批' }}
               </el-button>
             </div>
           </el-alert>
-          <el-alert
-            v-if="draftExpired && !trackedSubmission"
-            title="本次填写内容已过期"
-            description="可以开始新的报销，请重新填写并上传材料。"
-            type="warning"
-            :closable="false"
-            class="workspace-alert"
-          >
-            <el-button
-              type="primary"
-              :disabled="!canStartNewReimbursement || drafts.busy || reimbursementOptionsUnavailable"
-              @click="newReimbursement"
-            >
-              重新填写
-            </el-button>
-          </el-alert>
           <section
-            v-if="canReplaceOutdatedForm"
-            class="template-recovery-panel"
-            data-testid="template-recovery-panel"
-            role="alert"
+            v-if="accountingOptionsChanged || needsApprovalReconfirmation"
+            class="accounting-verification-alert"
+            data-testid="accounting-options-recovery"
           >
-            <div>
-              <strong>OA 表单已更新</strong>
-              <p>当前记录不能继续保存或提交。按新表单重新填写后，需要重新关联审批并上传材料。</p>
-            </div>
+            <p>{{ accountingOptionsChanged ? '所属公司或预算选项已变化，请刷新并重新关联出差审批。' : '此报销需重新核验关联审批的所属公司和预算代码。' }}</p>
             <el-button
-              type="primary"
-              :loading="replacingTemplate"
-              :disabled="drafts.busy"
-              @click="replaceOutdatedForm"
+              v-if="accountingOptionsChanged"
+              :disabled="drafts.busy || saving"
+              @click="recoverAccountingOptions"
             >
-              按新表单重新填写
+              刷新表单与审批
+            </el-button>
+            <el-button
+              v-else
+              :loading="verifyingRelatedApprovals"
+              :disabled="drafts.busy || saving"
+              @click="reconfirmRelatedApprovals"
+            >
+              重新确认出差审批
             </el-button>
           </section>
-          <el-alert
-            v-if="submissionServiceReason"
-            :title="submissionServiceReason"
-            type="warning"
-            :closable="false"
-            class="submission-status"
-            show-icon
-          >
-            <el-button
-              link
-              type="primary"
-              :loading="refreshingServiceStatus"
-              @click="refreshSubmissionService()"
+          <template v-if="drafts.currentDraft">
+            <el-alert
+              v-if="draftUnavailable"
+              title="当前报销记录已不可用"
+              description="本页内容仅供核对，请从右上角新开一笔，重新填写并上传材料。"
+              type="warning"
+              :closable="false"
+              class="workspace-alert"
+              data-attention-target="workspace"
+            />
+            <el-alert
+              v-if="drafts.currentDraft.workspaceRetired && !historyOrigin"
+              title="已新开另一笔报销"
+              type="info"
+              :closable="false"
+              class="workspace-alert"
+              data-attention-target="workspace"
             >
-              刷新服务状态
-            </el-button>
-          </el-alert>
-          <el-alert
-            v-if="delegationRevoked || ((saveError || saveRequiresReload) && !drafts.currentDraft.workspaceRetired)"
-            :title="delegationRevoked ? '代报权限已失效，请返回本人报销'
-              : saveRequiresReload ? '报销内容已更新，请核对最新报销内容' : '保存失败，内容仍保留在本页'"
-            type="error"
-            :closable="false"
-            show-icon
-            class="workspace-alert"
-            data-testid="autosave-error"
-            data-attention-target="save"
-          >
-            <div
-              v-if="saveError"
-              class="save-recovery-detail"
+              <el-button
+                :disabled="drafts.busy || saving || confirmingDraftReload"
+                @click="openCurrentWorkspace"
+              >
+                打开当前报销
+              </el-button>
+            </el-alert>
+            <el-alert
+              v-if="activeMaterialRecovery"
+              title="报销内容已保留，材料尚在恢复"
+              type="info"
+              :closable="false"
+              class="workspace-alert"
             >
-              {{ saveError }}
-            </div>
-            <el-button
-              v-if="!delegationRevoked && (saveRequiresReload || (saveError && formReadOnly && !trackedSubmission))"
-              link
-              type="primary"
-              :disabled="drafts.busy || saving"
-              @click="openSavedReimbursement(drafts.currentDraft.id)"
-            >
-              核对最新报销内容
-            </el-button>
-            <el-button
-              v-else-if="!formReadOnly"
-              link
-              type="primary"
-              :disabled="drafts.busy || saving"
-              @click="retrySave"
-            >
-              重试保存
-            </el-button>
-          </el-alert>
-          <section
-            v-if="submittedReimbursement"
-            class="submitted-receipt"
-            aria-labelledby="submitted-receipt-title"
-            data-testid="submission-status"
-            data-attention-target="submission"
-          >
-            <header class="receipt-heading">
-              <div class="receipt-heading-copy">
-                <svg
-                  class="receipt-check"
-                  aria-hidden="true"
-                  viewBox="0 0 24 24"
-                  fill="none"
+              <p>请等待原材料恢复完成后再编辑；中断后可以继续恢复。</p>
+              <div class="submission-feedback-actions">
+                <el-button
+                  type="primary"
+                  :loading="recoveringReimbursement"
+                  :disabled="workspaceConfirmationRequired || drafts.busy"
+                  @click="recoverFailedReimbursement"
                 >
-                  <path
-                    d="m6 12 4 4 8-8"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
+                  继续恢复材料
+                </el-button>
+              </div>
+            </el-alert>
+            <el-alert
+              v-if="draftExpired && !trackedSubmission"
+              title="本次填写内容已过期"
+              description="可以开始新的报销，请重新填写并上传材料。"
+              type="warning"
+              :closable="false"
+              class="workspace-alert"
+            >
+              <el-button
+                type="primary"
+                :disabled="!canStartNewReimbursement || drafts.busy || reimbursementOptionsUnavailable"
+                @click="newReimbursement"
+              >
+                重新填写
+              </el-button>
+            </el-alert>
+            <section
+              v-if="canReplaceOutdatedForm"
+              class="template-recovery-panel"
+              data-testid="template-recovery-panel"
+              role="alert"
+            >
+              <div>
+                <strong>OA 表单已更新</strong>
+                <p>当前记录不能继续保存或提交。按新表单重新填写后，需要重新关联审批并上传材料。</p>
+              </div>
+              <el-button
+                type="primary"
+                :loading="replacingTemplate"
+                :disabled="drafts.busy"
+                @click="replaceOutdatedForm"
+              >
+                按新表单重新填写
+              </el-button>
+            </section>
+            <el-alert
+              v-if="!submittedResult && submissionServiceReason"
+              :title="submissionServiceReason"
+              type="warning"
+              :closable="false"
+              class="submission-status"
+              show-icon
+            >
+              <el-button
+                link
+                type="primary"
+                :loading="refreshingServiceStatus"
+                @click="refreshSubmissionService()"
+              >
+                刷新服务状态
+              </el-button>
+            </el-alert>
+            <el-alert
+              v-if="delegationRevoked || ((saveError || saveRequiresReload) && !drafts.currentDraft.workspaceRetired)"
+              :title="delegationRevoked ? '代报权限已失效，请返回本人报销'
+                : saveRequiresReload ? '报销内容已更新，请核对最新报销内容' : '保存失败，内容仍保留在本页'"
+              type="error"
+              :closable="false"
+              show-icon
+              class="workspace-alert"
+              data-testid="autosave-error"
+              data-attention-target="save"
+            >
+              <div
+                v-if="saveError"
+                class="save-recovery-detail"
+              >
+                {{ saveError }}
+              </div>
+              <el-button
+                v-if="!delegationRevoked && (saveRequiresReload || (saveError && formReadOnly && !trackedSubmission))"
+                link
+                type="primary"
+                :disabled="drafts.busy || saving"
+                @click="openSavedReimbursement(drafts.currentDraft.id)"
+              >
+                核对最新报销内容
+              </el-button>
+              <el-button
+                v-else-if="!formReadOnly"
+                link
+                type="primary"
+                :disabled="drafts.busy || saving"
+                @click="retrySave"
+              >
+                重试保存
+              </el-button>
+            </el-alert>
+            <section
+              v-if="submittedReimbursement"
+              class="submitted-receipt"
+              aria-labelledby="submitted-receipt-title"
+              data-testid="submission-status"
+              data-attention-target="submission"
+            >
+              <header class="receipt-heading">
+                <div class="receipt-heading-copy">
+                  <svg
+                    class="receipt-check"
+                    aria-hidden="true"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                  >
+                    <path
+                      d="m6 12 4 4 8-8"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    />
+                  </svg>
+                  <div>
+                    <h2 id="submitted-receipt-title">
+                      审批已成功发起
+                    </h2>
+                    <p>票据材料和后续审批进度可在钉钉查看。</p>
+                  </div>
+                </div>
+                <div class="receipt-amount">
+                  <span>报销合计</span>
+                  <strong>¥{{ drafts.currentDraft.totals.totalAmount }}</strong>
+                </div>
+              </header>
+              <dl
+                class="receipt-metrics"
+                :class="{ 'receipt-metrics--general': isGeneral }"
+              >
+                <div><dt>票据金额</dt><dd>¥{{ drafts.currentDraft.totals.expenseTotal }}</dd></div>
+                <div v-if="!isGeneral">
+                  <dt>出差补助</dt><dd>¥{{ drafts.currentDraft.totals.subsidyTotal }}</dd>
+                </div>
+                <div><dt>票据张数</dt><dd>{{ drafts.currentDraft.totals.receiptCount }} 张</dd></div>
+              </dl>
+              <div class="submitted-receipt-toolbar">
+                <p
+                  v-if="!props.mobile"
+                  class="receipt-attachment-summary"
+                >
+                  OA 附件：{{ attachmentNames.join('、') }}
+                </p>
+                <div class="submitted-receipt-actions">
+                  <el-button
+                    v-if="!props.mobile && submittedReimbursement.approvalUrl?.trim()"
+                    tag="a"
+                    :href="submittedReimbursement.approvalUrl"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="approval-link"
+                  >
+                    打开钉钉 OA
+                  </el-button>
+                  <ExpenseSummaryCard
+                    :mobile="props.mobile"
+                    :preview-disabled-reason="historyOrigin ? '' : previewDisabledReason"
+                    :history="Boolean(historyOrigin)"
+                    readonly
+                    preview-only
                   />
-                </svg>
-                <div>
-                  <h2 id="submitted-receipt-title">
-                    审批已成功发起
-                  </h2>
-                  <p>票据材料和后续审批进度可在钉钉查看。</p>
                 </div>
               </div>
-              <div class="receipt-amount">
-                <span>报销合计</span>
-                <strong>¥{{ drafts.currentDraft.totals.totalAmount }}</strong>
-              </div>
-            </header>
-            <dl class="receipt-metrics">
-              <div><dt>票据金额</dt><dd>¥{{ drafts.currentDraft.totals.expenseTotal }}</dd></div>
-              <div><dt>出差补助</dt><dd>¥{{ drafts.currentDraft.totals.subsidyTotal }}</dd></div>
-              <div><dt>票据张数</dt><dd>{{ drafts.currentDraft.totals.receiptCount }} 张</dd></div>
-            </dl>
-            <div class="submitted-receipt-toolbar">
               <p
-                v-if="!props.mobile"
+                v-if="pendingNewApproval"
+                class="receipt-next-note"
+              >
+                已选出差审批。打开报销表单后可继续处理该审批。
+              </p>
+              <dl class="receipt-info">
+                <div v-if="submittedReimbursement.businessId">
+                  <dt>审批编号</dt><dd>{{ submittedReimbursement.businessId }}</dd>
+                </div>
+                <div v-if="submittedReimbursement.submittedAt">
+                  <dt>提交时间</dt><dd>{{ formatRecordTime(submittedReimbursement.submittedAt) }}</dd>
+                </div>
+                <div><dt>报销部门</dt><dd>{{ drafts.currentDraft.department.name }}</dd></div>
+                <div v-if="receiptDetails?.employeeName">
+                  <dt>报销人</dt><dd>{{ receiptDetails.employeeName }}</dd>
+                </div>
+                <div v-if="receiptDetails?.companyLabel">
+                  <dt>{{ isGeneral ? '报销主体' : '所属公司' }}</dt><dd>{{ receiptDetails.companyLabel }}</dd>
+                </div>
+                <div v-if="receiptDetails?.budgetLabel">
+                  <dt>{{ isGeneral ? '预算代码' : '预算代码 / 项目' }}</dt><dd>{{ receiptDetails.budgetLabel }}</dd>
+                </div>
+                <div v-if="receiptDetails?.travelTypeLabel">
+                  <dt>出差类别</dt><dd>{{ receiptDetails.travelTypeLabel }}</dd>
+                </div>
+                <div v-if="isGeneral">
+                  <dt>关联审批单</dt><dd>{{ generalApprovalIds.length ? `已关联 ${generalApprovalIds.length} 张` : '未关联' }}</dd>
+                </div>
+              </dl>
+              <div
+                v-if="drafts.currentDraft.relatedApprovals.length"
+                class="receipt-approvals"
+              >
+                <h3>关联出差审批（{{ drafts.currentDraft.relatedApprovals.length }} 张）</h3>
+                <ul>
+                  <li
+                    v-for="approval in drafts.currentDraft.relatedApprovals"
+                    :key="approval.processInstanceId"
+                  >
+                    <strong>{{ approval.title }}</strong>
+                    <p class="receipt-approval-meta">
+                      <span
+                        class="receipt-approval-dates"
+                        aria-label="出差日期"
+                      >{{ approval.startDate }} 至 {{ approval.endDate }}</span><span
+                        v-if="receiptDetails?.travelTypeLabel"
+                        aria-label="出差类别"
+                      > · {{ receiptDetails.travelTypeLabel }}</span>
+                    </p>
+                    <p
+                      v-if="approval.businessId"
+                      class="receipt-approval-number"
+                    >
+                      审批编号：{{ approval.businessId }}
+                    </p>
+                    <ApprovalAccountingLine
+                      :company="receiptDetails?.companyLabel"
+                      :budget="receiptDetails?.budgetLabel"
+                    />
+                  </li>
+                </ul>
+              </div>
+              <p
+                v-if="props.mobile"
                 class="receipt-attachment-summary"
               >
                 OA 附件：{{ attachmentNames.join('、') }}
               </p>
-              <div class="submitted-receipt-actions">
+            </section>
+            <el-alert
+              v-else-if="submittedResult"
+              title="审批已成功发起"
+              :type="receiptLoadError ? 'warning' : 'success'"
+              :closable="false"
+              show-icon
+              data-testid="submitted-receipt-loading"
+            >
+              <p class="save-recovery-detail">
+                {{ receiptLoadError || '正在读取本次提交的报销回执。' }}
+              </p>
+              <template v-if="receiptLoadError">
                 <el-button
-                  v-if="!props.mobile && submittedReimbursement.approvalUrl?.trim()"
-                  tag="a"
-                  :href="submittedReimbursement.approvalUrl"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  data-testid="approval-link"
+                  :loading="drafts.loadingCurrentDraft"
+                  @click="loadSubmittedReceipt"
                 >
-                  打开钉钉 OA
+                  重新读取回执
                 </el-button>
-                <ExpenseSummaryCard
-                  :mobile="props.mobile"
-                  :preview-disabled-reason="previewDisabledReason"
-                  readonly
-                  preview-only
-                />
-              </div>
-            </div>
-            <p
-              v-if="pendingNewApproval"
-              class="receipt-next-note"
+              </template>
+            </el-alert>
+            <section
+              v-else-if="submission.activeDraftId === drafts.currentDraft.id && submission.submission?.status === 'MANUAL_REVIEW'"
+              class="submission-status manual-review-panel"
+              aria-labelledby="manual-review-title"
+              aria-live="polite"
+              data-testid="submission-status"
+              data-attention-target="submission"
             >
-              已选出差审批。打开报销表单后可继续处理该审批。
-            </p>
-            <dl class="receipt-info">
-              <div v-if="submittedReimbursement.businessId">
-                <dt>审批编号</dt><dd>{{ submittedReimbursement.businessId }}</dd>
-              </div>
-              <div v-if="submittedReimbursement.submittedAt">
-                <dt>提交时间</dt><dd>{{ formatRecordTime(submittedReimbursement.submittedAt) }}</dd>
-              </div>
-              <div><dt>报销部门</dt><dd>{{ drafts.currentDraft.department.name }}</dd></div>
-              <div v-if="receiptDetails?.employeeName">
-                <dt>报销人</dt><dd>{{ receiptDetails.employeeName }}</dd>
-              </div>
-              <div v-if="receiptDetails?.companyLabel">
-                <dt>所属公司</dt><dd>{{ receiptDetails.companyLabel }}</dd>
-              </div>
-              <div v-if="receiptDetails?.budgetLabel">
-                <dt>预算代码 / 项目</dt><dd>{{ receiptDetails.budgetLabel }}</dd>
-              </div>
-              <div v-if="receiptDetails?.travelTypeLabel">
-                <dt>出差类别</dt><dd>{{ receiptDetails.travelTypeLabel }}</dd>
-              </div>
-            </dl>
-            <div
-              v-if="drafts.currentDraft.relatedApprovals.length"
-              class="receipt-approvals"
-            >
-              <h3>关联出差审批（{{ drafts.currentDraft.relatedApprovals.length }} 张）</h3>
-              <ul>
-                <li
-                  v-for="approval in drafts.currentDraft.relatedApprovals"
-                  :key="approval.processInstanceId"
+              <header class="manual-review-heading">
+                <el-icon
+                  class="manual-review-icon"
+                  aria-hidden="true"
                 >
-                  <strong>{{ approval.title }}</strong>
-                  <p class="receipt-approval-meta">
-                    <span
-                      class="receipt-approval-dates"
-                      aria-label="出差日期"
-                    >{{ approval.startDate }} 至 {{ approval.endDate }}</span><span
-                      v-if="receiptDetails?.travelTypeLabel"
-                      aria-label="出差类别"
-                    > · {{ receiptDetails.travelTypeLabel }}</span>
-                  </p>
-                  <p
-                    v-if="approval.businessId"
-                    class="receipt-approval-number"
-                  >
-                    审批编号：{{ approval.businessId }}
-                  </p>
-                  <ApprovalAccountingLine
-                    :company="receiptDetails?.companyLabel"
-                    :budget="receiptDetails?.budgetLabel"
-                  />
-                </li>
-              </ul>
-            </div>
-            <p
-              v-if="props.mobile"
-              class="receipt-attachment-summary"
-            >
-              OA 附件：{{ attachmentNames.join('、') }}
-            </p>
-          </section>
-          <el-alert
-            v-else-if="submittedResult"
-            title="审批已成功发起"
-            :type="receiptLoadError ? 'warning' : 'success'"
-            :closable="false"
-            show-icon
-            data-testid="submitted-receipt-loading"
-          >
-            <p class="save-recovery-detail">
-              {{ receiptLoadError || '正在读取本次提交的报销回执。' }}
-            </p>
-            <template v-if="receiptLoadError">
-              <el-button
-                :loading="drafts.loadingCurrentDraft"
-                @click="loadSubmittedReceipt"
-              >
-                重新读取回执
-              </el-button>
-            </template>
-          </el-alert>
-          <section
-            v-else-if="submission.activeDraftId === drafts.currentDraft.id && submission.submission?.status === 'MANUAL_REVIEW'"
-            class="submission-status manual-review-panel"
-            aria-labelledby="manual-review-title"
-            aria-live="polite"
-            data-testid="submission-status"
-            data-attention-target="submission"
-          >
-            <header class="manual-review-heading">
-              <el-icon
-                class="manual-review-icon"
-                aria-hidden="true"
-              >
-                <WarningFilled />
-              </el-icon>
-              <div>
-                <h2 id="manual-review-title">
-                  提交结果待人工核对
-                </h2>
-                <p>请将提交编号发给管理员核对。核对后可在这里刷新进度。</p>
-              </div>
-            </header>
-            <dl class="manual-review-details">
-              <dt>提交编号</dt><dd>{{ submission.submission.submissionId }}</dd>
-              <template v-if="submission.submission.error?.message">
-                <dt>状态说明</dt><dd>{{ submission.submission.error.message }}</dd>
-              </template>
-            </dl>
-            <p
-              v-if="submission.requestError"
-              class="manual-review-error"
-            >
-              {{ submission.requestError }}
-            </p>
-            <div class="manual-review-actions submission-feedback-actions">
-              <el-button
-                v-if="submission.submission.processInstanceId"
-                class="submission-recheck-action"
-                :loading="submission.submitting"
-                :disabled="refreshingServiceStatus"
-                @click="submission.recheck()"
-              >
-                重新核对（不会重复提交）
-              </el-button>
-              <el-button
-                type="primary"
-                :loading="refreshingServiceStatus"
-                :disabled="submission.submitting"
-                @click="refreshSubmissionService(true)"
-              >
-                刷新提交进度
-              </el-button>
-            </div>
-          </section>
-          <section
-            v-else-if="submission.activeDraftId === drafts.currentDraft.id && (submission.progressLabel || submission.errorMessage)"
-            class="submission-status submission-feedback-panel"
-            :class="`submission-feedback-panel--${submissionAlertType}`"
-            aria-labelledby="submission-feedback-title"
-            aria-live="polite"
-            data-testid="submission-status"
-            data-attention-target="submission"
-          >
-            <header class="submission-feedback-heading">
-              <el-icon
-                class="submission-feedback-icon"
-                aria-hidden="true"
-              >
-                <CircleCloseFilled v-if="submissionAlertType === 'error'" />
-                <WarningFilled v-else-if="submissionAlertType === 'warning'" />
-                <InfoFilled v-else />
-              </el-icon>
-              <div>
-                <h2 id="submission-feedback-title">
-                  {{ submission.progressLabel || '提交需要处理' }}
-                </h2>
-                <p v-if="submission.errorMessage">
-                  {{ submission.errorMessage }}
-                </p>
-              </div>
-            </header>
-            <el-progress
-              v-if="submission.status && submissionProgress.includes(submission.status)"
-              :percentage="submissionProgressPercentage"
-            />
-            <p v-if="submission.submission?.businessId">
-              审批编号：{{ submission.submission.businessId }}
-            </p>
-            <p v-if="pendingNewApproval">
-              已选出差审批。打开报销表单后可继续处理该审批。
-            </p>
-            <div class="submission-status-actions submission-feedback-actions">
-              <el-button
-                v-if="submission.status === 'FAILED_FINAL' && !drafts.currentDraft.workspaceRetired"
-                type="primary"
-                :disabled="workspaceConfirmationRequired || drafts.busy || reimbursementOptionsUnavailable"
-                :loading="recoveringReimbursement"
-                @click="recoverFailedReimbursement"
-              >
-                保留内容重新处理
-              </el-button>
-              <el-button
-                v-if="submission.submission && !submission.terminal"
-                type="primary"
-                :loading="refreshingServiceStatus"
-                :disabled="submission.submitting"
-                @click="refreshSubmissionService(true)"
-              >
-                刷新提交进度
-              </el-button>
-              <el-button
-                v-if="submission.requestError && !submission.submission && submission.requestAction"
-                type="primary"
-                :loading="submission.submitting || submission.polling"
-                :disabled="submission.requestAction === 'retry' && submission.oaSubmissionEnabled !== true"
-                @click="submission.requestAction === 'retry' ? retrySameSubmission() : retrySubmissionRecovery()"
-              >
-                {{ submission.requestAction === 'retry' ? '重试本次提交' : '重新查找提交记录' }}
-              </el-button>
-            </div>
-          </section>
-          <el-alert
-            v-else-if="drafts.currentDraft.status === 'LOCKED'"
-            title="这笔报销已锁定，暂未读取到提交记录"
-            type="warning"
-            :closable="false"
-            class="workspace-alert"
-          >
-            <div class="submission-feedback-actions">
-              <el-button
-                type="primary"
-                :loading="submission.polling"
-                @click="retrySubmissionRecovery"
-              >
-                重新查找提交记录
-              </el-button>
-            </div>
-          </el-alert>
-          <template v-if="submittedReimbursement">
-            <ExpenseItemsCard
-              v-if="expense.items.length || drafts.files.length"
-              :mobile="props.mobile"
-              readonly
-              submitted
-              @refresh-draft="openSavedReimbursement(drafts.currentDraft.id)"
-            />
-            <TripSubsidyCard
-              v-if="expense.includeSubsidy"
-              :mobile="props.mobile"
-              :approvals="selectedSubsidyApprovals"
-              :approval-trip-type="submittedSubsidyTripType"
-              readonly
-            />
-          </template>
-          <nav
-            v-if="props.mobile && !submittedResult"
-            class="mobile-step-nav"
-            aria-label="报销填写步骤"
-          >
-            <button
-              v-for="(step, index) in mobileSteps"
-              :key="step"
-              type="button"
-              :class="{ 'is-active': mobileStep === index, 'is-done': mobileStep > index }"
-              :aria-current="mobileStep === index ? 'step' : undefined"
-              :aria-controls="`reimbursement-step-${index}`"
-              @click="selectMobileStep(index)"
-            >
-              <span>{{ index + 1 }}</span>
-              <small>{{ step }}</small>
-            </button>
-          </nav>
-          <section
-            v-if="!submittedResult"
-            v-show="!props.mobile || mobileStep === 0"
-            id="reimbursement-step-0"
-            class="mobile-step-panel"
-            data-testid="mobile-approval-step"
-          >
-            <header
-              v-if="props.mobile"
-              class="mobile-step-heading"
-            >
-              <h2>关联出差审批</h2>
-              <p>先选择本次报销对应的审批，报销范围和补助将自动生成。</p>
-            </header>
-            <el-card
-              shadow="never"
-              class="content-card reimbursement-card"
-              data-testid="reimbursement-basics-card"
-            >
-              <template #header>
-                <div class="card-header">
-                  <strong>基本信息</strong>
+                  <WarningFilled />
+                </el-icon>
+                <div>
+                  <h2 id="manual-review-title">
+                    提交结果待人工核对
+                  </h2>
+                  <p>请将提交编号发给管理员核对。核对后可在这里刷新进度。</p>
                 </div>
-              </template>
-              <el-descriptions
-                :column="props.mobile ? 1 : 2"
-                border
-                class="identity-grid"
+              </header>
+              <dl class="manual-review-details">
+                <dt>提交编号</dt><dd>{{ submission.submission.submissionId }}</dd>
+                <template v-if="submission.submission.error?.message">
+                  <dt>状态说明</dt><dd>{{ submission.submission.error.message }}</dd>
+                </template>
+              </dl>
+              <p
+                v-if="submission.requestError"
+                class="manual-review-error"
               >
-                <el-descriptions-item label="姓名">
-                  {{ auth.session?.user.name }}
-                </el-descriptions-item>
-                <el-descriptions-item label="部门">
-                  {{ auth.session?.selectedDepartment?.name }}
-                </el-descriptions-item>
-              </el-descriptions>
-
-              <TravelApprovalSelector
-                :key="reimbursementSubject"
-                ref="approvalSelector"
-                :delegated="Boolean(auth.session?.operator)"
-                :model-value="selectedRelatedApprovals"
-                :mobile="props.mobile"
-                :linked-approvals="drafts.currentDraft.relatedApprovals"
-                :readonly="formReadOnly"
-                :busy="drafts.processingFiles || verifyingRelatedApprovals || bindingApprovalDepartment"
-                @update:model-value="updateRelatedApprovals"
+                {{ submission.requestError }}
+              </p>
+              <div class="manual-review-actions submission-feedback-actions">
+                <el-button
+                  v-if="submission.submission.processInstanceId"
+                  class="submission-recheck-action"
+                  :loading="submission.submitting"
+                  :disabled="refreshingServiceStatus"
+                  @click="submission.recheck()"
+                >
+                  重新核对（不会重复提交）
+                </el-button>
+                <el-button
+                  type="primary"
+                  :loading="refreshingServiceStatus"
+                  :disabled="submission.submitting"
+                  @click="refreshSubmissionService(true)"
+                >
+                  刷新提交进度
+                </el-button>
+              </div>
+            </section>
+            <section
+              v-else-if="submission.activeDraftId === drafts.currentDraft.id && (submission.progressLabel || submission.errorMessage)"
+              class="submission-status submission-feedback-panel"
+              :class="`submission-feedback-panel--${submissionAlertType}`"
+              aria-labelledby="submission-feedback-title"
+              aria-live="polite"
+              data-testid="submission-status"
+              data-attention-target="submission"
+            >
+              <header class="submission-feedback-heading">
+                <el-icon
+                  class="submission-feedback-icon"
+                  aria-hidden="true"
+                >
+                  <CircleCloseFilled v-if="submissionAlertType === 'error'" />
+                  <WarningFilled v-else-if="submissionAlertType === 'warning'" />
+                  <InfoFilled v-else />
+                </el-icon>
+                <div>
+                  <h2 id="submission-feedback-title">
+                    {{ submission.progressLabel || '提交需要处理' }}
+                  </h2>
+                  <p v-if="submission.errorMessage">
+                    {{ submission.errorMessage }}
+                  </p>
+                </div>
+              </header>
+              <el-progress
+                v-if="submission.status && submissionProgress.includes(submission.status)"
+                :percentage="submissionProgressPercentage"
               />
-              <section
-                class="derived-accounting-section"
-                data-testid="derived-accounting-summary"
-                aria-labelledby="derived-accounting-heading"
-              >
-                <div class="derived-accounting-heading">
-                  <div>
-                    <h2 id="derived-accounting-heading">
-                      已自动带入
-                    </h2>
-                    <p>以所选出差审批为准，无需重复填写。</p>
-                  </div>
-                </div>
-                <dl
-                  v-if="props.mobile"
-                  class="derived-accounting-list"
-                  data-testid="derived-accounting-mobile-list"
+              <p v-if="submission.submission?.businessId">
+                审批编号：{{ submission.submission.businessId }}
+              </p>
+              <p v-if="pendingNewApproval">
+                已选出差审批。打开报销表单后可继续处理该审批。
+              </p>
+              <div class="submission-status-actions submission-feedback-actions">
+                <el-button
+                  v-if="submission.status === 'FAILED_FINAL' && !drafts.currentDraft.workspaceRetired"
+                  type="primary"
+                  :disabled="workspaceConfirmationRequired || drafts.busy || reimbursementOptionsUnavailable"
+                  :loading="recoveringReimbursement"
+                  @click="recoverFailedReimbursement"
                 >
-                  <div class="derived-accounting-list__row">
-                    <dt>所属公司</dt>
-                    <dd>{{ displayedCompanyLabel || '选择出差审批后自动填入' }}</dd>
+                  保留内容重新处理
+                </el-button>
+                <el-button
+                  v-if="submission.submission && !submission.terminal"
+                  type="primary"
+                  :loading="refreshingServiceStatus"
+                  :disabled="submission.submitting"
+                  @click="refreshSubmissionService(true)"
+                >
+                  刷新提交进度
+                </el-button>
+                <el-button
+                  v-if="submission.requestError && !submission.submission && submission.requestAction"
+                  type="primary"
+                  :loading="submission.submitting || submission.polling"
+                  :disabled="submission.requestAction === 'retry' && submission.oaSubmissionEnabled !== true"
+                  @click="submission.requestAction === 'retry' ? retrySameSubmission() : retrySubmissionRecovery()"
+                >
+                  {{ submission.requestAction === 'retry' ? '重试本次提交' : '重新查找提交记录' }}
+                </el-button>
+              </div>
+            </section>
+            <el-alert
+              v-else-if="drafts.currentDraft.status === 'LOCKED'"
+              title="这笔报销已锁定，暂未读取到提交记录"
+              type="warning"
+              :closable="false"
+              class="workspace-alert"
+            >
+              <div class="submission-feedback-actions">
+                <el-button
+                  type="primary"
+                  :loading="submission.polling"
+                  @click="retrySubmissionRecovery"
+                >
+                  重新查找提交记录
+                </el-button>
+              </div>
+            </el-alert>
+            <template v-if="submittedReimbursement">
+              <ExpenseItemsCard
+                v-if="expense.items.length || drafts.files.length"
+                :mobile="props.mobile"
+                readonly
+                submitted
+                @refresh-draft="openSavedReimbursement(drafts.currentDraft.id)"
+              />
+              <TripSubsidyCard
+                v-if="expense.includeSubsidy"
+                :mobile="props.mobile"
+                :approvals="selectedSubsidyApprovals"
+                :approval-trip-type="submittedSubsidyTripType"
+                readonly
+              />
+            </template>
+            <nav
+              v-if="props.mobile && !submittedResult"
+              class="mobile-step-nav"
+              aria-label="报销填写步骤"
+            >
+              <button
+                v-for="(step, index) in mobileSteps"
+                :key="step"
+                type="button"
+                :class="{ 'is-active': mobileStep === index, 'is-done': mobileStep > index }"
+                :aria-current="mobileStep === index ? 'step' : undefined"
+                :aria-controls="`reimbursement-step-${index}`"
+                @click="selectMobileStep(index)"
+              >
+                <span>{{ index + 1 }}</span>
+                <small>{{ step }}</small>
+              </button>
+            </nav>
+            <section
+              v-if="!submittedResult"
+              v-show="!props.mobile || mobileStep === 0"
+              id="reimbursement-step-0"
+              class="mobile-step-panel"
+              data-testid="mobile-approval-step"
+            >
+              <header
+                v-if="props.mobile"
+                class="mobile-step-heading"
+              >
+                <h2>{{ isGeneral ? '基本信息' : '关联出差审批' }}</h2>
+                <p v-if="!isGeneral">
+                  先选择本次报销对应的审批，报销范围和补助将自动生成。
+                </p>
+              </header>
+              <el-card
+                shadow="never"
+                class="content-card reimbursement-card"
+                data-testid="reimbursement-basics-card"
+              >
+                <template
+                  v-if="!props.mobile || !isGeneral"
+                  #header
+                >
+                  <div class="card-header">
+                    <strong>基本信息</strong>
                   </div>
-                  <div class="derived-accounting-list__row">
-                    <dt>预算代码 / 项目</dt>
-                    <dd>{{ displayedBudgetLabel || '选择出差审批后自动填入' }}</dd>
+                </template>
+                <el-descriptions
+                  :column="props.mobile ? 1 : 2"
+                  border
+                  class="identity-grid"
+                >
+                  <el-descriptions-item label="姓名">
+                    {{ auth.session?.user.name }}
+                  </el-descriptions-item>
+                  <el-descriptions-item label="部门">
+                    <div
+                      v-if="showDepartmentChange"
+                      class="department-identity"
+                    >
+                      <span>{{ drafts.currentDraft?.department.name ?? auth.session?.selectedDepartment?.name }}</span>
+                      <el-button
+                        link
+                        type="primary"
+                        :disabled="Boolean(reimbursementOperationBlock || reimbursementSwitchRecheck)"
+                        :title="reimbursementOperationBlock || reimbursementSwitchRecheck"
+                        @click="openDepartmentPicker"
+                      >
+                        更换部门
+                      </el-button>
+                    </div>
+                    <template v-else>
+                      {{ drafts.currentDraft?.department.name ?? auth.session?.selectedDepartment?.name }}
+                    </template>
+                  </el-descriptions-item>
+                </el-descriptions>
+
+                <el-form
+                  v-if="isGeneral"
+                  :disabled="formReadOnly || drafts.processingFiles"
+                  label-position="top"
+                  class="general-accounting-form"
+                  @submit.prevent
+                >
+                  <el-form-item
+                    label="报销主体"
+                    :error="generalCompanyError"
+                    required
+                  >
+                    <el-select
+                      v-model="companyValue"
+                      aria-label="报销主体"
+                      filterable
+                      placeholder="请选择报销主体"
+                      class="full-width"
+                    >
+                      <el-option
+                        v-for="option in companyOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                  </el-form-item>
+                  <el-form-item
+                    label="预算代码"
+                    :error="generalBudgetError"
+                    required
+                  >
+                    <el-select
+                      v-model="budgetCodeValue"
+                      aria-label="预算代码"
+                      filterable
+                      placeholder="请选择预算代码"
+                      class="full-width"
+                    >
+                      <el-option
+                        v-for="option in budgetOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                  </el-form-item>
+                </el-form>
+                <GeneralApprovalPicker
+                  v-if="isGeneral"
+                  :key="drafts.currentDraft.id"
+                  v-model:expanded="generalApprovalOpen"
+                  :draft-id="drafts.currentDraft.id"
+                  :model-value="generalApprovalIds"
+                  :saved-approvals="drafts.currentDraft.input.generalApprovalSummaries"
+                  :mobile="props.mobile"
+                  :active="!props.mobile || mobileStep === 0"
+                  :readonly="formReadOnly && !verifyingRelatedApprovals"
+                  :busy="verifyingRelatedApprovals || drafts.processingFiles || drafts.busy"
+                  :save-error="generalApprovalError"
+                  @update:model-value="saveGeneralApprovalSelection"
+                />
+                <TravelApprovalSelector
+                  v-else
+                  :key="reimbursementSubject"
+                  ref="approvalSelector"
+                  :delegated="Boolean(auth.session?.operator)"
+                  :model-value="selectedRelatedApprovals"
+                  :mobile="props.mobile"
+                  :linked-approvals="drafts.currentDraft.relatedApprovals"
+                  :readonly="formReadOnly && !canRecoverTravelDepartmentFromApproval"
+                  :busy="drafts.processingFiles || verifyingRelatedApprovals || bindingApprovalDepartment"
+                  @update:model-value="updateRelatedApprovals"
+                />
+                <section
+                  v-if="!isGeneral"
+                  class="derived-accounting-section"
+                  data-testid="derived-accounting-summary"
+                  aria-labelledby="derived-accounting-heading"
+                >
+                  <div class="derived-accounting-heading">
+                    <div>
+                      <h2 id="derived-accounting-heading">
+                        已自动带入
+                      </h2>
+                      <p>以所选出差审批为准，无需重复填写。</p>
+                    </div>
                   </div>
-                  <div class="derived-accounting-list__row">
-                    <dt>出差类别</dt>
-                    <dd>{{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}</dd>
-                  </div>
-                  <div class="derived-accounting-list__row">
-                    <dt>出差日期</dt>
-                    <dd>
+                  <dl
+                    v-if="props.mobile"
+                    class="derived-accounting-list"
+                    data-testid="derived-accounting-mobile-list"
+                  >
+                    <div class="derived-accounting-list__row">
+                      <dt>所属公司</dt>
+                      <dd>{{ displayedCompanyLabel || '选择出差审批后自动填入' }}</dd>
+                    </div>
+                    <div class="derived-accounting-list__row">
+                      <dt>预算代码 / 项目</dt>
+                      <dd>{{ displayedBudgetLabel || '选择出差审批后自动填入' }}</dd>
+                    </div>
+                    <div class="derived-accounting-list__row">
+                      <dt>出差类别</dt>
+                      <dd>{{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}</dd>
+                    </div>
+                    <div class="derived-accounting-list__row">
+                      <dt>出差日期</dt>
+                      <dd>
+                        <div
+                          v-if="selectedTravelPeriods.length"
+                          class="travel-periods travel-periods--mobile"
+                          data-testid="travel-periods"
+                        >
+                          <span
+                            v-if="selectedTravelPeriods.length > 1"
+                            class="travel-periods__count"
+                          >共 {{ selectedTravelPeriods.length }} 个时间段</span>
+                          <span
+                            v-for="period in selectedTravelPeriods"
+                            :key="`${period.startDate}-${period.endDate}`"
+                            class="travel-periods__item"
+                            :aria-label="period.startDate === period.endDate
+                              ? period.startDate
+                              : `${period.startDate} 至 ${period.endDate}`"
+                          >
+                            <time :datetime="period.startDate">{{ period.startDate }}</time>
+                            <template v-if="period.startDate !== period.endDate">
+                              <span aria-hidden="true">至</span>
+                              <time :datetime="period.endDate">{{ period.endDate }}</time>
+                            </template>
+                          </span>
+                        </div>
+                        <template v-else>
+                          选择出差审批后自动填入
+                        </template>
+                      </dd>
+                    </div>
+                  </dl>
+                  <el-descriptions
+                    v-else
+                    :column="2"
+                    border
+                    class="derived-accounting-grid"
+                  >
+                    <el-descriptions-item label="所属公司">
+                      {{ displayedCompanyLabel || '选择出差审批后自动填入' }}
+                    </el-descriptions-item>
+                    <el-descriptions-item label="预算代码 / 项目">
+                      {{ displayedBudgetLabel || '选择出差审批后自动填入' }}
+                    </el-descriptions-item>
+                    <el-descriptions-item label="出差类别">
+                      {{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}
+                    </el-descriptions-item>
+                    <el-descriptions-item label="出差日期">
                       <div
                         v-if="selectedTravelPeriods.length"
-                        class="travel-periods travel-periods--mobile"
+                        class="travel-periods"
                         data-testid="travel-periods"
                       >
                         <span
@@ -2907,7 +3782,7 @@ onBeforeUnmount(() => {
                         >
                           <time :datetime="period.startDate">{{ period.startDate }}</time>
                           <template v-if="period.startDate !== period.endDate">
-                            <span aria-hidden="true">至</span>
+                            <span aria-hidden="true">—</span>
                             <time :datetime="period.endDate">{{ period.endDate }}</time>
                           </template>
                         </span>
@@ -2915,283 +3790,263 @@ onBeforeUnmount(() => {
                       <template v-else>
                         选择出差审批后自动填入
                       </template>
-                    </dd>
-                  </div>
-                </dl>
-                <el-descriptions
-                  v-else
-                  :column="2"
-                  border
-                  class="derived-accounting-grid"
-                >
-                  <el-descriptions-item label="所属公司">
-                    {{ displayedCompanyLabel || '选择出差审批后自动填入' }}
-                  </el-descriptions-item>
-                  <el-descriptions-item label="预算代码 / 项目">
-                    {{ displayedBudgetLabel || '选择出差审批后自动填入' }}
-                  </el-descriptions-item>
-                  <el-descriptions-item label="出差类别">
-                    {{ selectedTravelTypeLabel || '选择出差审批后自动填入' }}
-                  </el-descriptions-item>
-                  <el-descriptions-item label="出差日期">
-                    <div
-                      v-if="selectedTravelPeriods.length"
-                      class="travel-periods"
-                      data-testid="travel-periods"
+                    </el-descriptions-item>
+                  </el-descriptions>
+                  <el-alert
+                    v-if="relatedApprovalVerificationError"
+                    :title="relatedApprovalVerificationError"
+                    type="error"
+                    show-icon
+                    :closable="false"
+                    class="related-approval-verification-error"
+                  >
+                    <el-button
+                      :disabled="drafts.busy || formReadOnly"
+                      @click="refreshFormOptions"
                     >
-                      <span
-                        v-if="selectedTravelPeriods.length > 1"
-                        class="travel-periods__count"
-                      >共 {{ selectedTravelPeriods.length }} 个时间段</span>
-                      <span
-                        v-for="period in selectedTravelPeriods"
-                        :key="`${period.startDate}-${period.endDate}`"
-                        class="travel-periods__item"
-                        :aria-label="period.startDate === period.endDate
-                          ? period.startDate
-                          : `${period.startDate} 至 ${period.endDate}`"
-                      >
-                        <time :datetime="period.startDate">{{ period.startDate }}</time>
-                        <template v-if="period.startDate !== period.endDate">
-                          <span aria-hidden="true">—</span>
-                          <time :datetime="period.endDate">{{ period.endDate }}</time>
-                        </template>
-                      </span>
-                    </div>
-                    <template v-else>
-                      选择出差审批后自动填入
-                    </template>
-                  </el-descriptions-item>
-                </el-descriptions>
+                      刷新表单与审批
+                    </el-button>
+                  </el-alert>
+                  <p class="field-help">
+                    所属公司和预算代码由关联审批自动填入，不可修改；预算代码完整名称会填入报销单 Excel 的项目栏。
+                  </p>
+                </section>
                 <el-alert
-                  v-if="relatedApprovalVerificationError"
-                  :title="relatedApprovalVerificationError"
-                  type="error"
-                  show-icon
+                  v-if="formReadOnlyReason"
+                  :title="formReadOnlyReason"
+                  type="info"
                   :closable="false"
-                  class="related-approval-verification-error"
+                />
+              </el-card>
+            </section>
+            <fieldset
+              v-if="!submittedResult"
+              v-show="!props.mobile || mobileStep === materialStep || (!isGeneral && mobileStep === 1)"
+              class="editor-fieldset"
+              :disabled="formReadOnly || drafts.processingFiles"
+            >
+              <section
+                v-if="!isGeneral"
+                v-show="!props.mobile || mobileStep === 1"
+                id="reimbursement-step-1"
+                class="mobile-step-panel"
+                data-testid="mobile-subsidy-step"
+              >
+                <header
+                  v-if="props.mobile"
+                  class="mobile-step-heading"
                 >
-                  <el-button
-                    :disabled="drafts.busy || formReadOnly"
-                    @click="refreshFormOptions"
-                  >
-                    刷新表单与审批
-                  </el-button>
-                </el-alert>
-                <p class="field-help">
-                  所属公司和预算代码由关联审批自动填入，不可修改；预算代码完整名称会填入报销单 Excel 的项目栏。
-                </p>
+                  <h2>范围与补助</h2>
+                  <p>
+                    所属公司、预算、类别和日期来自已关联审批，只需核对补助。
+                  </p>
+                </header>
+                <TripSubsidyCard
+                  :mobile="props.mobile"
+                  :readonly="formReadOnly"
+                  :approvals="selectedSubsidyApprovals"
+                  :approval-trip-type="selectedSubsidyTripType"
+                />
               </section>
-              <el-alert
-                v-if="formReadOnlyReason"
-                :title="formReadOnlyReason"
-                type="info"
-                :closable="false"
-              />
-            </el-card>
-          </section>
-          <fieldset
-            v-if="!submittedResult"
-            class="editor-fieldset"
-            :disabled="formReadOnly || drafts.processingFiles"
-          >
-            <section
-              v-show="!props.mobile || mobileStep === 1"
-              id="reimbursement-step-1"
-              class="mobile-step-panel"
-              data-testid="mobile-subsidy-step"
-            >
-              <header
-                v-if="props.mobile"
-                class="mobile-step-heading"
+              <section
+                v-show="!props.mobile || mobileStep === materialStep"
+                :id="`reimbursement-step-${materialStep}`"
+                class="mobile-step-panel"
+                data-testid="mobile-material-step"
               >
-                <h2>范围与补助</h2>
-                <p>所属公司、预算、类别和日期来自已关联审批，只需核对补助。</p>
-              </header>
-              <TripSubsidyCard
-                :mobile="props.mobile"
-                :readonly="formReadOnly"
-                :approvals="selectedSubsidyApprovals"
-                :approval-trip-type="selectedSubsidyTripType"
-              />
-            </section>
-            <section
-              v-show="!props.mobile || mobileStep === 2"
-              id="reimbursement-step-2"
-              class="mobile-step-panel"
-              data-testid="mobile-material-step"
-            >
-              <header
-                v-if="props.mobile"
-                class="mobile-step-heading"
-              >
-                <h2>费用与材料</h2>
-                <p>仅申请出差补助时无需添加费用或上传材料；其他费用可从文件管理器或系统相册添加。</p>
-              </header>
-              <ExpenseItemsCard
-                ref="expenseItemsCard"
-                :mobile="props.mobile"
-                :readonly="formReadOnly"
-                :refreshing-material-status="refreshingMaterialStatus"
-                @refresh-draft="openSavedReimbursement(drafts.currentDraft.id)"
-                @refresh-material-status="refreshMaterialStatus"
-                @material-revision-changed="reconcileMaterialRevision"
-              />
-            </section>
-          </fieldset>
-          <section
-            v-if="!submittedResult"
-            v-show="!props.mobile || mobileStep === 3"
-            id="reimbursement-step-3"
-            class="mobile-step-panel"
-            data-testid="mobile-review-step"
-          >
-            <header
-              v-if="props.mobile"
-              class="mobile-step-heading"
-            >
-              <h2>核对并提交</h2>
-              <p>确认金额、票据张数、材料完整性和即将生成的 OA 附件。</p>
-            </header>
-            <ReimbursementReviewOverview
-              :mobile="props.mobile"
-              :company="displayedCompanyLabel"
-              :budget="displayedBudgetLabel"
-              :department="auth.session?.selectedDepartment?.name ?? ''"
-              :periods="selectedTravelPeriods"
-              :approval-count="selectedRelatedApprovals.length"
-              @approvals="focusReviewApprovals"
-            />
-            <ExpenseSummaryCard
-              :mobile="props.mobile"
-              :readonly="formReadOnly"
-              :preview-disabled-reason="previewDisabledReason"
-              :before-preview="props.mobile || formReadOnly ? undefined : prepareExcelPreview"
-            >
-              <template #submission>
-                <div
-                  v-if="!formReadOnly && (drafts.pendingUploads.length || missingMaterialItems.length || materialSubmissionIssues.length)"
-                  class="material-checklist"
-                  data-testid="material-checklist"
-                  role="status"
+                <header
+                  v-if="props.mobile"
+                  class="mobile-step-heading"
                 >
+                  <h2>费用与材料</h2>
+                  <p>
+                    可从文件管理器或系统相册上传票据和证明材料。
+                  </p>
+                  <p v-if="!isGeneral">
+                    仅申请出差补助时无需添加费用或上传材料。
+                  </p>
+                </header>
+                <ExpenseItemsCard
+                  ref="expenseItemsCard"
+                  :mobile="props.mobile"
+                  :readonly="formReadOnly"
+                  :refreshing-material-status="refreshingMaterialStatus"
+                  @refresh-draft="openSavedReimbursement(drafts.currentDraft.id)"
+                  @refresh-material-status="refreshMaterialStatus"
+                  @material-revision-changed="reconcileMaterialRevision"
+                />
+              </section>
+            </fieldset>
+            <section
+              v-if="!submittedResult"
+              v-show="!props.mobile || mobileStep === reviewStep"
+              :id="`reimbursement-step-${reviewStep}`"
+              class="mobile-step-panel"
+              data-testid="mobile-review-step"
+            >
+              <header
+                v-if="props.mobile"
+                class="mobile-step-heading"
+              >
+                <h2>核对并提交</h2>
+                <p>确认金额、票据张数、材料完整性和即将生成的 OA 附件。</p>
+              </header>
+              <ReimbursementReviewOverview
+                :mobile="props.mobile"
+                :general="isGeneral"
+                :company="displayedCompanyLabel"
+                :budget="displayedBudgetLabel"
+                :department="drafts.currentDraft?.department.name ?? ''"
+                :periods="selectedTravelPeriods"
+                :subjects="usedSubjects.map(option => option.label)"
+                :approval-count="isGeneral ? generalApprovalIds.length : selectedRelatedApprovals.length"
+                @approvals="focusReviewApprovals"
+              />
+              <ExpenseSummaryCard
+                :mobile="props.mobile"
+                :readonly="formReadOnly"
+                :preview-disabled-reason="previewDisabledReason"
+                :before-preview="props.mobile || formReadOnly ? undefined : prepareExcelPreview"
+              >
+                <template #submission>
                   <div
-                    v-if="drafts.pendingUploads.length"
-                    class="material-checklist-row"
+                    v-if="!formReadOnly && (localUploadFailureReason || drafts.pendingUploads.length || missingMaterialItems.length || materialSubmissionIssues.length)"
+                    class="material-checklist"
+                    data-testid="material-checklist"
+                    role="status"
                   >
-                    <strong>还有 {{ drafts.pendingUploads.length }} 份材料尚未完成上传</strong>
-                    <el-button
-                      link
-                      type="primary"
-                      @click="focusMobileMaterial()"
+                    <div
+                      v-if="localUploadFailureReason"
+                      class="material-checklist-row"
+                      data-testid="local-upload-failure"
                     >
-                      去查看上传进度
-                    </el-button>
-                  </div>
-                  <strong v-if="missingMaterialItems.length">还有 {{ missingMaterialItems.length }} 笔费用需补材料</strong>
-                  <div
-                    v-for="entry in missingMaterialItems"
-                    :key="entry.item.id"
-                    class="material-checklist-row"
-                  >
-                    <span>{{ entry.item.description || '费用明细' }} · ¥{{ entry.item.amount }} · 缺{{ entry.missing.join('、') }}</span>
-                    <el-button
-                      link
-                      type="primary"
-                      @click="focusMobileMaterial(entry.item.id)"
-                    >
-                      去补齐
-                    </el-button>
-                  </div>
-                  <strong v-if="materialSubmissionIssues.length">
-                    还有 {{ materialSubmissionIssues.length }} 份材料需处理后才能提交 OA
-                  </strong>
-                  <div
-                    v-for="issue in materialSubmissionIssues"
-                    :key="issue.file.id"
-                    class="material-checklist-row"
-                  >
-                    <span>{{ issue.file.name }} · {{ issue.reason }}</span>
-                    <el-button
-                      link
-                      type="primary"
-                      @click="focusMobileMaterial(issue.itemId, issue.itemId ? undefined : issue.file.id)"
-                    >
-                      去处理
-                    </el-button>
-                  </div>
-                  <p>请先处理上面列出的材料，再提交 OA。</p>
-                </div>
-                <div class="submission-actions">
-                  <div
-                    class="submission-attachments"
-                    data-testid="submission-attachments"
-                  >
-                    <strong>{{ drafts.currentDraft.status === 'LOCKED' ? 'OA 附件' : '预计 OA 附件' }}</strong>
-                    <ul v-if="attachmentNames.length">
-                      <li
-                        v-for="name in attachmentNames"
-                        :key="name"
+                      <span>{{ localUploadFailureReason }}</span>
+                      <el-button
+                        link
+                        type="primary"
+                        @click="focusMobileMaterial()"
                       >
-                        {{ name }}
-                      </li>
-                    </ul>
-                    <p v-else>
-                      {{ attachmentPendingHint }}
-                    </p>
+                        去处理失败文件
+                      </el-button>
+                    </div>
+                    <div
+                      v-if="drafts.pendingUploads.length"
+                      class="material-checklist-row"
+                    >
+                      <strong>还有 {{ drafts.pendingUploads.length }} 份材料尚未完成上传</strong>
+                      <el-button
+                        link
+                        type="primary"
+                        @click="focusMobileMaterial()"
+                      >
+                        去查看上传进度
+                      </el-button>
+                    </div>
+                    <strong v-if="missingMaterialItems.length">还有 {{ missingMaterialItems.length }} 笔费用需补材料</strong>
+                    <div
+                      v-for="entry in missingMaterialItems"
+                      :key="entry.item.id"
+                      class="material-checklist-row"
+                    >
+                      <span>{{ entry.item.description || '费用明细' }} · ¥{{ entry.item.amount }} · 缺{{ entry.missing.join('、') }}</span>
+                      <el-button
+                        link
+                        type="primary"
+                        @click="focusMobileMaterial(entry.item.id)"
+                      >
+                        去补齐
+                      </el-button>
+                    </div>
+                    <strong v-if="materialSubmissionIssues.length">
+                      还有 {{ materialSubmissionIssues.length }} 份材料需处理后才能提交 OA
+                    </strong>
+                    <div
+                      v-for="issue in materialSubmissionIssues"
+                      :key="issue.file.id"
+                      class="material-checklist-row"
+                    >
+                      <span>{{ issue.file.name }} · {{ issue.reason }}</span>
+                      <el-button
+                        link
+                        type="primary"
+                        @click="focusMobileMaterial(issue.itemId, issue.itemId ? undefined : issue.file.id)"
+                      >
+                        去处理
+                      </el-button>
+                    </div>
+                    <p>请先处理上面列出的材料，再提交 OA。</p>
                   </div>
+                  <div class="submission-actions">
+                    <div
+                      class="submission-attachments"
+                      data-testid="submission-attachments"
+                    >
+                      <strong>{{ drafts.currentDraft.status === 'LOCKED' ? 'OA 附件' : '预计 OA 附件' }}</strong>
+                      <ul v-if="attachmentNames.length">
+                        <li
+                          v-for="name in attachmentNames"
+                          :key="name"
+                        >
+                          {{ name }}
+                        </li>
+                      </ul>
+                      <p v-else>
+                        {{ attachmentPendingHint }}
+                      </p>
+                    </div>
+                    <el-button
+                      v-if="!props.mobile"
+                      type="primary"
+                      size="large"
+                      :loading="submitFlowPending || submission.submitting"
+                      :disabled="Boolean(submissionButtonReason)"
+                      :title="submissionButtonReason"
+                      @click="confirmAndSubmit"
+                    >
+                      提交 OA
+                    </el-button>
+                  </div>
+                </template>
+              </ExpenseSummaryCard>
+            </section>
+            <div
+              v-if="props.mobile && !submittedResult"
+              ref="mobileFooterDock"
+              class="mobile-step-footer-dock"
+            >
+              <footer class="mobile-step-footer">
+                <div class="mobile-footer-total">
+                  <span>当前合计</span>
+                  <strong>{{ expense.pendingTotalLabel || `¥${expense.displayTotal}` }}</strong>
+                </div>
+                <div class="mobile-footer-actions">
                   <el-button
-                    v-if="!props.mobile"
-                    type="primary"
-                    size="large"
-                    :loading="submitFlowPending || submission.submitting"
-                    :disabled="Boolean(submissionButtonReason)"
-                    :title="submissionButtonReason"
-                    @click="confirmAndSubmit"
+                    v-if="mobileStep > 0"
+                    @click="selectMobileStep(mobileStep - 1)"
                   >
-                    提交 OA
+                    上一步
+                  </el-button>
+                  <el-button
+                    type="primary"
+                    :loading="mobileStep === reviewStep && (canReplaceOutdatedForm
+                      ? replacingTemplate
+                      : submitFlowPending || submission.submitting)"
+                    :disabled="mobileStep === reviewStep && (canReplaceOutdatedForm
+                      ? drafts.busy
+                      : !formReadOnly && Boolean(submissionButtonReason))"
+                    :title="mobileStep === reviewStep && !formReadOnly ? submissionButtonReason : ''"
+                    @click="handleMobilePrimaryAction"
+                  >
+                    {{ mobileStep === reviewStep && canReplaceOutdatedForm
+                      ? '按新表单重新填写'
+                      : formReadOnly ? '查看报销状态' : mobileNextLabel }}
                   </el-button>
                 </div>
-              </template>
-            </ExpenseSummaryCard>
-          </section>
-          <div
-            v-if="props.mobile && !submittedResult"
-            ref="mobileFooterDock"
-            class="mobile-step-footer-dock"
-          >
-            <footer class="mobile-step-footer">
-              <div class="mobile-footer-total">
-                <span>当前合计</span>
-                <strong>{{ expense.pendingTotalLabel || `¥${expense.displayTotal}` }}</strong>
-              </div>
-              <div class="mobile-footer-actions">
-                <el-button
-                  v-if="mobileStep > 0"
-                  @click="selectMobileStep(mobileStep - 1)"
-                >
-                  上一步
-                </el-button>
-                <el-button
-                  type="primary"
-                  :loading="mobileStep === 3 && (canReplaceOutdatedForm
-                    ? replacingTemplate
-                    : submitFlowPending || submission.submitting)"
-                  :disabled="mobileStep === 3 && (canReplaceOutdatedForm
-                    ? drafts.busy
-                    : !formReadOnly && Boolean(submissionButtonReason))"
-                  :title="mobileStep === 3 && !formReadOnly ? submissionButtonReason : ''"
-                  @click="handleMobilePrimaryAction"
-                >
-                  {{ mobileStep === 3 && canReplaceOutdatedForm
-                    ? '按新表单重新填写'
-                    : formReadOnly ? '查看报销状态' : mobileNextLabel }}
-                </el-button>
-              </div>
-            </footer>
-          </div>
+              </footer>
+            </div>
+          </template>
         </template>
-      </template>
+      </div>
     </template>
     <el-card
       v-else
@@ -3227,7 +4082,7 @@ onBeforeUnmount(() => {
       destroy-on-close
     >
       <p class="history-caption">
-        {{ auth.session?.selectedDepartment?.name }} · 最近 10 笔成功提交
+        本人最近 10 笔成功提交的报销
       </p>
       <el-skeleton
         v-if="historyLoading"
@@ -3241,7 +4096,7 @@ onBeforeUnmount(() => {
         role="alert"
       >
         <span>{{ historyError }}</span>
-        <el-button @click="loadHistory">
+        <el-button @click="loadHistory()">
           重新加载记录
         </el-button>
       </div>
@@ -3249,7 +4104,7 @@ onBeforeUnmount(() => {
         v-else-if="!historyRecords.length"
         class="history-state"
       >
-        当前部门还没有成功提交 OA 的报销记录。
+        暂无成功提交 OA 的报销记录。
       </p>
       <ul
         v-else
@@ -3269,7 +4124,13 @@ onBeforeUnmount(() => {
               >¥{{ draft.totalAmount }}</strong>
               <strong class="record-budget">{{ draft.budgetLabel || '报销明细' }}</strong>
             </div>
-            <small><time :datetime="draft.lockedAt">{{ formatRecordTime(draft.lockedAt) }}</time><template v-if="draft.relatedApprovalCount"> · {{ draft.relatedApprovalCount }} 张审批</template></small>
+            <small>
+              <template v-if="draft.kind">{{ draft.kind === 'general' ? '普通费用报销' : '差旅报销' }} · </template>
+              <template v-if="draft.beneficiaryName">代报 {{ draft.beneficiaryName }} · </template>
+              <template v-if="draft.department">{{ draft.department.name }} · </template>
+              <time :datetime="draft.lockedAt">{{ formatRecordTime(draft.lockedAt) }}</time>
+              <template v-if="draft.relatedApprovalCount"> · {{ draft.relatedApprovalCount }} 张审批</template>
+            </small>
           </div>
           <span
             v-if="draft.id === drafts.currentDraft?.id"
@@ -3280,13 +4141,21 @@ onBeforeUnmount(() => {
             class="record-action"
             link
             type="primary"
-            :disabled="drafts.busy || saving"
+            :disabled="drafts.busy || saving || Boolean(historyOpeningId)"
+            :loading="historyOpeningId === draft.id"
             @click="chooseHistoryRecord(draft.id)"
           >
             查看明细
           </el-button>
         </li>
       </ul>
+      <p
+        v-if="historyDetailError"
+        class="history-state"
+        role="alert"
+      >
+        {{ historyDetailError }}
+      </p>
     </el-dialog>
     <el-dialog
       :model-value="Boolean(pendingDepartmentApproval)"
@@ -3340,6 +4209,9 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.workspace-content { display: contents; }
+.reimbursement-kind-selector { margin: 10px 0 12px; }
+.general-accounting-form { margin-top: 20px; }
 .hero-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .hero-intro { flex: 1; min-width: 0; }
 .hero-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -3396,6 +4268,7 @@ p.reimbursement-switch-note { margin: 8px 0 0; }
   display: flex;
   flex-direction: column;
   gap: var(--workspace-gap);
+  padding-top: 24px;
 }
 .reimbursement-page > .hero,
 .reimbursement-page :is(.reimbursement-card, .summary-card) { margin-block: 0; }
@@ -3467,6 +4340,7 @@ p.reimbursement-switch-note { margin: 8px 0 0; }
   background: var(--el-fill-color-light);
 }
 .receipt-metrics > div { padding: 0 12px; min-width: 0; }
+.receipt-metrics--general { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .receipt-metrics > div + div { border-left: 1px solid var(--el-border-color-lighter); }
 .receipt-metrics dd, .receipt-info dd { margin: 4px 0 0; color: var(--el-text-color-primary); overflow-wrap: anywhere; }
 .receipt-metrics dd { font-weight: 650; }
@@ -3495,6 +4369,11 @@ p.reimbursement-switch-note { margin: 8px 0 0; }
 .submitted-receipt-toolbar > .receipt-attachment-summary { margin: 6px 0 0; }
 .department-choice-copy { margin: 0 0 16px; color: var(--el-text-color-regular); line-height: 1.7; }
 .department-choice-select { width: 100%; }
+.department-gate-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.department-switch-help { margin: 0 0 12px; }
+.department-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.travel-department-confirm { margin-top: 12px; }
+.content-card .department-gate-approvals { margin-top: 0; padding-top: 0; border-top: 0; }
 .identity-grid { margin-bottom: 0; }
 .form-options-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .form-options-actions .el-button { margin: 0; }
@@ -3690,6 +4569,9 @@ p.reimbursement-switch-note { margin: 8px 0 0; }
 .page-shell--mobile .submitted-receipt-actions > * { flex: 1 1 120px; }
 .page-shell--mobile .submitted-receipt-actions :deep(.el-button) { width: 100%; min-height: 44px; margin: 0; }
 .hero--mobile .hero-title { margin: 2px 0 6px; }
+.hero--mobile .reimbursement-kind-selector { margin: 6px 0 12px; }
+.hero--mobile .reimbursement-kind-buttons { display: flex; }
+.hero--mobile .reimbursement-kind-buttons .el-button { flex: 1; min-width: 0; min-height: 44px; }
 .hero--mobile h1 { font-size: 22px; }
 .hero--mobile .eyebrow { font-size: 12px; letter-spacing: .04em; }
 .hero--mobile .summary { font-size: 13px; line-height: 1.5; }
@@ -3699,7 +4581,8 @@ p.reimbursement-switch-note { margin: 8px 0 0; }
   top: 0;
   z-index: 9;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   gap: 4px;
   margin: 0 -4px;
   padding: 8px 4px;

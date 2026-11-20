@@ -356,9 +356,27 @@ def _iter_cells(workbook: Workbook) -> Iterable[object]:
             yield from row
 
 
+def expense_category_list_formula(labels: tuple[str, ...]) -> str:
+    formula = '"' + ",".join(labels) + '"'
+    if (
+        not labels
+        or len(formula) > 255
+        or any(
+            not label.strip()
+            or len(label) > 20
+            or any(char in {'"', ","} or ord(char) < 32 for char in label)
+            for label in labels
+        )
+    ):
+        raise ValueError("invalid workbook expense category options")
+    return formula
+
+
 def validate_workbook_safety(
     workbook: Workbook,
     layout: ExcelSheetLayout = BASE_SHEET_LAYOUT,
+    *,
+    expense_categories: tuple[str, ...] = (),
 ) -> Worksheet:
     """Reject active content and any workbook shape outside the fixed contract."""
 
@@ -389,13 +407,15 @@ def validate_workbook_safety(
             raise template_invalid()
         if cell.comment is not None:
             raise template_invalid()
-    validate_template_sheet(worksheet, layout)
+    validate_template_sheet(worksheet, layout, expense_categories=expense_categories)
     return worksheet
 
 
 def validate_template_sheet(
     worksheet: Worksheet,
     layout: ExcelSheetLayout = BASE_SHEET_LAYOUT,
+    *,
+    expense_categories: tuple[str, ...] = (),
 ) -> None:
     """Fail closed when the maintained template no longer matches the mapping."""
 
@@ -424,7 +444,12 @@ def validate_template_sheet(
     if (
         str(validation.sqref) != f"B{EXCEL_TEMPLATE.detail_start_row}:B{layout.detail_end_row}"
         or validation.type != "list"
-        or validation.formula1 != EXPECTED_CATEGORY_VALIDATION_FORMULA
+        or validation.formula1
+        != (
+            expense_category_list_formula(expense_categories)
+            if expense_categories
+            else EXPECTED_CATEGORY_VALIDATION_FORMULA
+        )
         or validation.formula2 not in {None, ""}
         or validation.operator is not None
         or validation.allowBlank is not False

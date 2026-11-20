@@ -231,6 +231,35 @@ class DingTalkWorkflowClient:
     def __init__(self, client: DingTalkOpenAPIClient) -> None:
         self._client = client
 
+    async def list_visible_template_codes(self, user_id: str) -> tuple[tuple[str, ...], bool]:
+        user_id = _required_identifier(user_id, field_name="user_id")
+        codes: dict[str, None] = {}
+        cursor = 0
+        while True:
+            # This directory still has a supported OAPI form, unlike the
+            # newer route that can be unavailable for existing internal apps.
+            data = await self._client.request_oapi_json(
+                "POST",
+                "/topapi/process/listbyuserid",
+                json={"userid": user_id, "offset": cursor, "size": 100},
+                retry_transient=True,
+            )
+            result = data.get("result")
+            if data.get("errcode") != 0 or not isinstance(result, dict):
+                return tuple(codes), False
+            records = result.get("process_list")
+            if not isinstance(records, list):
+                return tuple(codes), False
+            for row in records:
+                if isinstance(row, dict) and isinstance(row.get("process_code"), str):
+                    codes[row["process_code"]] = None
+            next_cursor = result.get("next_cursor")
+            if next_cursor is None or next_cursor == 0 or next_cursor == "0":
+                return tuple(codes), True
+            if not str(next_cursor).isdigit() or int(next_cursor) <= cursor:
+                return tuple(codes), False
+            cursor = int(next_cursor)
+
     async def get_form_schema(self, process_code: str) -> FormSchema:
         # Official contract: GET with processCode in the query string and the
         # organization access token in x-acs-dingtalk-access-token.

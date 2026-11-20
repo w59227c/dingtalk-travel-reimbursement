@@ -1,14 +1,14 @@
 # 钉钉差旅报销权限编码核对
 
-更新时间：2026-11-16
+权限核对记录：2026-11-16；调用范围按当前本地实现整理，不代表追加了真实 OA 验收。
 
 ## 可直接搜索的权限标识
 
 | 权限标识 | 本项目中的调用范围 | 核对依据 |
 |---|---|---|
 | `Workflow.Form.Read` | 读取报销模板 Schema、控件和选项 | 调用表单 Schema 接口时，钉钉真实 403 响应明确返回该缺失权限 |
-| `Workflow.Instance.Read` | 查询报销人已通过的出差审批、核实代报抄送记录、回读新建 OA | 出差关联、代报抄送和 OA 回读联调 |
-| `Workflow.Instance.Write` | 创建差旅费报销 OA | 创建 OA 联调 |
+| `Workflow.Instance.Read` | 查询报销人审批、核实差旅代报抄送记录、回读新建 OA；普通费用沿用同一权限查询本人审批 | 出差关联、代报抄送和 OA 回读联调；普通费用调用复用现有接口 |
+| `Workflow.Instance.Write` | 创建差旅或普通费用报销 OA | 创建 OA 联调；普通费用调用复用现有接口，独立模板仍需验收 |
 | `Storage.UploadInfo.Read` | 获取审批附件空间的服务器上传信息 | 服务器直传附件联调 |
 | `Storage.File.Write` | 提交上传文件，取得可写入审批附件控件的文件 ID | 服务器直传附件联调 |
 | `qyapi_base` | 调用 `/topapi/v2/user/getuserinfo`，通过免登码取得 `userId` | [钉钉官方文档](https://open.dingtalk.com/document/development/obtain-the-userid-of-a-user-by-using-the-log-free)的权限详情显示该标识 |

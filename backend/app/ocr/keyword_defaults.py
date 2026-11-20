@@ -46,7 +46,7 @@ DEFAULT_RECEIPT_KEYWORD_RULES: tuple[ReceiptKeywordRule, ...] = (
     ReceiptKeywordRule("享道出行", ExpenseCategory.LOCAL_TRANSPORT, "ride_hailing"),
     ReceiptKeywordRule("郑州哈拜网络科技", ExpenseCategory.LOCAL_TRANSPORT, "ride_hailing"),
     ReceiptKeywordRule("杭州携华网络科技", ExpenseCategory.LOCAL_TRANSPORT, "ride_hailing"),
-    ReceiptKeywordRule("收派服务", ExpenseCategory.EMPLOYEE_WELFARE),
+    ReceiptKeywordRule("收派服务", ExpenseCategory.EMPLOYEE_WELFARE, welfare_type="express"),
     ReceiptKeywordRule("床品", ExpenseCategory.EMPLOYEE_WELFARE),
     ReceiptKeywordRule("床笠", ExpenseCategory.EMPLOYEE_WELFARE),
     ReceiptKeywordRule("床单", ExpenseCategory.EMPLOYEE_WELFARE),

@@ -98,6 +98,7 @@ def parsed_expense_payload(file_id: str, parsed: ParsedExpense) -> dict[str, obj
         "requiresItinerary": parsed.requires_itinerary,
         "transportType": parsed.transport_type,
         "railType": parsed.rail_type,
+        **({"welfareType": parsed.welfare_type} if parsed.welfare_type else {}),
         "invoiceNumbers": list(parsed.invoice_numbers),
         "orderNumbers": list(parsed.order_numbers),
         "originalCurrency": parsed.original_currency,

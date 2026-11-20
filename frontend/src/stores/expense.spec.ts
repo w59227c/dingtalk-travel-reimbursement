@@ -255,6 +255,45 @@ describe('expense store', () => {
     vi.mocked(getExpenseCategories).mockReset()
   })
 
+  it('preserves a new manual row identity after a normalized same-draft department readback', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    store.hydrateFromDraft(durableDraft([]), [])
+    store.upsertManualItem({ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01',
+      description: '合成手工费用', amount: '600.00', receiptCount: 1,
+      originalCurrency: 'USD', originalAmount: '9007199254740993.10' })
+    const originalId = store.items[0]!.id
+    const saved = durableDraft(store.buildDraftExpenseItems())
+    saved.department = { id: '200', name: '第二部门' }
+    saved.revision += 1
+    saved.input.items[0]!.amount = '600'
+    saved.input.items[0]!.originalAmount = '9007199254740993.1'
+    delete saved.input.items[0]!.paymentProofFileIds
+    store.hydrateFromDraft(saved, [])
+    expect(store.items[0]!.id).toBe(originalId)
+    expect(inputSignature({ ...saved.input, items: store.buildDraftExpenseItems() })).toBe(inputSignature(saved.input))
+  })
+
+  it.each(['content', 'order', 'new-draft', 'reset'] as const)(
+    'does not carry a manual upload target across %s changes', change => {
+      const store = useExpenseStore()
+      store.categories = MANUAL_CATEGORIES
+      store.hydrateFromDraft(durableDraft([]), [])
+      for (const description of ['第一笔合成费用', '第二笔合成费用']) {
+        store.upsertManualItem({ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01',
+          description, amount: '600.00', receiptCount: 1 })
+      }
+      const originalIds = store.items.map(item => item.id)
+      const saved = durableDraft(store.buildDraftExpenseItems())
+      if (change === 'content') saved.input.items[0]!.amount = '601.00'
+      if (change === 'order') saved.input.items.reverse()
+      if (change === 'new-draft') saved.id = 'draft-2'
+      if (change === 'reset') store.reset()
+      store.hydrateFromDraft(saved, [])
+      expect(store.items.map(item => item.id).some(id => originalIds.includes(id))).toBe(false)
+    },
+  )
+
   it('round-trips payment associations and rail evidence, clears invalid purpose links, and removes deleted proofs', () => {
     const store = useExpenseStore()
     const source = durableFile('source', { ocrResult: { ...durableFile('source').ocrResult, railType: 'regular' } })

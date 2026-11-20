@@ -161,7 +161,7 @@ class TravelApprovalSelection:
 @dataclass(frozen=True, slots=True)
 class VerifiedTravelSelection:
     approvals: tuple[TravelApprovalCandidate, ...]
-    department_id: str
+    department_id: str | None
     travel_type_option: FormOption
     start_date: date
     end_date: date
@@ -366,17 +366,10 @@ async def reverify_travel_approval_selection(
                 409,
             )
     approvals = tuple(item for item, _reason in resolved if item is not None)
-    department_ids = {
-        _required_text(item.instance.originator_department_id, field="originator_department_id")
-        for item in approvals
-    }
-    if len(department_ids) != 1:
-        raise ApiError(
-            "TRAVEL_APPROVAL_DEPARTMENT_MISMATCH",
-            "所选出差审批的所在部门不同，不能放在同一张报销单中",
-            422,
-        )
-    department_id = next(iter(department_ids))
+    department_ids = {item.instance.originator_department_id for item in approvals}
+    # A group may span departments. Derive this ordinary attribute only when
+    # the approvals agree; otherwise the existing manual fallback applies.
+    department_id = next(iter(department_ids)) if len(department_ids) == 1 else None
     travel_type_values = {item.listed.travel_type_option.value for item in approvals}
     source_travel_type_values = [
         item.listed.source_travel_type_value

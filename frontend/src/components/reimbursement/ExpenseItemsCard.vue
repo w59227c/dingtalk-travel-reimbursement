@@ -15,7 +15,6 @@ import {
   getReimbursementPdfPreviewPage,
 } from '@/api/reimbursements'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
-import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import type { ExpenseCategoryId, ExpenseItem } from '@/types/expenses'
@@ -32,6 +31,7 @@ import {
   evidenceRailType,
   hasKnownNonRailEvidence,
   isActiveProof,
+  isCourierExpense,
   isUnresolvedExpenseSourceFile,
   materialSubmissionBlockReason,
   missingExpenseMaterials,
@@ -58,23 +58,31 @@ const emit = defineEmits<{ 'refresh-draft': []; 'refresh-material-status': []; '
 
 const expense = useExpenseStore()
 const drafts = useReimbursementDraftStore()
-const auth = useAuthStore()
 const durableExpenseInput = ref<HTMLInputElement | null>(null)
 const durableAttachmentInput = ref<HTMLInputElement | null>(null)
 const durableItineraryInput = ref<HTMLInputElement | null>(null)
 const durablePaymentProofInput = ref<HTMLInputElement | null>(null)
 const durableHotelBillInput = ref<HTMLInputElement | null>(null)
+const durableWaybillInput = ref<HTMLInputElement | null>(null)
 const manualReceiptInput = ref<HTMLInputElement | null>(null)
-interface ManualReceiptTarget { draftId: string; departmentId: string; editorRevision: number }
+interface ManualReceiptTarget { draftId: string; editorRevision: number }
 const manualReceiptTarget = ref<ManualReceiptTarget | null>(null)
-type ProofTarget = { itemId: string; draftId: string; departmentId: string; replaceId?: string; kind: 'payment_proof' | 'hotel_bill' }
-const paymentTarget = ref<ProofTarget | null>(null)
-const paymentUploadingItem = ref('')
-const paymentErrors = reactive<Record<string, string>>({})
+const proofFields = {
+  payment_proof: 'paymentProofFileIds',
+  hotel_bill: 'hotelBillFileIds',
+  waybill: 'waybillFileIds',
+} as const
+type ProofKind = keyof typeof proofFields
+type ProofTarget = { itemId: string; draftId: string; pickerGeneration: number; kind: ProofKind }
+const proofUploadTarget = ref<ProofTarget | null>(null)
 const proofPickerVisible = ref(false)
 const proofPickerItemId = ref('')
 const proofPickerSelection = ref<string[]>([])
-const proofPickerKind = ref<'payment_proof' | 'hotel_bill'>('payment_proof')
+const proofPickerKind = ref<ProofKind>('payment_proof')
+const proofPickerGeneration = ref(0)
+const proofPickerScope = ref<{ draftId: string } | null>(null)
+const proofPickerBaseline = ref<string[]>([])
+const proofPickerError = ref('')
 const itinerarySelectionMode = ref<'single' | 'multiple' | 'keep-one'>('single')
 const itineraryQuery = ref('')
 const materialEditorVisible = ref(false)
@@ -160,10 +168,13 @@ const itineraryPickerOnly = ref(false)
 const itineraryPickerChanged = ref(false)
 const itineraryPickerUploadError = ref('')
 const itineraryUploadRevision = ref<number | null>(null)
-const paymentExpenseContext = ref<{ fileId: string; draftId: string; departmentId: string } | null>(null)
+const paymentExpenseContext = ref<{ fileId: string; draftId: string } | null>(null)
 const editor = reactive({
   id: '',
   category: '' as ExpenseCategoryId,
+  subjectValue: '',
+  welfareType: 'other' as 'express' | 'other' | '',
+  waybillFileIds: [] as string[],
   date: '',
   description: '',
   amount: '',
@@ -186,12 +197,43 @@ const durableRoleLabels: Record<ReimbursementDraftFileRole, string> = {
   ATTACHMENT_ONLY: '行程单/证明材料',
 }
 const attachmentKindLabels: Record<ReimbursementAttachmentKind, string> = {
-  itinerary: '行程单', payment_proof: '付款凭证', hotel_bill: '住宿明细', other: '其他材料',
+  itinerary: '行程单', payment_proof: '付款凭证', hotel_bill: '住宿明细', waybill: '运单明细', other: '其他材料',
 }
 
 const categoryNames = computed<Record<string, string>>(() =>
   Object.fromEntries(expense.categories.map((item) => [item.id, item.name])),
 )
+const expenseCategoryOptions = computed(() => expense.generalMode
+  ? expense.generalSubjects.map(({ value, label, categoryId }) => ({ value, label, categoryId }))
+  : expense.manualCategories.map(({ id, name }) => ({ value: id, label: name, categoryId: id })))
+const editorCategory = computed(() => expense.generalMode
+  ? expense.generalSubjects.find(option => option.value === editor.subjectValue)?.categoryId ?? ''
+  : editor.category)
+const editorTransportType = computed(() => expense.generalMode && editorCategory.value !== 'local_transport'
+  ? 'other' : editor.transportType)
+const editorCategoryValue = computed({
+  get: () => expense.generalMode ? editor.subjectValue : editor.category,
+  set: (value: string) => {
+    const category = expenseCategoryOptions.value.find(option => option.value === value)
+    if (expense.generalMode) editor.subjectValue = category?.value ?? ''
+    else editor.category = category?.categoryId ?? ''
+    if (editorCategory.value !== 'local_transport') editor.transportType = 'other'
+  },
+})
+const categoryOptionsLoading = computed(() => expense.generalMode
+  ? drafts.loadingReimbursementOptions : expense.categoriesLoading)
+const categoryOptionsError = computed(() => expense.generalMode
+  ? drafts.reimbursementOptionsError : expense.categoryLoadError)
+const expenseCategoryLabel = computed(() => expense.generalMode ? '费用科目' : '费用类别')
+function expenseCategoryName(item: ExpenseItem): string {
+  if (expense.generalMode) {
+    if (expense.generalSubjectUnavailable(item)) return '科目已停用，请重选'
+    const frozenLabel = item.subjectValue ? drafts.currentDraft?.submittedDetails?.subjectLabels?.[item.subjectValue] : undefined
+    return frozenLabel ?? expense.generalSubjects.find(option => option.value === item.subjectValue)?.label
+      ?? (item.subjectValue ? categoryNames.value[item.category] ?? (item.category === 'express' ? '快递费' : item.category) : '待选择费用科目')
+  }
+  return categoryNames.value[item.category] ?? item.category
+}
 const showLockedFileMetadata = computed(() => props.readonly && drafts.currentDraft?.status === 'LOCKED')
 const durableFiles = computed(() => drafts.files.filter((file) =>
   file.status !== 'PURGED' || showLockedFileMetadata.value))
@@ -226,6 +268,7 @@ const unlinkedDurableFiles = computed(() => durableFiles.value.filter((file) =>
   (!batchActive.value || batchOriginalFileIds.has(file.id))
   && !expense.items.some((item) => item.sourceFileId === file.id || item.itineraryFileIds?.includes(file.id)
     || item.paymentProofFileIds?.includes(file.id) || item.hotelBillFileIds?.includes(file.id)
+    || item.waybillFileIds?.includes(file.id)
     || item.receiptAttachmentFileIds?.includes(file.id)),
 ))
 const blockingUnlinkedDurableFiles = computed(() => unlinkedDurableFiles.value.filter((file) =>
@@ -263,12 +306,24 @@ const editorItineraryOptions = computed(() => {
 })
 const paymentProofOptions = computed(() => durableFiles.value.filter((file) => isActiveProof(file, 'payment_proof')))
 const hotelBillOptions = computed(() => durableFiles.value.filter((file) => isActiveProof(file, 'hotel_bill')))
+const waybillOptions = computed(() => durableFiles.value.filter((file) => isActiveProof(file, 'waybill')))
+const editorExpress = computed(() => isCourierExpense({ category: editorCategory.value, welfareType: editor.welfareType || undefined }))
 const manualReceiptOptions = computed(() => durableFiles.value.filter((file) => isActiveProof(file, 'other')
   && !expense.items.some((item) => item.id !== editor.id && item.receiptAttachmentFileIds?.includes(file.id))))
 const editorReceiptFiles = computed(() => manualReceiptOptions.value.filter((file) => editor.receiptAttachmentFileIds.includes(file.id)))
 const manualReceiptBatchEntries = computed(() => batchFiles.value.filter((entry) => entry.manualReceiptTarget
   && acceptsManualReceiptTarget(entry.manualReceiptTarget)))
-const currentProofOptions = computed(() => proofPickerKind.value === 'hotel_bill' ? hotelBillOptions.value : paymentProofOptions.value)
+const currentProofOptions = computed(() => durableFiles.value.filter(file => isActiveProof(file, proofPickerKind.value)))
+const proofPickerItem = computed(() => expense.items.find(item => item.id === proofPickerItemId.value))
+const selectedProofFiles = computed(() => proofPickerSelection.value.flatMap(id => {
+  const file = currentProofOptions.value.find(file => file.id === id)
+  return file ? [file] : []
+}))
+const proofPickerChanged = computed(() => JSON.stringify(proofPickerSelection.value) !== JSON.stringify(proofPickerBaseline.value))
+const proofPickerBatchEntries = computed(() => batchFiles.value.filter(entry =>
+  entry.target?.pickerGeneration === proofPickerGeneration.value
+  && entry.target.kind === proofPickerKind.value))
+
 const foreignEditor = computed(() => expenseRequiresCnyConfirmation({
   originalCurrency: editor.originalCurrency,
   requiresCnyConfirmation: expense.items.find((item) => item.id === editor.id)?.requiresCnyConfirmation,
@@ -282,13 +337,17 @@ const editorSourceInvoice = computed(() => {
   return Boolean(item?.sourceFileId || item?.source === 'ocr')
 })
 const choosingItineraryToKeep = computed(() => itinerarySelectionMode.value === 'keep-one'
-  && editor.category === 'local_transport' && editor.transportType === 'ride_hailing')
-const editorIsTaxi = computed(() => isTaxiExpense(editor))
-const editorCanSelectRailType = computed(() => editor.category === 'rail_fare'
+  && editorCategory.value === 'local_transport' && editorTransportType.value === 'ride_hailing')
+const editorIsTaxi = computed(() => isTaxiExpense({ transportType: editorTransportType.value }))
+const editorRailCategory = computed(() => editorCategory.value === 'rail_fare'
+  || (expense.generalMode && editorCategory.value === 'local_transport' && editorTransportType.value === 'rail'))
+const editorCanSelectRailType = computed(() => editorRailCategory.value
   && !hasKnownNonRailEvidence(editorEvidence.value))
 const sourceRailType = computed(() => editorEvidence.value?.railType)
-const editorRailType = computed(() => evidenceRailType(editor.category, editor.railType, editorEvidence.value))
-const editorNeedsPaymentProof = computed(() => requiresPaymentProof({ ...editor, railType: editorRailType.value }))
+const editorRailType = computed(() => evidenceRailType(editorRailCategory.value ? 'rail_fare' : editorCategory.value, editor.railType, editorEvidence.value))
+const editorNeedsPaymentProof = computed(() => requiresPaymentProof({
+  ...editor, category: editorCategory.value, transportType: editorTransportType.value, railType: editorRailType.value,
+}))
 const unresolvedDurableOcrFiles = computed(() => durableFiles.value.filter(
   (file) => (!batchActive.value || batchOriginalFileIds.has(file.id)) && isUnresolvedDurableOcrFile(file),
 ))
@@ -314,8 +373,8 @@ const canAddExpenseItem = computed(
     !props.readonly
     && !batchActive.value
     && expense.items.length < expense.maxExpenseItems
-    && expense.manualCategories.length > 0
-    && !expense.categoryLoadError,
+    && expenseCategoryOptions.value.length > 0
+    && !categoryOptionsError.value,
 )
 const receiptUploadConstraintReason = computed(() => {
   if (durableMutationDisabledReason.value) return durableMutationDisabledReason.value
@@ -332,9 +391,9 @@ const newItemDisabledReason = computed(() => {
   if (expense.items.length >= expense.maxExpenseItems) {
     return `费用明细已达到 ${expense.maxExpenseItems} 条上限`
   }
-  if (expense.categoriesLoading) return '费用类别正在加载'
-  if (expense.categoryLoadError) return expense.categoryLoadError
-  if (!expense.manualCategories.length) return '暂无可手工选择的费用类别'
+  if (categoryOptionsLoading.value) return `${expenseCategoryLabel.value}正在加载`
+  if (categoryOptionsError.value) return categoryOptionsError.value
+  if (!expenseCategoryOptions.value.length) return `暂无可手工选择的${expenseCategoryLabel.value}`
   return ''
 })
 const headerActionHelp = computed(() => {
@@ -352,7 +411,6 @@ const headerActionHelp = computed(() => {
 
 interface DurableOperationScope {
   draftId: string
-  departmentId: string
   generation: number
 }
 
@@ -399,15 +457,15 @@ watch(
   () => [
     drafts.currentDraft?.id,
     drafts.currentDraft?.status,
-    auth.session?.selectedDepartment?.id,
     props.readonly,
   ] as const,
-  ([draftId, status, departmentId], [previousDraftId, , previousDepartmentId]) => {
+  ([draftId, status], [previousDraftId]) => {
     materialEditorVisible.value = false
     materialEditorFile.value = null
-    proofPickerVisible.value = false
+    if (draftId !== previousDraftId || props.readonly
+      || !isDurableDraftEditable()) proofPickerVisible.value = false
     if (itineraryPickerOnly.value && (draftId !== previousDraftId
-      || departmentId !== previousDepartmentId || status === 'LOCKED' || status === 'EXPIRED')) {
+      || status === 'LOCKED' || status === 'EXPIRED')) {
       editorVisible.value = false
     }
     if (paymentExpenseContext.value) {
@@ -415,12 +473,11 @@ watch(
       paymentExpenseContext.value = null
     }
     if (batchScope && batchPipelineId !== null && (drafts.currentDraft?.id !== batchScope.draftId
-      || (auth.session?.selectedDepartment?.id ?? '') !== batchScope.departmentId || !isDurableDraftEditable())) {
+      || !isDurableDraftEditable())) {
       drafts.cancelFilePipeline(batchPipelineId)
       batchPipelineId = null
     }
-    if (batchScope && (drafts.currentDraft?.id !== batchScope.draftId
-      || (auth.session?.selectedDepartment?.id ?? '') !== batchScope.departmentId)) {
+    if (batchScope && drafts.currentDraft?.id !== batchScope.draftId) {
       batchScope = null
       batchFiles.value = []
       batchPhase.value = null
@@ -431,7 +488,6 @@ watch(
       !active
       || (
         drafts.currentDraft?.id === active.draftId
-        && (auth.session?.selectedDepartment?.id ?? '') === active.departmentId
         && isDurableDraftEditable()
       )
     ) return
@@ -446,10 +502,6 @@ watch(
   { flush: 'sync' },
 )
 
-watch(() => editor.category, (category) => {
-  if (category !== 'local_transport') editor.transportType = 'other'
-})
-
 watch(() => itineraryPickerItem.value?.itineraryFileIds, (ids) => {
   if (!itineraryPickerItem.value || itineraryPickerChanged.value) return
   editor.itineraryFileIds = [...(ids ?? [])]
@@ -457,7 +509,7 @@ watch(() => itineraryPickerItem.value?.itineraryFileIds, (ids) => {
 })
 
 const itineraryEvidenceSignature = computed(() => JSON.stringify([
-  drafts.currentDraft?.id, auth.session?.selectedDepartment?.id,
+  drafts.currentDraft?.id,
   drafts.files.map((file) => [file.id, file.role, file.attachmentKind, file.status,
     file.ocrResult, file.materialClassification?.manualAssociation]),
   expense.items.map((item) => [
@@ -484,7 +536,6 @@ function beginDurableOperation(): DurableOperationScope | null {
   if (durableUnmounted || !current || !isDurableDraftEditable()) return null
   const scope = {
     draftId: current.id,
-    departmentId: auth.session?.selectedDepartment?.id ?? '',
     generation: ++durableOperationGeneration,
   }
   activeDurableOperation = scope
@@ -495,7 +546,6 @@ function acceptsDurableOperation(scope: DurableOperationScope): boolean {
   return !durableUnmounted
     && scope.generation === durableOperationGeneration
     && drafts.currentDraft?.id === scope.draftId
-    && (auth.session?.selectedDepartment?.id ?? '') === scope.departmentId
     && isDurableDraftEditable()
 }
 
@@ -515,16 +565,19 @@ function finishDurableOperation(scope: DurableOperationScope): void {
 
 function openNewItem(): void {
   if (props.readonly || batchActive.value) return
-  const firstCategory = expense.manualCategories[0]
+  const firstCategory = expenseCategoryOptions.value[0]
   if (!firstCategory) {
-    ElMessage.error(expense.categoryLoadError || '费用类别尚未加载，请稍后重试')
+    ElMessage.error(categoryOptionsError.value || `${expenseCategoryLabel.value}尚未加载，请稍后重试`)
     return
   }
   paymentExpenseContext.value = null
   itineraryPickerOnly.value = false
   Object.assign(editor, {
     id: '',
-    category: firstCategory.id,
+    category: expense.generalMode ? '' : firstCategory.categoryId,
+    subjectValue: '',
+    welfareType: 'other',
+    waybillFileIds: [],
     date: '',
     description: '',
     amount: '',
@@ -555,7 +608,10 @@ function openEditItem(item: ExpenseItem, itineraryOnly = false): void {
   itineraryPickerUploadError.value = ''
   Object.assign(editor, {
     id: item.id,
-    category: item.category,
+    category: expense.generalMode ? '' : item.category,
+    subjectValue: item.subjectValue ?? '',
+    welfareType: item.welfareType ?? 'other',
+    waybillFileIds: [...(item.waybillFileIds ?? [])],
     date: item.date ?? '',
     description: item.description,
     amount: item.amount,
@@ -600,7 +656,6 @@ function recordPaymentExpense(file: ReimbursementDraftFile): void {
   paymentExpenseContext.value = {
     fileId: current.id,
     draftId: drafts.currentDraft!.id,
-    departmentId: auth.session?.selectedDepartment?.id ?? '',
   }
   const details = current.paymentDetails
   const amount = moneyToCents(details?.amount ?? '')
@@ -817,6 +872,7 @@ function mobileItemAttentionLabel(item: ExpenseItem): string {
   const source = durableFileByItemId(item.id)
   const hints = reviewHintsById.value.get(item.id) ?? []
   if (!item.date || !item.displayDate.trim() || !item.description.trim()
+    || (expense.generalMode && !item.subjectValue)
     || moneyToCents(item.amount) === null
     || hints.some(hint => ['MISSING_DATE', 'MISSING_AMOUNT', 'MISSING_DESCRIPTION'].includes(hint.code))
     || missingExpenseMaterials(item, durableFiles.value, { allowPurged: props.submitted }).length
@@ -838,6 +894,8 @@ function itemHasMaterialSection(item: ExpenseItem): boolean {
     || requiresPaymentProof(item)
     || item.hotelBillFileIds?.length
     || item.paymentProofFileIds?.length
+    || item.waybillFileIds?.length
+    || (!props.submitted && isCourierExpense(item))
     || item.receiptAttachmentFileIds?.length,
   )
 }
@@ -886,7 +944,6 @@ function acceptsManualReceiptTarget(target: ManualReceiptTarget): boolean {
   return !durableUnmounted && editorVisible.value && !editorSourceInvoice.value
     && target.editorRevision === editorRevision.value
     && target.draftId === drafts.currentDraft?.id
-    && target.departmentId === (auth.session?.selectedDepartment?.id ?? '')
     && isDurableDraftEditable()
 }
 
@@ -897,7 +954,7 @@ function chooseManualReceiptFiles(): void {
     return
   }
   manualReceiptTarget.value = { draftId: drafts.currentDraft.id,
-    departmentId: auth.session?.selectedDepartment?.id ?? '', editorRevision: editorRevision.value }
+    editorRevision: editorRevision.value }
   manualReceiptInput.value?.click()
 }
 
@@ -926,38 +983,57 @@ function attachManualReceiptFiles(target: ManualReceiptTarget, files: Reimbursem
   editor.receiptAttachmentFileIds = [...new Set([...editor.receiptAttachmentFileIds, ...ids])]
 }
 
-function choosePaymentProof(item: ExpenseItem, replaceId?: string, kind: 'payment_proof' | 'hotel_bill' = 'payment_proof'): void {
-  if (durableActionDisabledReason.value || receiptUploadDisabledReason.value || !drafts.currentDraft) return
-  paymentTarget.value = { itemId: item.id, draftId: drafts.currentDraft.id,
-    departmentId: auth.session?.selectedDepartment?.id ?? '', replaceId, kind }
-  delete paymentErrors[item.id]
-  if (kind === 'hotel_bill') durableHotelBillInput.value?.click()
+function chooseProofFiles(): void {
+  const item = proofPickerItem.value
+  if (!proofPickerVisible.value || !item || durableActionDisabledReason.value
+    || receiptUploadDisabledReason.value || !drafts.currentDraft) return
+  proofUploadTarget.value = { itemId: item.id, draftId: drafts.currentDraft.id,
+    kind: proofPickerKind.value,
+    pickerGeneration: proofPickerGeneration.value }
+  if (proofPickerKind.value === 'hotel_bill') durableHotelBillInput.value?.click()
+  else if (proofPickerKind.value === 'waybill') durableWaybillInput.value?.click()
   else durablePaymentProofInput.value?.click()
 }
 
-function openPaymentPicker(item: ExpenseItem, kind: 'payment_proof' | 'hotel_bill' = 'payment_proof'): void {
-  if (durableActionDisabledReason.value) return
+async function onProofSelection(event: Event, kind: ProofKind): Promise<void> {
+  const target = proofUploadTarget.value
+  if (!target || !proofPickerVisible.value || target.kind !== kind
+    || target.pickerGeneration !== proofPickerGeneration.value) {
+    (event.target as HTMLInputElement).value = ''
+    proofUploadTarget.value = null
+    return
+  }
+  await onDurableSelection(event, 'ATTACHMENT_ONLY', kind)
+}
+
+function openProofPicker(item: ExpenseItem, kind: ProofKind = 'payment_proof'): void {
+  if (durableActionDisabledReason.value || !drafts.currentDraft || !isDurableDraftEditable()) return
+  proofPickerGeneration.value++
   proofPickerItemId.value = item.id
   proofPickerKind.value = kind
-  proofPickerSelection.value = [...((kind === 'hotel_bill' ? item.hotelBillFileIds : item.paymentProofFileIds) ?? [])]
+  proofPickerBaseline.value = [...(item[proofFields[kind]] ?? [])]
+  proofPickerSelection.value = [...proofPickerBaseline.value]
+  proofPickerScope.value = { draftId: drafts.currentDraft.id }
+  proofPickerError.value = ''
   proofPickerVisible.value = true
 }
 
-function savePaymentSelection(): void {
-  if (durableActionDisabledReason.value) return
-  const item = expense.items.find((entry) => entry.id === proofPickerItemId.value)
-  if (!item) return
-  const ids = proofPickerSelection.value.filter((id) => currentProofOptions.value.some((file) => file.id === id))
-  if (proofPickerKind.value === 'hotel_bill') item.hotelBillFileIds = ids
-  else item.paymentProofFileIds = ids
+function saveProofSelection(): void {
+  if (durableActionDisabledReason.value || !isDurableDraftEditable()) return
+  const scope = proofPickerScope.value
+  const item = proofPickerItem.value
+  if (!scope || !item || scope.draftId !== drafts.currentDraft?.id) return
+  const field = proofFields[proofPickerKind.value]
+  if (JSON.stringify(item[field] ?? []) !== JSON.stringify(proofPickerBaseline.value)) {
+    proofPickerError.value = '本笔费用的材料关联已变化，请关闭后重新打开核对'
+    return
+  }
+  if (proofPickerSelection.value.some(id => !currentProofOptions.value.some(file => file.id === id))) {
+    proofPickerError.value = '所选材料已删除或用途已变化，请重新选择'
+    return
+  }
+  item[field] = [...new Set(proofPickerSelection.value)]
   proofPickerVisible.value = false
-}
-
-function unlinkPaymentProof(item: ExpenseItem, fileId: string, kind: 'payment_proof' | 'hotel_bill' = 'payment_proof'): void {
-  if (durableActionDisabledReason.value) return
-  // This only removes the reference. The file may be used by another expense.
-  if (kind === 'hotel_bill') item.hotelBillFileIds = (item.hotelBillFileIds ?? []).filter((id) => id !== fileId)
-  else item.paymentProofFileIds = (item.paymentProofFileIds ?? []).filter((id) => id !== fileId)
 }
 
 function suggestionFor(item: ExpenseItem) {
@@ -986,7 +1062,7 @@ function previewSuggestedItinerary(item: ExpenseItem): void {
 function focusMaterial(itemId?: string, fileId?: string): void {
   const selector = itemId
     ? '[data-expense-material-id]'
-    : fileId ? '[data-material-file-id]' : '[data-pending-uploads], [data-material-confirmation]'
+    : fileId ? '[data-material-file-id]' : '[data-testid="batch-progress"], [data-pending-uploads], [data-material-confirmation]'
   const element = [...document.querySelectorAll<HTMLElement>(selector)].find((entry) =>
     (!itemId || entry.dataset.expenseMaterialId === itemId)
     && (!fileId || entry.dataset.materialFileId === fileId)
@@ -1225,11 +1301,10 @@ async function onDurableSelection(
   const input = event.target as HTMLInputElement
   const files = [...(input.files ?? [])]
   input.value = ''
-  const target = ['payment_proof', 'hotel_bill'].includes(attachmentKind) ? paymentTarget.value : null
-  paymentTarget.value = null
+  const target = proofUploadTarget.value?.kind === attachmentKind ? proofUploadTarget.value : null
+  proofUploadTarget.value = null
   if (props.readonly || !files.length || durableBusy.value) return
   if (target && (target.draftId !== drafts.currentDraft?.id
-    || target.departmentId !== (auth.session?.selectedDepartment?.id ?? '')
     || !expense.items.some((item) => item.id === target.itemId))) {
     ElMessage.warning('费用或报销表单已变化，请在当前费用下重新选择证明材料')
     return
@@ -1246,14 +1321,15 @@ async function onDurableSelection(
   }
 
   durableOperating.value = true
-  if (target) paymentUploadingItem.value = target.itemId
   drafts.processingFiles = true
   batchScope = scope
   batchPipelineId = pipelineId ?? null
   batchOriginalFileIds = new Set(drafts.files.map((file) => file.id))
   batchNeedsOcr.value = autoClassify || role === 'EXPENSE_SOURCE' || ['itinerary', 'hotel_bill'].includes(attachmentKind)
   batchPhase.value = pipelineId === undefined ? 'uploading' : 'processing'
-  batchFiles.value = files.map((file, index) => ({
+  const unresolvedUploads = batchFiles.value.filter(entry =>
+    entry.status === 'failed' && !entry.uploaded && entry.source)
+  const selectedEntries: BatchFile[] = files.map((file, index) => ({
     key: `${scope.generation}-${index}`,
     name: file.name,
     source: file,
@@ -1265,7 +1341,8 @@ async function onDurableSelection(
     ...(manualTarget ? { manualReceiptTarget: { ...manualTarget } } : {}),
     status: 'queued',
   }))
-  const entries = batchFiles.value
+  batchFiles.value = [...unresolvedUploads, ...selectedEntries]
+  const entries = batchFiles.value.slice(unresolvedUploads.length)
   const recognized: ReimbursementDraftFile[] = []
   const active = () => acceptsDurableOperation(scope)
     && (pipelineId === undefined || drafts.isFilePipelineActive(pipelineId))
@@ -1310,7 +1387,6 @@ async function onDurableSelection(
         if (!skipDuplicateBatchFile(entry, error)) {
           entry.status = 'failed'
           entry.error = apiErrorMessage(error, '文件上传失败，请重试')
-          if (target) paymentErrors[target.itemId] = entry.error
         }
       }
     }
@@ -1331,14 +1407,6 @@ async function onDurableSelection(
         if (file.role !== 'EXPENSE_SOURCE') continue
         if (!expense.upsertDraftOcrItem(file)) durableErrors[file.id] = '识别结果不完整，请重试或手工添加费用明细'
       }
-      if (target) {
-        const item = expense.items.find((candidate) => candidate.id === target.itemId)
-        const proofIds = entries.flatMap((entry) => entry.uploaded && isActiveProof(entry.uploaded, target.kind) ? [entry.uploaded.id] : [])
-        if (item && proofIds.length) {
-          const field = target.kind === 'hotel_bill' ? 'hotelBillFileIds' : 'paymentProofFileIds'
-          item[field] = [...new Set([...(item[field] ?? []).filter((id) => id !== target.replaceId), ...proofIds])]
-        }
-      }
       if (manualTarget) attachManualReceiptFiles(manualTarget, entries.flatMap((entry) => entry.uploaded ? [entry.uploaded] : []))
       batchPhase.value = 'done'
     }
@@ -1356,7 +1424,6 @@ async function onDurableSelection(
         batchPhase.value = 'done'
       }
       drafts.processingFiles = false
-      paymentUploadingItem.value = ''
     }
     finishDurableOperation(scope)
   }
@@ -1373,13 +1440,11 @@ async function retryFailedBatchUpload(entry: BatchFile): Promise<void> {
   const source = entry.source
   const target = entry.target
   const manualTarget = entry.manualReceiptTarget
-  if (manualTarget && (manualTarget.draftId !== drafts.currentDraft?.id
-    || manualTarget.departmentId !== (auth.session?.selectedDepartment?.id ?? ''))) {
+  if (manualTarget && manualTarget.draftId !== drafts.currentDraft?.id) {
     entry.error = '报销表单已变化，请在当前手工费用中重新选择文件'
     return
   }
   if (target && (target.draftId !== drafts.currentDraft?.id
-    || target.departmentId !== (auth.session?.selectedDepartment?.id ?? '')
     || !expense.items.some((item) => item.id === target.itemId))) {
     entry.error = '费用或报销表单已变化，请在当前费用下重新选择证明材料'
     return
@@ -1436,13 +1501,7 @@ async function retryFailedBatchUpload(entry: BatchFile): Promise<void> {
     }
     if (current?.role === 'EXPENSE_SOURCE') void expense.refreshCalculations()
     if (manualTarget && current) attachManualReceiptFiles(manualTarget, [current])
-    if (target && current && isActiveProof(current, target.kind)) {
-      const item = expense.items.find((candidate) => candidate.id === target.itemId)
-      if (item) {
-        const field = target.kind === 'hotel_bill' ? 'hotelBillFileIds' : 'paymentProofFileIds'
-        item[field] = [...new Set([...(item[field] ?? []).filter((id) => id !== target.replaceId), current.id])]
-      }
-    }
+
   } catch (error) {
     if (!acceptsDurableOperation(scope)) return
     if (!skipDuplicateBatchFile(entry, error)) {
@@ -1521,8 +1580,9 @@ async function clearDurableFiles(): Promise<void> {
   durableOperating.value = true
   try {
     try {
+      const linkedNote = linkedCount ? `其中 ${linkedCount} 条由票据生成的费用明细也会移除。` : ''
       await ElMessageBox.confirm(
-        `将删除当前报销的 ${targets.length} 个已上传文件（含发票、行程单和付款凭证），同时移除 ${linkedCount} 条由这些票据生成的费用明细。手工费用、基本信息和出差审批关联会保留。此操作不能撤销，需要重新上传文件。`,
+        `将删除本次报销的 ${targets.length} 个已上传文件，包括发票和各类证明材料。${linkedNote}手工费用、基本信息和关联审批会保留，费用与已删除材料的关联将移除。此操作不能撤销。`,
         '清空已上传文件',
         { confirmButtonText: '确认清空', cancelButtonText: '取消', type: 'warning' },
       )
@@ -1553,8 +1613,9 @@ async function clearDurableFiles(): Promise<void> {
       batchFiles.value = batchFiles.value.filter((entry) => entry.uploaded?.id !== file.id)
       deletedCount += 1
     }
-    batchFiles.value = []
-    batchPhase.value = null
+    batchFiles.value = batchFiles.value.filter(entry =>
+      entry.status === 'failed' && !entry.uploaded && entry.source)
+    batchPhase.value = batchFiles.value.length ? 'done' : null
     ElMessage.success(`已清空 ${deletedCount} 个上传文件，手工费用和基本信息已保留`)
   } finally {
     if (scope.generation === durableOperationGeneration) {
@@ -1722,8 +1783,7 @@ function saveItem(): void {
     const paymentContext = paymentExpenseContext.value
     if (paymentContext) {
       if (durableActionDisabledReason.value || !isDurableDraftEditable()
-        || drafts.currentDraft?.id !== paymentContext.draftId
-        || (auth.session?.selectedDepartment?.id ?? '') !== paymentContext.departmentId) return
+        || drafts.currentDraft?.id !== paymentContext.draftId) return
       const proof = drafts.files.find((file) => file.id === paymentContext.fileId)
       if (!proof || !canRecordPaymentExpense(proof)) {
         throw new Error('此付款凭证已被关联或用途发生变化，请重新核对材料')
@@ -1731,21 +1791,29 @@ function saveItem(): void {
       if (!editor.paymentProofFileIds.includes(proof.id)) {
         throw new Error('请保留本次录入所依据的付款凭证；普通手工费用可从“手动添加”录入')
       }
-      if (!editor.category) throw new Error('请选择费用类别，并核对人民币金额后确认录入')
+      if (!editorCategory.value) throw new Error(`请选择${expenseCategoryLabel.value}，并核对人民币金额后确认录入`)
     }
     if (editor.originalCurrency.trim() && !/^[A-Z]{3}$/.test(editor.originalCurrency.trim().toUpperCase())) {
       throw new Error('请填写票面原币币种，例如 VND、USD 或 EUR')
     }
+    if (expense.generalMode && !editor.subjectValue) throw new Error('请选择费用科目')
+    if (expense.generalSubjectUnavailable(editor)) throw new Error('原费用科目已停用，请重新选择')
+    if (!expense.generalMode && editorCategory.value === 'employee_welfare' && !editor.welfareType) {
+      throw new Error('请选择福利费细分')
+    }
     expense.upsertManualItem({
       id: editor.id || undefined,
-      category: editor.category,
+      category: editorCategory.value,
+      subjectValue: expense.generalMode ? editor.subjectValue : undefined,
+      welfareType: !expense.generalMode && editorCategory.value === 'employee_welfare' ? editor.welfareType || undefined : undefined,
+      waybillFileIds: editorExpress.value ? [...editor.waybillFileIds] : [],
       date: editor.date,
       displayDate: editor.date,
       description: editor.description,
       amount: editor.amount,
       receiptCount: editorSourceInvoice.value ? 1 : editor.receiptCount,
-      requiresItinerary: editor.transportType === 'ride_hailing',
-      transportType: editor.transportType,
+      requiresItinerary: editorTransportType.value === 'ride_hailing',
+      transportType: editorTransportType.value,
       itineraryFileIds: editorIsTaxi.value ? [...editor.itineraryFileIds] : [],
       itineraryAutoMatchDisabled: editor.itineraryAutoMatchDisabled,
       paymentProofFileIds: [...editor.paymentProofFileIds],
@@ -1802,7 +1870,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             v-if="!props.submitted"
             class="section-note"
           >
-            {{ props.mobile
+            {{ expense.generalMode ? '核对识别结果，逐项选择费用科目' : props.mobile
               ? '人工修改不会被重新识别覆盖'
               : '自动识别结果可直接编辑，人工修改不会被重新识别覆盖' }}
           </span>
@@ -1825,7 +1893,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           </el-button>
           <el-button
             class="manual-item-button"
-            :loading="expense.categoriesLoading"
+            :loading="categoryOptionsLoading"
             :disabled="!canAddExpenseItem"
             :title="newItemDisabledReason"
             @click="openNewItem"
@@ -1872,7 +1940,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
-          @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'hotel_bill')"
+          @change="onProofSelection($event, 'hotel_bill')"
         >
         <input
           ref="durablePaymentProofInput"
@@ -1882,7 +1950,17 @@ async function retryItemRecognition(id: string): Promise<void> {
           :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
           multiple
           :disabled="Boolean(durableActionDisabledReason)"
-          @change="onDurableSelection($event, 'ATTACHMENT_ONLY', 'payment_proof')"
+          @change="onProofSelection($event, 'payment_proof')"
+        >
+        <input
+          ref="durableWaybillInput"
+          data-testid="durable-waybill-input"
+          class="visually-hidden"
+          type="file"
+          :accept="props.mobile ? undefined : '.jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf'"
+          multiple
+          :disabled="Boolean(durableActionDisabledReason)"
+          @change="onProofSelection($event, 'waybill')"
         >
         <input
           ref="durableAttachmentInput"
@@ -1949,8 +2027,8 @@ async function retryItemRecognition(id: string): Promise<void> {
       v-if="!props.submitted"
       :title="props.mobile ? '可一次上传全部报销材料' : '一次上传，自动整理报销材料'"
       :description="props.mobile
-        ? '系统自动分类；住宿需附明细，单张超过 500 元需附付款凭证。'
-        : '发票、打车行程单、住宿明细和付款凭证可一起上传。每笔住宿都须关联住宿明细，单张票据超过 500 元还须付款凭证；不确定的用途请确认。'"
+        ? '系统识别材料用途。住宿需附明细，单张超过 500 元需附付款凭证。'
+        : '发票、打车行程单、住宿明细、付款凭证和运单明细可一起上传。每笔住宿都须关联住宿明细，单张票据超过 500 元还须付款凭证；不确定的用途请确认。'"
       type="info"
       :closable="false"
       show-icon
@@ -1996,6 +2074,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       role="status"
       aria-live="polite"
       data-testid="batch-progress"
+      tabindex="-1"
     >
       <p>
         {{ batchPhase !== 'done'
@@ -2111,7 +2190,11 @@ async function retryItemRecognition(id: string): Promise<void> {
                 :aria-label="file.status === 'ACTIVE' ? `预览材料 ${file.name}` : file.name"
                 @click="previewDurableFile(file)"
               >
-                {{ props.mobile || file.status !== 'ACTIVE' ? file.name : `${file.name} · 预览` }}
+                <span class="receipt-file-preview-name">{{ file.name }}</span>
+                <span
+                  v-if="file.status === 'ACTIVE'"
+                  class="receipt-file-preview-action"
+                >{{ ' · 预览' }}</span>
               </button>
               <span class="receipt-tags">
                 <el-tag
@@ -2185,7 +2268,8 @@ async function retryItemRecognition(id: string): Promise<void> {
             >
               <el-button
                 type="primary"
-                :plain="true"
+                plain
+                :size="props.mobile ? 'default' : 'small'"
                 :disabled="Boolean(durableActionDisabledReason) || !proofAssociationCandidates(file).length"
               >
                 关联费用
@@ -2197,7 +2281,7 @@ async function retryItemRecognition(id: string): Promise<void> {
                     :key="item.id"
                     :command="item.id"
                   >
-                    {{ item.displayDate }} · {{ categoryNames[item.category] ?? item.category }} · ¥{{ item.amount }} · {{ item.description }}
+                    {{ item.displayDate }} · {{ expenseCategoryName(item) }} · ¥{{ item.amount }} · {{ item.description }}
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -2205,8 +2289,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             <el-button
               v-if="canRecordPaymentExpense(file)"
               class="receipt-action receipt-action--wide"
-              :link="!props.mobile"
+              :size="props.mobile ? 'default' : 'small'"
               type="primary"
+              plain
               data-testid="record-payment-expense"
               :disabled="Boolean(durableActionDisabledReason || newItemDisabledReason)"
               :title="durableActionDisabledReason || newItemDisabledReason"
@@ -2216,8 +2301,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             </el-button>
             <el-button
               class="receipt-action"
-              :link="!props.mobile"
-              :type="props.mobile && needsMaterialConfirmation(file) ? 'primary' : undefined"
+              :size="props.mobile ? 'default' : 'small'"
+              :type="needsMaterialConfirmation(file) ? 'primary' : undefined"
+              plain
               :disabled="Boolean(durableActionDisabledReason)"
               @click="openMaterialEditor(file)"
             >
@@ -2226,8 +2312,8 @@ async function retryItemRecognition(id: string): Promise<void> {
             <el-button
               v-if="canAdoptDurableRecognition(file)"
               class="receipt-action"
-              :link="!props.mobile"
-              :plain="props.mobile"
+              :size="props.mobile ? 'default' : 'small'"
+              plain
               type="primary"
               :disabled="Boolean(durableActionDisabledReason)"
               :title="durableActionDisabledReason"
@@ -2238,8 +2324,8 @@ async function retryItemRecognition(id: string): Promise<void> {
             <el-button
               v-if="isUnresolvedDurableOcrFile(file)"
               class="receipt-action"
-              :link="!props.mobile"
-              :plain="props.mobile"
+              :size="props.mobile ? 'default' : 'small'"
+              plain
               type="warning"
               :disabled="Boolean(durableActionDisabledReason)"
               :title="durableActionDisabledReason"
@@ -2250,8 +2336,8 @@ async function retryItemRecognition(id: string): Promise<void> {
             <el-button
               v-if="canRetryDurableRecognition(file)"
               class="receipt-action recognition-retry-button"
-              :link="!props.mobile"
-              :plain="props.mobile"
+              :size="props.mobile ? 'default' : 'small'"
+              plain
               type="primary"
               :loading="isRetryingDurableRecognition(file)"
               :disabled="Boolean(durableActionDisabledReason)"
@@ -2262,8 +2348,8 @@ async function retryItemRecognition(id: string): Promise<void> {
             </el-button>
             <el-button
               class="receipt-action"
-              :link="!props.mobile"
-              :plain="props.mobile"
+              :size="props.mobile ? 'default' : 'small'"
+              plain
               type="danger"
               :disabled="Boolean(durableActionDisabledReason)
                 || !['ACTIVE', 'DELETING'].includes(file.status)"
@@ -2277,7 +2363,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       </div>
     </template>
     <div
-      v-if="expense.categoryLoadError && !props.submitted"
+      v-if="!expense.generalMode && expense.categoryLoadError && !props.submitted"
       class="category-load-error"
     >
       <el-alert
@@ -2323,7 +2409,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       >
         <template #default="scope">
           <div class="expense-category-cell">
-            <span>{{ categoryNames[scope.row.category] ?? scope.row.category }}</span>
+            <span>{{ expenseCategoryName(scope.row) }}</span>
             <el-tag
               v-if="scope.row.source === 'ocr'
                 || isDurableRecognitionRunning(durableFileByItemId(scope.row.id))"
@@ -2423,7 +2509,7 @@ async function retryItemRecognition(id: string): Promise<void> {
                   :disabled="Boolean(durableActionDisabledReason)"
                   @click="openItineraryPicker(scope.row)"
                 >
-                  更改关联
+                  关联行程单
                 </el-button>
               </template>
               <ExpenseReviewHints
@@ -2473,16 +2559,9 @@ async function retryItemRecognition(id: string): Promise<void> {
               :has-itinerary-suggestion="Boolean(suggestionFor(scope.row))"
               :disabled="Boolean(durableActionDisabledReason)"
               :preview-loading="previewLoading"
-              :uploading="paymentUploadingItem === scope.row.id"
-              :error="paymentErrors[scope.row.id]"
               @preview="previewDurableFile"
               @purpose="openMaterialEditor"
-              @upload="choosePaymentProof(scope.row, $event)"
-              @reuse="openPaymentPicker(scope.row)"
-              @unlink="unlinkPaymentProof(scope.row, $event)"
-              @hotel-upload="choosePaymentProof(scope.row, $event, 'hotel_bill')"
-              @hotel-reuse="openPaymentPicker(scope.row, 'hotel_bill')"
-              @hotel-unlink="unlinkPaymentProof(scope.row, $event, 'hotel_bill')"
+              @manage="openProofPicker(scope.row, $event)"
               @itinerary="openItineraryPicker(scope.row)"
             />
             <span
@@ -2583,7 +2662,7 @@ async function retryItemRecognition(id: string): Promise<void> {
       >
         <header class="mobile-expense-heading expense-item-card__header">
           <div class="mobile-expense-title">
-            <strong>{{ categoryNames[item.category] ?? item.category }}</strong>
+            <strong>{{ expenseCategoryName(item) }}</strong>
             <el-tag
               v-if="item.source === 'ocr'
                 || isDurableRecognitionRunning(durableFileByItemId(item.id))"
@@ -2696,7 +2775,7 @@ async function retryItemRecognition(id: string): Promise<void> {
                 :disabled="Boolean(durableActionDisabledReason)"
                 @click="openItineraryPicker(item)"
               >
-                更改关联
+                关联行程单
               </el-button>
             </template>
             <ExpenseReviewHints
@@ -2746,16 +2825,9 @@ async function retryItemRecognition(id: string): Promise<void> {
             :has-itinerary-suggestion="Boolean(suggestionFor(item))"
             :disabled="Boolean(durableActionDisabledReason)"
             :preview-loading="previewLoading"
-            :uploading="paymentUploadingItem === item.id"
-            :error="paymentErrors[item.id]"
             @preview="previewDurableFile"
             @purpose="openMaterialEditor"
-            @upload="choosePaymentProof(item, $event)"
-            @reuse="openPaymentPicker(item)"
-            @unlink="unlinkPaymentProof(item, $event)"
-            @hotel-upload="choosePaymentProof(item, $event, 'hotel_bill')"
-            @hotel-reuse="openPaymentPicker(item, 'hotel_bill')"
-            @hotel-unlink="unlinkPaymentProof(item, $event, 'hotel_bill')"
+            @manage="openProofPicker(item, $event)"
             @itinerary="openItineraryPicker(item)"
           />
         </section>
@@ -2915,37 +2987,149 @@ async function retryItemRecognition(id: string): Promise<void> {
 
   <el-dialog
     v-model="proofPickerVisible"
-    :title="`选择已上传的${attachmentKindLabels[proofPickerKind]}`"
+    :title="`关联${attachmentKindLabels[proofPickerKind]}`"
     width="min(560px, calc(100% - 24px))"
+    align-center
+    data-testid="proof-association-dialog"
   >
-    <p class="field-help">
-      请选择当前费用对应的材料。
-    </p>
-    <el-select
-      v-model="proofPickerSelection"
-      multiple
-      filterable
-      class="full-width"
-      :placeholder="`选择${attachmentKindLabels[proofPickerKind]}`"
-      :disabled="durableBusy"
+    <div
+      v-if="proofPickerItem"
+      class="itinerary-picker-summary"
+      data-testid="proof-picker-summary"
     >
-      <el-option
-        v-for="file in currentProofOptions"
+      <span>{{ proofPickerItem.displayDate || '日期待补充' }}</span>
+      <strong>{{ proofPickerItem.description || '本笔费用' }}</strong>
+      <b>{{ proofPickerItem.amount ? `¥${proofPickerItem.amount}` : '金额待补充' }}</b>
+    </div>
+    <el-form
+      label-position="top"
+      :disabled="Boolean(durableActionDisabledReason)"
+    >
+      <el-form-item :label="`对应${attachmentKindLabels[proofPickerKind]}`">
+        <el-select
+          v-if="currentProofOptions.length || proofPickerSelection.length"
+          v-model="proofPickerSelection"
+          multiple
+          filterable
+          clearable
+          class="full-width"
+          :placeholder="`选择已上传的${attachmentKindLabels[proofPickerKind]}`"
+        >
+          <el-option
+            v-for="file in currentProofOptions"
+            :key="file.id"
+            :label="file.name"
+            :value="file.id"
+          >
+            <span>{{ file.name }} · {{ formatFileSize(file.sizeBytes) }}</span>
+          </el-option>
+        </el-select>
+        <p
+          v-else
+          class="field-help"
+        >
+          还没有可关联的{{ attachmentKindLabels[proofPickerKind] }}，请先上传。
+        </p>
+        <p
+          v-if="proofPickerSelection.length"
+          class="field-help"
+        >
+          已选 {{ proofPickerSelection.length }} 份。可以继续添加或移除选择。
+        </p>
+        <div class="itinerary-editor-actions">
+          <el-button
+            link
+            type="primary"
+            :disabled="Boolean(durableActionDisabledReason || receiptUploadDisabledReason)"
+            :loading="batchActive && proofPickerBatchEntries.length > 0"
+            :title="receiptUploadDisabledReason"
+            data-testid="proof-picker-upload"
+            @click="chooseProofFiles"
+          >
+            ＋ 上传新的{{ attachmentKindLabels[proofPickerKind] }}
+          </el-button>
+        </div>
+      </el-form-item>
+    </el-form>
+    <p class="field-help">
+      在这里上传的新文件会保留在材料列表。选中并确认后才会关联本笔费用；取消保留原有关联。
+    </p>
+    <div
+      v-if="selectedProofFiles.length"
+      class="association-selected-files"
+    >
+      <ExpenseMaterialFile
+        v-for="file in selectedProofFiles"
         :key="file.id"
-        :label="file.name"
-        :value="file.id"
+        :name="file.name"
+        :preview-loading="previewLoading"
+        :preview-available="true"
+        @preview="previewDurableFile(file)"
       >
-        <span>{{ file.name }} · {{ formatFileSize(file.sizeBytes) }}</span>
-      </el-option>
-    </el-select>
+        <template #actions>
+          <el-button
+            type="danger"
+            plain
+            size="small"
+            :disabled="Boolean(durableActionDisabledReason)"
+            @click="proofPickerSelection = proofPickerSelection.filter(id => id !== file.id)"
+          >
+            移除选择
+          </el-button>
+        </template>
+      </ExpenseMaterialFile>
+    </div>
+    <div
+      v-if="proofPickerBatchEntries.length"
+      class="association-upload-status"
+      role="status"
+    >
+      <p
+        v-for="entry in proofPickerBatchEntries"
+        :key="entry.key"
+        class="field-help"
+      >
+        {{ entry.name }} · {{ batchStatusLabels[entry.status] }}
+        <span
+          v-if="entry.error"
+          class="field-error"
+        >{{ entry.error }}</span>
+        <el-button
+          v-if="entry.status === 'failed' && !entry.uploaded"
+          link
+          type="primary"
+          :disabled="durableBusy"
+          @click="retryFailedBatchUpload(entry)"
+        >
+          重试上传
+        </el-button>
+        <el-button
+          v-if="entry.status === 'failed' && !entry.uploaded"
+          link
+          type="danger"
+          :disabled="durableBusy"
+          @click="removeFailedBatchFile(entry)"
+        >
+          移除失败项
+        </el-button>
+        <span v-if="entry.status === 'failed' && entry.uploaded">请关闭弹窗后在费用材料中处理。</span>
+      </p>
+    </div>
+    <p
+      v-if="proofPickerError"
+      class="field-error"
+      role="alert"
+    >
+      {{ proofPickerError }}
+    </p>
     <template #footer>
       <el-button @click="proofPickerVisible = false">
         取消
       </el-button>
       <el-button
         type="primary"
-        :disabled="Boolean(durableActionDisabledReason)"
-        @click="savePaymentSelection"
+        :disabled="Boolean(durableActionDisabledReason) || (!proofPickerChanged && !proofPickerSelection.length)"
+        @click="saveProofSelection"
       >
         确认关联
       </el-button>
@@ -3029,19 +3213,39 @@ async function retryItemRecognition(id: string): Promise<void> {
           v-if="paymentExpenseContext"
           class="field-help"
         >
-          根据付款凭证录入，请确认实际用途和费用类别，并核对日期、说明和人民币金额。凭证仅作为附件；取消不会计入费用。
+          根据付款凭证录入，请确认实际用途和{{ expenseCategoryLabel }}，并核对日期、说明和人民币金额。凭证仅作为附件；取消不会计入费用。
         </p>
-        <el-form-item label="费用类别">
+        <el-form-item :label="expenseCategoryLabel">
           <el-select
-            v-model="editor.category"
+            v-model="editorCategoryValue"
+            :aria-label="expenseCategoryLabel"
             class="full-width"
-            placeholder="请选择费用类别"
+            :placeholder="`请选择${expenseCategoryLabel}`"
           >
             <el-option
-              v-for="category in expense.manualCategories"
-              :key="category.id"
-              :label="category.name"
-              :value="category.id"
+              v-for="option in expenseCategoryOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item
+          v-if="!expense.generalMode && editorCategory === 'employee_welfare'"
+          label="福利费细分"
+        >
+          <el-select
+            v-model="editor.welfareType"
+            placeholder="请选择"
+            class="full-width"
+          >
+            <el-option
+              value="express"
+              label="快递"
+            />
+            <el-option
+              value="other"
+              label="其他"
             />
           </el-select>
         </el-form-item>
@@ -3081,7 +3285,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           </p>
         </el-form-item>
         <p
-          v-if="editor.category === 'rail_fare' && !editorCanSelectRailType"
+          v-if="editorRailCategory && !editorCanSelectRailType"
           class="field-help"
         >
           原始票据已识别为非铁路费用，修改类别不会获得高铁付款凭证豁免；请核对原件。
@@ -3254,8 +3458,8 @@ async function retryItemRecognition(id: string): Promise<void> {
           </el-checkbox>
         </el-form-item>
         <el-form-item
-          v-if="editor.category === 'local_transport'"
-          label="市内交通类型"
+          v-if="editorCategory === 'local_transport'"
+          :label="expense.generalMode ? '交通类型' : '市内交通类型'"
         >
           <el-select
             v-model="editor.transportType"
@@ -3274,10 +3478,15 @@ async function retryItemRecognition(id: string): Promise<void> {
               value="ride_hailing"
               label="网约车（必须有行程单）"
             />
+            <el-option
+              v-if="expense.generalMode"
+              value="rail"
+              label="铁路"
+            />
           </el-select>
         </el-form-item>
       </template>
-      <template v-if="editor.category === 'local_transport' && editor.transportType === 'ride_hailing'">
+      <template v-if="editorCategory === 'local_transport' && editorTransportType === 'ride_hailing'">
         <p
           v-if="!itineraryPickerOnly"
           class="field-help"
@@ -3395,7 +3604,29 @@ async function retryItemRecognition(id: string): Promise<void> {
         </el-form-item>
       </template>
       <el-form-item
-        v-if="!itineraryPickerOnly && (editor.category === 'lodging' || editor.hotelBillFileIds.length)"
+        v-if="!itineraryPickerOnly && editorExpress"
+        label="运单明细（可选）"
+      >
+        <el-select
+          v-model="editor.waybillFileIds"
+          multiple
+          clearable
+          class="full-width"
+          placeholder="选择已上传的运单明细"
+        >
+          <el-option
+            v-for="file in waybillOptions"
+            :key="file.id"
+            :label="file.name"
+            :value="file.id"
+          />
+        </el-select>
+        <p class="field-help">
+          可以在材料列表中将附件用途设为「运单明细」后再选择。
+        </p>
+      </el-form-item>
+      <el-form-item
+        v-if="!itineraryPickerOnly && (editorCategory === 'lodging' || editor.hotelBillFileIds.length)"
         label="住宿明细"
       >
         <el-select
@@ -3448,7 +3679,7 @@ async function retryItemRecognition(id: string): Promise<void> {
           || (!itineraryPickerChanged && !editor.itineraryFileIds.length)))"
         @click="itineraryPickerOnly ? saveItineraryPicker() : saveItem()"
       >
-        {{ itineraryPickerOnly ? '保存关联' : paymentExpenseContext ? '确认并录入费用' : '保存' }}
+        {{ itineraryPickerOnly ? '确认关联' : paymentExpenseContext ? '确认并录入费用' : '保存' }}
       </el-button>
     </template>
   </el-dialog>
@@ -3510,7 +3741,14 @@ async function retryItemRecognition(id: string): Promise<void> {
 }
 .expense-desktop-actions :deep(.el-button) { margin-left: 0; }
 .expense-desktop-actions :deep(.recognition-retry-button) { width: 96px; }
-.receipt-actions :deep(.recognition-retry-button) { min-width: 96px; }
+.receipt-actions {
+  align-items: center;
+  gap: 8px;
+}
+.receipt-actions > :deep(.el-button),
+.receipt-actions :deep(.el-dropdown .el-button) {
+  margin: 0;
+}
 .recognition-status-tag { width: 82px; justify-content: center; }
 .material-workbench__heading,
 .material-workbench__heading + .receipt-list { --material-border: var(--el-border-color-light); --material-background: var(--el-fill-color-lighter); }
@@ -3600,6 +3838,7 @@ async function retryItemRecognition(id: string): Promise<void> {
 .expense-item-card__materials--desktop :deep(.expense-material-group__actions) { margin-left: auto; justify-content: flex-end; }
 .expense-item-card__materials--desktop :deep(.linked-proof-summary) { flex-basis: 100%; order: 1; }
 .expense-item-card__materials--desktop :deep(.expense-materials) { gap: 6px; margin-top: 0; padding-top: 6px; }
+.expense-item-card__materials--desktop > :deep(.expense-materials:first-child) { padding-top: 0; border-top: 0; }
 .expense-mobile-list.expense-mobile-list--active {
   display: grid;
   gap: 12px;
@@ -3708,13 +3947,20 @@ async function retryItemRecognition(id: string): Promise<void> {
   gap: 8px;
 }
 .receipt-list--mobile .receipt-file-preview-link {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  line-height: 1.45;
+}
+.receipt-list--mobile .receipt-file-preview-name {
   display: -webkit-box;
   min-width: 0;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  line-height: 1.45;
 }
+.receipt-file-preview-action { flex-shrink: 0; white-space: nowrap; }
 .receipt-list--mobile .receipt-tags {
   justify-content: flex-end;
   max-width: 132px;
@@ -3752,6 +3998,8 @@ async function retryItemRecognition(id: string): Promise<void> {
 .expense-editor-form--mobile :deep(.el-date-editor) { width: 100%; }
 .itinerary-editor-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; width: 100%; }
 .itinerary-editor-actions :deep(.el-button) { margin-left: 0; }
+.association-selected-files { display: grid; gap: 10px; margin: 12px 0; }
+.association-upload-status { margin-top: 12px; }
 .itinerary-picker-summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

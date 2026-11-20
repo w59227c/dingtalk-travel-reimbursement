@@ -6,10 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, nextTick } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-router'
 
-import { getMe, getPublicConfig, listReimbursementEmployees, prepareReimbursementContext, selectDepartmentFromTravelApproval } from '@/api/auth'
+import { getMe, getPublicConfig, listReimbursementEmployees, prepareReimbursementContext, selectDepartmentForGeneralReimbursement, selectDepartmentFromTravelApproval } from '@/api/auth'
 import { calculateTotals, getExpenseCategories } from '@/api/expenses'
 import { fetchReadiness } from '@/api/health'
 import {
+  correctReimbursementDepartment,
+  openReimbursementWorkspace,
   createReimbursementDraft,
   deleteReimbursementDraft,
   deleteReimbursementDraftFile,
@@ -18,6 +20,8 @@ import {
   getOaReimbursementSubmission,
   getOaReimbursementSubmissionForDraft,
   getReimbursementDraft,
+  listGeneralApprovals,
+  getSavedGeneralApprovals,
   listOaTravelApprovals,
   listReimbursementDraftFiles,
   listReimbursementDrafts,
@@ -25,6 +29,7 @@ import {
   listWorkspaceReimbursements,
   recoverReimbursementDraft,
   markReimbursementDraftReviewReady,
+  replaceGeneralApprovals,
   replaceReimbursementRelatedApprovals,
   submitOaReimbursement,
   updateReimbursementDraft,
@@ -38,6 +43,7 @@ import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 import { updateSubsidyWindow } from '@/utils/subsidyWindow'
 import type { AuthSession } from '@/types/auth'
 import type {
+  OaTravelApprovalList,
   ReimbursementDraft,
   ReimbursementDraftFile,
   ReimbursementDraftInput,
@@ -54,6 +60,7 @@ vi.mock('@/api/auth', async (importOriginal) => ({
   getPublicConfig: vi.fn(),
   listReimbursementEmployees: vi.fn(),
   prepareReimbursementContext: vi.fn(),
+  selectDepartmentForGeneralReimbursement: vi.fn(),
   selectDepartmentFromTravelApproval: vi.fn(),
 }))
 vi.mock('@/api/expenses', async (importOriginal) => {
@@ -61,6 +68,8 @@ vi.mock('@/api/expenses', async (importOriginal) => {
   return { ...actual, calculateTotals: vi.fn(), getExpenseCategories: vi.fn() }
 })
 vi.mock('@/api/reimbursements', () => ({
+  correctReimbursementDepartment: vi.fn(),
+  openReimbursementWorkspace: vi.fn(),
   createReimbursementDraft: vi.fn(),
   deleteReimbursementDraft: vi.fn(),
   deleteReimbursementDraftFile: vi.fn(),
@@ -70,6 +79,8 @@ vi.mock('@/api/reimbursements', () => ({
   getOaReimbursementSubmissionForDraft: vi.fn(),
   getReimbursementDraft: vi.fn(),
   getReimbursementDraftExcelPreview: vi.fn(),
+  listGeneralApprovals: vi.fn(),
+  getSavedGeneralApprovals: vi.fn(),
   listOaTravelApprovals: vi.fn(),
   listReimbursementDraftFiles: vi.fn(),
   listReimbursementDrafts: vi.fn(),
@@ -78,6 +89,7 @@ vi.mock('@/api/reimbursements', () => ({
   recoverReimbursementDraft: vi.fn(),
   markReimbursementDraftReviewReady: vi.fn(),
   recognizeReimbursementDraftFile: vi.fn(),
+  replaceGeneralApprovals: vi.fn(),
   replaceReimbursementRelatedApprovals: vi.fn(),
   submitOaReimbursement: vi.fn(),
   updateReimbursementDraft: vi.fn(),
@@ -292,6 +304,7 @@ const TravelApprovalSelectorStub = defineComponent({
     single: { type: Boolean, default: false },
   },
   emits: ['update:modelValue'],
+  methods: { search() {} },
   template: '<section data-testid="travel-selector">关联出差审批</section>',
 })
 
@@ -315,6 +328,8 @@ function installServerMocks(): void {
   })
   vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
   vi.mocked(getOaReimbursementOptions).mockResolvedValue(options)
+  vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [], complete: true })
+  vi.mocked(getSavedGeneralApprovals).mockResolvedValue([])
   vi.mocked(listReimbursementDrafts).mockImplementation(async () => ({
     items: [serverDraft],
     offset: 0,
@@ -322,9 +337,18 @@ function installServerMocks(): void {
     total: 1,
   }))
   vi.mocked(listReimbursementSubmissionHistory).mockResolvedValue([])
-  vi.mocked(listWorkspaceReimbursements).mockImplementation(async () => {
+  vi.mocked(listWorkspaceReimbursements).mockImplementation(async (request) => {
     const list = await vi.mocked(listReimbursementDrafts).mock.results.at(-1)?.value
-    return { items: list?.items.slice(0, 1) ?? [], total: list?.items.length ? 1 : 0 }
+    const items = list?.items.filter((d: ReimbursementDraft) => (d.kind ?? 'travel') === (request?.kind ?? 'travel')) ?? []
+    return { items: items.slice(0, 1), total: items.length ? 1 : 0 }
+  })
+  vi.mocked(openReimbursementWorkspace).mockImplementation(async () => ({ selectedDepartment: serverDraft.department }))
+  vi.mocked(correctReimbursementDepartment).mockImplementation(async (_id, revision, departmentId, approval) => {
+    const auth = useAuthStore()
+    const department = auth.session!.departments.find(d => d.id === departmentId) ?? auth.session!.selectedDepartment!
+    serverDraft = { ...serverDraft, revision: revision + 1, department,
+      ...(approval ? { relatedApprovals: [{ ...linkedApproval, processInstanceId: approval.processInstanceId }] } : {}) }
+    return { draft: serverDraft, selectedDepartment: department }
   })
   vi.mocked(getReimbursementDraft).mockImplementation(async () => serverDraft)
   vi.mocked(listReimbursementDraftFiles).mockImplementation(async () => ({
@@ -412,7 +436,7 @@ async function selectCoworker(wrapper: VueWrapper): Promise<void> {
   await flushPromises()
 }
 
-async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void, realMaterials = false, mobile = false, realSummary = false): Promise<{
+async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void, realMaterials = false, mobile = false, realSummary = false, realApprovals = false): Promise<{
   wrapper: VueWrapper
   expense: ReturnType<typeof useExpenseStore>
   drafts: ReturnType<typeof useReimbursementDraftStore>
@@ -457,7 +481,7 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
           props: ['to'],
           template: '<a :data-to="to"><slot /></a>',
         },
-        TravelApprovalSelector: TravelApprovalSelectorStub,
+        TravelApprovalSelector: realApprovals ? false : TravelApprovalSelectorStub,
         TripSubsidyCard: TripSubsidyCardStub,
       },
     },
@@ -485,10 +509,912 @@ function visibleButton(wrapper: VueWrapper, label: string) {
 }
 
 async function openReviewStep(wrapper: VueWrapper, mobile: boolean): Promise<void> {
-  if (mobile) await wrapper.findAll('.mobile-step-nav button')[3]!.trigger('click')
+  if (mobile) await wrapper.findAll('.mobile-step-nav button').at(-1)!.trigger('click')
 }
 
 describe('ReimburseView single-form OA flow', () => {
+  it.each([false, true])('preserves local input when department correction has a concurrent revision, mobile=%s', async mobile => {
+    const { wrapper, drafts, expense } = await mountView(auth => { auth.session!.departments.push({ id: '200', name: '另一部门' }) }, false, mobile)
+    try {
+      const conflict = Object.assign(new Error('报销状态已变化'), { isAxiosError: true,
+        response: { status: 409, data: { error: { code: 'REIMBURSEMENT_DRAFT_REVISION_CONFLICT', message: '报销状态已变化' } } } })
+      vi.mocked(correctReimbursementDepartment).mockRejectedValueOnce(conflict)
+      expense.items[0]!.description = '需要保留的本页输入'
+      wrapper.getComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+      await flushPromises()
+      expect(correctReimbursementDepartment).toHaveBeenCalledOnce()
+      expect(drafts.currentDraft?.id).toBe('draft-1')
+      expect(expense.items[0]?.description).toBe('需要保留的本页输入')
+      expect(useAuthStore().session?.selectedDepartment?.id).toBe('100')
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('requires choosing which legacy cross-department draft to retain, mobile=%s', async mobile => {
+    const second = makeDraft({ id: 'legacy-second', department: { id: '200', name: '第二部门' } })
+    vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [serverDraft, second], total: 2 })
+    const { wrapper, drafts } = await mountView(auth => { auth.session!.departments.push(second.department) }, false, mobile)
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel').mockResolvedValueOnce('confirm' as never)
+    try {
+      expect(wrapper.get('[data-testid="legacy-drafts"]').text()).toContain('第二部门')
+      expect(drafts.currentDraft).toBeNull()
+      const choose = wrapper.get('[data-testid="legacy-drafts"]').findAll('button')[0]!
+      await choose.trigger('click'); await flushPromises()
+      expect(openReimbursementWorkspace).not.toHaveBeenCalled()
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+      vi.mocked(openReimbursementWorkspace).mockImplementationOnce(async () => {
+        vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [serverDraft], total: 1 })
+        return { selectedDepartment: serverDraft.department }
+      })
+      await choose.trigger('click'); await flushPromises()
+      expect(confirm).toHaveBeenCalledTimes(2)
+      expect(openReimbursementWorkspace).toHaveBeenCalledWith('draft-1', [
+        { id: 'draft-1', revision: 1 }, { id: second.id, revision: 1 },
+      ], {})
+      expect(drafts.currentDraft?.id).toBe('draft-1')
+      expect(wrapper.find('[data-testid="legacy-drafts"]').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile => ['none', 'matched', 'unresolved', 'unverified', 'single'].map(state => ({ mobile, state }))))(
+    'shows travel department choice only after an unresolved approval, mobile=$mobile state=$state', async ({ mobile, state }) => {
+      serverDraft = makeDraft({ input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: state !== 'unverified' },
+        relatedApprovals: state === 'none' ? [] : [{ ...linkedApproval,
+          originatorDepartmentId: state === 'matched' ? '100' : 'former-department' }] })
+      const { wrapper } = await mountView(auth => {
+        if (state !== 'single') auth.session!.departments.push({ id: '200', name: '第二部门' })
+      }, false, mobile)
+      try {
+        const change = wrapper.findAll('button').filter(button => button.text().trim() === '更换部门')
+        expect(change).toHaveLength(state === 'unresolved' ? 1 : 0)
+        expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true].flatMap(mobile => [false, true].map(lostResponse => ({ mobile, lostResponse }))))(
+    'changes an unresolved travel department while preserving every saved approval, mobile=$mobile lost=$lostResponse', async ({ mobile, lostResponse }) => {
+      const destination = { id: '200', name: '第二部门' }
+      const approvals = [linkedApproval, { ...linkedApproval, processInstanceId: 'second-saved-approval' }]
+        .map(approval => ({ ...approval, originatorDepartmentId: 'former-department' }))
+      serverDraft = makeDraft({ input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: true },
+        relatedApprovals: approvals, relatedApprovalCount: approvals.length })
+      const { wrapper, drafts, expense } = await mountView(auth => { auth.session!.departments.push(destination) }, false, mobile)
+      const originalFiles = JSON.parse(JSON.stringify(drafts.files))
+      const choose = async () => {
+        await visibleButton(wrapper, '更换部门').trigger('click')
+        const gate = wrapper.get('[data-testid="reimbursement-department-gate"]')
+        expect(gate.text()).toContain('所选出差审批无法对应当前有效部门')
+        expect(gate.findComponent(TravelApprovalSelectorStub).exists()).toBe(false)
+        gate.getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', destination.id)
+        await nextTick()
+      }
+      try {
+        await choose(); await visibleButton(wrapper, '取消').trigger('click')
+        expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+        expect(drafts.currentDraft?.relatedApprovals).toEqual(approvals)
+        expense.items[0]!.description = '更正部门时保留的费用说明'
+        vi.mocked(correctReimbursementDepartment).mockImplementationOnce(async (_id, revision) => {
+          serverDraft = { ...serverDraft, revision: revision + 1, department: destination }
+          if (lostResponse) throw new Error('合成响应丢失')
+          return { draft: serverDraft, selectedDepartment: destination }
+        })
+        vi.mocked(getMe).mockImplementation(async () => ({ ...useAuthStore().session!, selectedDepartment: destination }))
+        await choose(); await visibleButton(wrapper, '确认更换').trigger('click'); await flushPromises()
+        expect(correctReimbursementDepartment).toHaveBeenCalledWith('draft-1', expect.any(Number), destination.id, undefined)
+        expect(drafts.currentDraft?.id).toBe('draft-1')
+        expect(drafts.currentDraft?.department).toEqual(destination)
+        expect(drafts.currentDraft?.relatedApprovals).toEqual(approvals)
+        expect(drafts.files).toEqual(originalFiles)
+        expect(expense.items[0]?.description).toBe('更正部门时保留的费用说明')
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+        expect(selectDepartmentFromTravelApproval).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true])('shows the load failure in the new travel department picker and can retry, mobile=%s', async (mobile) => {
+    const department = serverDraft.department
+    const departments = [department, { id: '200', name: '示例项目部' }]
+    const { wrapper } = await mountView(auth => {
+      auth.session!.departments = departments
+      auth.session!.selectedDepartment = null
+      auth.status = 'department_required'
+    }, false, mobile)
+    try {
+      await visibleButton(wrapper, '新开一笔').trigger('click')
+      vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({ departments, selectedDepartment: department, selectionRequired: false })
+      vi.mocked(listWorkspaceReimbursements).mockRejectedValueOnce(new Error('报销内容暂时无法读取'))
+      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+      await flushPromises()
+      expect(wrapper.get('[data-testid="reimbursement-department-gate"]').text()).toContain('报销内容暂时无法读取')
+      expect(visibleButton(wrapper, '重新加载报销').isVisible()).toBe(true)
+      const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+      await visibleButton(wrapper, '重新加载报销').trigger('click')
+      await flushPromises()
+      expect(confirm).toHaveBeenCalledOnce()
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('keeps the approval search open when the first batch has no matches, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
+    vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [], complete: false, nextCursor: 'next-demo-page' })
+    const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+    try {
+      const section = wrapper.get('[data-testid="general-approval-section"]')
+      section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+      await flushPromises()
+      expect(section.text()).toContain('本批未找到符合条件的审批')
+      expect(section.text()).not.toContain('当前查询范围内没有符合条件的审批')
+      expect(visibleButton(wrapper, '继续查找').isVisible()).toBe(true)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('continues approval search and restores a saved approval outside the query, mobile=%s', async (mobile) => {
+    const oldId = 'old-instance-with-internal-id'
+    serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [], generalApprovalIds: [oldId] } })
+    const old = { processInstanceId: oldId, title: '历史采购审批', businessId: 'PUR-OLD', status: 'COMPLETED', createdAt: '2026-01-10T02:00:00Z', result: 'agree' }
+    vi.mocked(getSavedGeneralApprovals).mockResolvedValue([old])
+    vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [], complete: false, nextCursor: 'next-demo-page' })
+      .mockRejectedValueOnce(new Error('审批目录暂不可用，已保留查询进度'))
+      .mockResolvedValueOnce({ items: [{ ...old, processInstanceId: 'new-result', title: '后续查询结果' }], complete: true })
+    const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+    try {
+      const section = wrapper.get('[data-testid="general-approval-section"]')
+      section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+      await flushPromises()
+      expect(section.text()).toContain('历史采购审批')
+      expect(section.text()).toContain('PUR-OLD')
+      expect(section.text()).not.toContain(oldId)
+      await visibleButton(wrapper, '继续查找').trigger('click')
+      await flushPromises()
+      expect(section.text()).toContain('审批目录暂不可用，已保留查询进度')
+      expect(section.text()).toContain('历史采购审批')
+      await visibleButton(wrapper, '重新加载').trigger('click')
+      await flushPromises()
+      expect(listGeneralApprovals).toHaveBeenLastCalledWith({ cursor: 'next-demo-page' }, expect.any(AbortSignal))
+      expect(section.text()).toContain('后续查询结果')
+      expect(section.text()).toContain('已选 1 张')
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('requires a fresh search after editing the approval filters, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
+    vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [], complete: false, nextCursor: 'old-page' })
+    const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+    try {
+      const section = wrapper.get('[data-testid="general-approval-section"]')
+      section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+      await flushPromises()
+      if (mobile) await visibleButton(wrapper, '筛选审批').trigger('click')
+      await section.get('input[aria-label="搜索本人审批"]').setValue('差旅申请')
+      expect(section.text()).toContain('筛选条件已修改')
+      expect(visibleButton(wrapper, '继续查找').attributes('disabled')).toBeDefined()
+      await visibleButton(wrapper, '继续查找').trigger('click')
+      expect(listGeneralApprovals).toHaveBeenCalledOnce()
+      await visibleButton(wrapper, '查询审批').trigger('click')
+      await flushPromises()
+      expect(listGeneralApprovals).toHaveBeenLastCalledWith({ query: '差旅申请' }, expect.any(AbortSignal))
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('confirms replacing an ordinary draft found after the first department choice, mobile=%s', async (mobile) => {
+    const department = { id: '100', name: '测试部门' }
+    const otherDepartment = { id: '200', name: '示例项目部' }
+    serverDraft = makeDraft({ kind: 'general', department, input: { ...baseInput, items: [] } })
+    vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...options, travelProfiles: [] })
+    vi.mocked(selectDepartmentForGeneralReimbursement).mockResolvedValue(department)
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+    const { wrapper, drafts } = await mountView(auth => {
+      auth.session!.departments = [department, otherDepartment]
+      auth.session!.selectedDepartment = null
+      auth.status = 'department_required'
+      useReimbursementDraftStore().reimbursementKind = 'general'
+    }, false, mobile)
+    try {
+      expect(drafts.currentDraft).toBeNull()
+      await visibleButton(wrapper, '新开一笔').trigger('click')
+      const gate = wrapper.get('[data-testid="reimbursement-department-gate"]')
+      expect(gate.text()).toContain('选择本次报销部门')
+      expect(confirm).not.toHaveBeenCalled()
+      gate.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', department.id)
+      await nextTick()
+      await visibleButton(wrapper, '确认部门').trigger('click')
+      await flushPromises()
+      expect(confirm).toHaveBeenCalledWith(expect.any(String), '新开一笔报销', expect.anything())
+      expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+  it.each([false, true])('requires an explicit ordinary expense department after travel has bound another department, mobile=%s', async (mobile) => {
+    const travel = { id: '100', name: '测试部门' }
+    const ordinary = { id: '200', name: '示例项目部' }
+    const { wrapper, drafts } = await mountView(auth => {
+      auth.session!.departments = [travel, ordinary]
+      auth.session!.selectedDepartment = travel
+    }, false, mobile)
+    try {
+      await wrapper.get('[data-testid="switch-general"]').trigger('click')
+      await flushPromises()
+      const gate = wrapper.get('[data-testid="reimbursement-department-gate"]')
+      expect(gate.text()).toContain('选择本次报销部门')
+      expect(listWorkspaceReimbursements).toHaveBeenCalledTimes(2)
+      expect(drafts.currentDraft).toBeNull()
+      serverDraft = makeDraft({ id: 'ordinary-in-200', kind: 'general', department: ordinary })
+      vi.mocked(selectDepartmentForGeneralReimbursement).mockResolvedValue(ordinary)
+      gate.getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', ordinary.id)
+      await nextTick()
+      await visibleButton(wrapper, '确认部门').trigger('click')
+      await flushPromises()
+      expect(listWorkspaceReimbursements).toHaveBeenLastCalledWith({ kind: 'general', expectedDepartment: ordinary })
+      expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile => [false, true].map(lostResponse => ({ mobile, lostResponse }))))(
+    'corrects the same ordinary draft without resetting the page, mobile=$mobile lost=$lostResponse', async ({ mobile, lostResponse }) => {
+      const first = { id: '100', name: '测试部门' }, second = { id: '200', name: '第二部门' }
+      serverDraft = makeDraft({ kind: 'general', input: canonicalNoSubsidyInput() })
+      const originalFiles = structuredClone(serverFiles)
+      const { wrapper, drafts, expense } = await mountView(auth => {
+        auth.session!.departments = [first, second]
+        useReimbursementDraftStore().reimbursementKind = 'general'
+      }, false, mobile)
+      const choose = async () => {
+        await visibleButton(wrapper, '更换部门').trigger('click')
+        wrapper.get('[data-testid="reimbursement-department-gate"]').getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', second.id)
+        await nextTick()
+      }
+      try {
+        await choose(); await visibleButton(wrapper, '取消').trigger('click')
+        expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+        expense.items[0]!.description = '更正后继续填写的说明'
+        vi.mocked(correctReimbursementDepartment).mockImplementationOnce(async (_id, revision) => {
+          serverDraft = { ...serverDraft, revision: revision + 1, department: second }
+          if (lostResponse) throw new Error('合成响应丢失')
+          return { draft: serverDraft, selectedDepartment: second }
+        })
+        vi.mocked(getMe).mockImplementation(async () => ({ ...useAuthStore().session!, selectedDepartment: second }))
+        await choose(); await visibleButton(wrapper, '确认更换').trigger('click'); await flushPromises()
+        expect(drafts.currentDraft?.id).toBe('draft-1')
+        expect(drafts.currentDraft?.department).toEqual(second)
+        expect(drafts.files).toEqual(originalFiles)
+        expect(expense.items[0]?.description).toBe('更正后继续填写的说明')
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+        wrapper.unmount()
+        const restored = await mountView(auth => {
+          auth.session!.departments = [first, second]
+          auth.session!.selectedDepartment = second
+          useReimbursementDraftStore().reimbursementKind = 'general'
+        }, false, mobile)
+        expect(restored.drafts.currentDraft?.id).toBe('draft-1')
+        expect(restored.expense.items[0]?.description).toBe('更正后继续填写的说明')
+        expect(restored.drafts.files).toEqual(originalFiles)
+        restored.wrapper.unmount()
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true])('keeps each kind and its materials when switching between different departments, mobile=%s', async mobile => {
+    const original = { id: '100', name: '测试部门' }, second = { id: '200', name: '第二部门' }
+    const records = { travel: makeDraft({ id: 'travel-current', department: original, input: canonicalNoSubsidyInput() }),
+      general: makeDraft({ id: 'general-current', kind: 'general', department: second, input: canonicalNoSubsidyInput() }) }
+    vi.mocked(listWorkspaceReimbursements).mockImplementation(async request => ({ items: [records[request?.kind ?? 'travel']], total: 1 }))
+    vi.mocked(getReimbursementDraft).mockImplementation(async id => id === records.travel.id ? records.travel : records.general)
+    vi.mocked(listReimbursementDraftFiles).mockImplementation(async id => ({ draftId: id, revision: 1,
+      items: [{ ...activeFile, id: id + '-file' }] }))
+    vi.mocked(openReimbursementWorkspace).mockImplementation(async id => ({ selectedDepartment: id === records.travel.id ? original : second }))
+    const { wrapper, drafts } = await mountView(auth => { auth.session!.departments = [original, second] }, false, mobile)
+    try {
+      expect(drafts.currentDraft?.id).toBe(records.travel.id)
+      await wrapper.get('[data-testid="switch-general"]').trigger('click'); await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(records.general.id)
+      expect(drafts.files[0]?.id).toBe(records.general.id + '-file')
+      expect(useAuthStore().session?.selectedDepartment).toEqual(second)
+      await wrapper.get('[data-testid="switch-travel"]').trigger('click'); await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(records.travel.id)
+      expect(drafts.files[0]?.id).toBe(records.travel.id + '-file')
+      expect(useAuthStore().session?.selectedDepartment).toEqual(original)
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('preserves the form when a lost department response reveals a real concurrent difference, mobile=%s', async mobile => {
+    serverDraft = makeDraft({ kind: 'general', input: canonicalNoSubsidyInput() })
+    const second = { id: '200', name: '第二部门' }
+    const { wrapper, expense, drafts } = await mountView(auth => {
+      auth.session!.departments.push(second)
+      useReimbursementDraftStore().reimbursementKind = 'general'
+    }, false, mobile)
+    try {
+      vi.mocked(correctReimbursementDepartment).mockImplementationOnce(async (_id, revision) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, department: second,
+          input: { ...serverDraft.input, items: [{ ...serverDraft.input.items[0]!, amount: '999.00' }] } }
+        throw new Error('响应丢失且服务器内容另有变化')
+      })
+      vi.mocked(getMe).mockImplementation(async () => ({ ...useAuthStore().session!, selectedDepartment: second }))
+      await visibleButton(wrapper, '更换部门').trigger('click')
+      wrapper.get('[data-testid="reimbursement-department-gate"]').getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', second.id)
+      await nextTick(); await visibleButton(wrapper, '确认更换').trigger('click'); await flushPromises()
+      expect(expense.items[0]?.amount).toBe('44.89')
+      expect(drafts.currentDraft?.department.id).toBe('100')
+      expect(useAuthStore().session?.selectedDepartment?.id).toBe('100')
+      expect(wrapper.text()).toContain('响应丢失且服务器内容另有变化')
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile => ['travel', 'general'].map(kind => ({ mobile, kind }))))(
+    'keeps a failed local upload through department correction and retry, kind=$kind mobile=$mobile', async ({ mobile, kind }) => {
+      const target = { id: '200', name: '第二部门' }
+      const proof = { ...activeFile, id: 'payment-existing', name: 'existing-payment.pdf',
+        role: 'ATTACHMENT_ONLY' as const, attachmentKind: 'payment_proof' as const,
+        ocrStatus: 'NOT_REQUESTED' as const }
+      const input = canonicalNoSubsidyInput()
+      input.accountingSourceVerified = false
+      input.items[0]!.amount = '600.00'
+      input.items[0]!.paymentProofFileIds = [proof.id]
+      serverDraft = makeDraft({ kind: kind as 'travel' | 'general', input,
+        relatedApprovals: [], relatedApprovalCount: 0 })
+      serverFiles = [activeFile, proof]
+      vi.mocked(uploadReimbursementDraftFile).mockRejectedValueOnce(new Error('合成补充材料上传失败'))
+      vi.mocked(updateReimbursementDraft).mockImplementation(async (_id, revision, value) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(value) }
+        return serverDraft
+      })
+      vi.mocked(correctReimbursementDepartment).mockImplementation(async (_id, revision) => {
+        serverDraft = { ...serverDraft, department: target, revision: revision + 1,
+          relatedApprovals: kind === 'travel' ? [{ ...linkedApproval, originatorDepartmentId: target.id }] : [],
+          input: { ...serverDraft.input, accountingSourceVerified: kind === 'travel' } }
+        return { draft: serverDraft, selectedDepartment: target }
+      })
+      const { wrapper, drafts, expense } = await mountView(auth => {
+        auth.session!.departments.push(target)
+        useReimbursementDraftStore().reimbursementKind = kind as 'travel' | 'general'
+      }, true, mobile)
+      try {
+        await visibleButton(wrapper, '关联付款凭证').trigger('click')
+        await wrapper.get('[data-testid="proof-picker-upload"]').trigger('click')
+        const upload = wrapper.get<HTMLInputElement>('[data-testid="durable-payment-proof-input"]')
+        const originalFile = new File(['synthetic'], 'failed-additional.pdf', { type: 'application/pdf' })
+        Object.defineProperty(upload.element, 'files', { configurable: true, value: [originalFile] })
+        await upload.trigger('change'); await flushPromises()
+        const picker = wrapper.findAllComponents({ name: 'ElDialog' }).find(x => x.props('title') === '关联付款凭证')!
+        await picker.findAll('button').find(b => b.text() === '取消')!.trigger('click')
+        await flushPromises()
+        const card = () => wrapper.findComponent({ name: 'ExpenseItemsCard' }).vm as unknown as {
+          hasUnpersistedFailedUploads: boolean; batchFiles: Array<{ name: string; source?: File }>
+        }
+        expect(card().hasUnpersistedFailedUploads).toBe(true)
+        if (kind === 'general') {
+          await visibleButton(wrapper, '更换部门').trigger('click')
+          wrapper.get('[data-testid="reimbursement-department-gate"]').getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', target.id)
+          await nextTick()
+          await visibleButton(wrapper, '确认更换').trigger('click')
+        } else {
+          drafts.travelApprovals = [{ ...linkedApproval, originatorDepartmentId: target.id } as never]
+          wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+        }
+        await flushPromises()
+        expect(correctReimbursementDepartment).toHaveBeenCalled()
+        expect(drafts.currentDraft?.id).toBe('draft-1')
+        expect(drafts.currentDraft?.department).toEqual(target)
+        expect(drafts.files.map(f => f.id)).toEqual(['file-1', proof.id])
+        expect(expense.items[0]?.paymentProofFileIds).toEqual([proof.id])
+        expect(card().hasUnpersistedFailedUploads).toBe(true)
+        expect(card().batchFiles.find(f => f.name === originalFile.name)?.source).toBe(originalFile)
+        expect(wrapper.get('[data-testid="batch-progress"]').text()).toContain(originalFile.name)
+        const retryFile = { ...proof, id: 'retried-payment', name: originalFile.name }
+        vi.mocked(uploadReimbursementDraftFile).mockImplementationOnce(async (_id, revision) => {
+          serverDraft = { ...serverDraft, revision: revision + 1 }
+          serverFiles.push(retryFile)
+          return { draftId: _id, revision: serverDraft.revision, file: retryFile }
+        })
+        await wrapper.get('[data-testid="batch-progress"]').findAll('button').find(b => b.text() === '重试上传')!.trigger('click')
+        await flushPromises()
+        expect(card().hasUnpersistedFailedUploads).toBe(false)
+        expect(drafts.files.map(f => f.id)).toContain(retryFile.id)
+        expect(expense.items[0]?.paymentProofFileIds).toEqual([proof.id])
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).flatMap(kind =>
+    [false, true].map(newManual => ({ mobile, kind, newManual })))))(
+    'retries a failed manual-row proof after department correction, kind=$kind mobile=$mobile new=$newManual',
+    async ({ mobile, kind, newManual }) => {
+      const target = { id: '200', name: '第二部门' }
+      const input = canonicalNoSubsidyInput()
+      input.accountingSourceVerified = false
+      const item = { ...input.items[0]!, sourceFileId: undefined, description: '合成手工费用', amount: '600.00',
+        subjectValue: kind === 'general' ? 'synthetic-local' : undefined }
+      input.items = newManual ? [] : [item]
+      serverDraft = makeDraft({ kind, input, relatedApprovals: [], relatedApprovalCount: 0,
+        totals: { expenseTotal: '600.00', subsidyTotal: '0.00', totalAmount: '600.00', receiptCount: 1,
+          uppercaseAmount: '陆佰元整', subsidy: null } })
+      serverFiles = []
+      vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
+      if (kind === 'general') vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...options, travelProfiles: [],
+        subjectOptions: [{ value: 'synthetic-local', label: '交通费', categoryId: 'local_transport', key: null }] })
+      vi.mocked(uploadReimbursementDraftFile).mockRejectedValueOnce(new Error('合成付款凭证上传失败'))
+      vi.mocked(uploadReimbursementDraftFile).mockImplementationOnce(async (id, revision, file) => {
+        const proof = { ...activeFile, id: 'retry-proof', name: file.name, role: 'ATTACHMENT_ONLY' as const,
+          attachmentKind: 'payment_proof' as const, ocrStatus: 'NOT_REQUESTED' as const }
+        serverDraft = { ...serverDraft, revision: revision + 1 }
+        serverFiles.push(proof)
+        return { draftId: id, revision: revision + 1, file: proof }
+      })
+      vi.mocked(updateReimbursementDraft).mockImplementation(async (_id, revision, value) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: { ...structuredClone(value),
+          accountingSourceVerified: serverDraft.input.accountingSourceVerified } }
+        return serverDraft
+      })
+      vi.mocked(correctReimbursementDepartment).mockImplementation(async (_id, revision) => {
+        serverDraft = { ...serverDraft, department: target, revision: revision + 1,
+          relatedApprovals: kind === 'travel' ? [{ ...linkedApproval, originatorDepartmentId: target.id }] : [],
+          relatedApprovalCount: kind === 'travel' ? 1 : 0,
+          input: { ...serverDraft.input, accountingSourceVerified: kind === 'travel' } }
+        return { draft: serverDraft, selectedDepartment: target }
+      })
+      const { wrapper, drafts, expense } = await mountView(auth => {
+        auth.session!.departments.push(target)
+        useReimbursementDraftStore().reimbursementKind = kind
+      }, true, mobile, false, true)
+      try {
+        if (newManual) {
+          expense.upsertManualItem({ category: 'local_transport', description: '合成手工费用', date: '2026-09-01',
+            displayDate: '2026-09-01', amount: '600.00', receiptCount: 1,
+            subjectValue: kind === 'general' ? 'synthetic-local' : undefined })
+          await nextTick()
+          await vi.waitFor(() => expect(serverDraft.input.items).toHaveLength(1), { timeout: 2000 })
+        }
+        const originalId = expense.items[0]!.id
+        await visibleButton(wrapper, '关联付款凭证').trigger('click')
+        await wrapper.get('[data-testid="proof-picker-upload"]').trigger('click')
+        const source = new File(['synthetic'], 'failed-manual-payment.pdf', { type: 'application/pdf' })
+        const fileInput = wrapper.get<HTMLInputElement>('[data-testid="durable-payment-proof-input"]')
+        Object.defineProperty(fileInput.element, 'files', { configurable: true, value: [source] })
+        await fileInput.trigger('change'); await flushPromises()
+        const picker = wrapper.findAllComponents({ name: 'ElDialog' }).find(x => x.props('title') === '关联付款凭证')!
+        await picker.findAll('button').find(b => b.text() === '取消')!.trigger('click'); await flushPromises()
+        const state = () => wrapper.findComponent({ name: 'ExpenseItemsCard' }).vm as unknown as {
+          hasUnpersistedFailedUploads: boolean; batchFiles: Array<{ name: string; source?: File; target?: { itemId: string } }>
+        }
+        expect(state().hasUnpersistedFailedUploads).toBe(true)
+        expect(state().batchFiles[0]?.target?.itemId).toBe(originalId)
+        if (kind === 'general') {
+          await visibleButton(wrapper, '更换部门').trigger('click')
+          wrapper.get('[data-testid="reimbursement-department-gate"]').getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', target.id)
+          await nextTick(); await visibleButton(wrapper, '确认更换').trigger('click')
+        } else {
+          drafts.travelApprovals = [{ ...linkedApproval, originatorDepartmentId: target.id, profileDisplayName: '合成出差',
+            travelTypeOption: { value: 'business', label: '出差' }, companyOption: { value: '北京', label: '北京分公司', key: null },
+            budgetCodeOption: { value: 'DEMO-001', label: '示例项目', key: null } } as never]
+          await flushPromises()
+          await wrapper.get('[data-testid="travel-approval-section"]').get<HTMLInputElement>('input[type=checkbox]').setValue(true)
+        }
+        await flushPromises()
+        expect(drafts.currentDraft?.department).toEqual(target)
+        expect(expense.items[0]!.id).toBe(originalId)
+        expect(state().batchFiles.find(f => f.name === source.name)?.source).toBe(source)
+        const row = wrapper.findAll('[data-testid="batch-file"]').find(f => f.text().includes(source.name))!
+        await row.findAll('button').find(b => b.text() === '重试上传')!.trigger('click'); await flushPromises()
+        expect(uploadReimbursementDraftFile).toHaveBeenCalledTimes(2)
+        expect(state().hasUnpersistedFailedUploads).toBe(false)
+        expect(expense.items[0]).toMatchObject({ description: '合成手工费用', amount: '600.00' })
+        expect(drafts.files.some(file => file.id === 'retry-proof')).toBe(true)
+        expect(expense.items[0]?.paymentProofFileIds ?? []).toEqual([])
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).flatMap(kind =>
+    [false, true].map(unselected => ({ mobile, kind, unselected })))))(
+    'accepts a saved department correction after response loss with a different Session selection, kind=$kind mobile=$mobile unselected=$unselected',
+    async ({ mobile, kind, unselected }) => {
+      const target = { id: '200', name: '第二部门' }
+      const approvals = kind === 'travel' ? [{ ...linkedApproval, originatorDepartmentId: 'former' }] : []
+      serverDraft = makeDraft({ kind, input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: true },
+        relatedApprovals: approvals, relatedApprovalCount: approvals.length })
+      const { wrapper, drafts, expense } = await mountView(auth => {
+        auth.session!.departments.push(target)
+        useReimbursementDraftStore().reimbursementKind = kind
+      }, false, mobile)
+      const originalFiles = structuredClone(serverFiles)
+      const originalItems = expense.buildDraftExpenseItems()
+      try {
+        vi.mocked(correctReimbursementDepartment).mockImplementationOnce(async (_id, revision) => {
+          serverDraft = { ...serverDraft, revision: revision + 1, department: target }
+          throw new Error('合成部门响应丢失')
+        })
+        vi.mocked(getMe).mockImplementation(async () => ({ ...useAuthStore().session!,
+          selectedDepartment: unselected ? null : { id: '100', name: '会话另选部门' } }))
+        await visibleButton(wrapper, '更换部门').trigger('click')
+        wrapper.get('[data-testid="reimbursement-department-gate"]').getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', target.id)
+        await nextTick()
+        await visibleButton(wrapper, '确认更换').trigger('click'); await flushPromises()
+        expect(correctReimbursementDepartment).toHaveBeenCalledOnce()
+        expect(drafts.currentDraft?.department).toEqual(target)
+        expect(drafts.currentDraft?.id).toBe('draft-1')
+        expect(drafts.currentDraft?.relatedApprovals).toEqual(approvals)
+        expect(drafts.files).toEqual(originalFiles)
+        expect(expense.buildDraftExpenseItems()).toEqual(originalItems)
+        expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+        expect(wrapper.find('[data-testid="reimbursement-department-gate"]').exists()).toBe(false)
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true])('rejects a lost correction when another write saved a different target department, mobile=%s', async mobile => {
+    const target = { id: '200', name: '第二部门' }
+    serverDraft = makeDraft({ kind: 'general', input: canonicalNoSubsidyInput() })
+    const { wrapper, drafts } = await mountView(auth => {
+      auth.session!.departments.push(target)
+      useReimbursementDraftStore().reimbursementKind = 'general'
+    }, false, mobile)
+    try {
+      vi.mocked(correctReimbursementDepartment).mockImplementationOnce(async (_id, revision) => {
+        serverDraft = { ...serverDraft, revision: revision + 1 }
+        throw new Error('合成并发写入')
+      })
+      vi.mocked(getMe).mockImplementation(async () => ({ ...useAuthStore().session!, selectedDepartment: target }))
+      await visibleButton(wrapper, '更换部门').trigger('click')
+      wrapper.get('[data-testid="reimbursement-department-gate"]').getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', target.id)
+      await nextTick()
+      await visibleButton(wrapper, '确认更换').trigger('click'); await flushPromises()
+      expect(drafts.currentDraft?.department.id).toBe('100')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(true)
+      expect(wrapper.get('[data-testid="reimbursement-department-gate"]').text()).toContain('合成并发写入')
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('adopts the department derived by saving a changed approval group without resetting work, mobile=%s', async mobile => {
+    const first = { ...linkedApproval, processInstanceId: 'approval-a', title: '部门 A 出差', originatorDepartmentId: '100' }
+    const second = { ...linkedApproval, processInstanceId: 'approval-b', title: '部门 B 出差', originatorDepartmentId: '200' }
+    const target = { id: '200', name: '第二部门' }
+    serverDraft = makeDraft({ input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: true },
+      relatedApprovals: [first, second], relatedApprovalCount: 2 })
+    vi.mocked(replaceReimbursementRelatedApprovals).mockImplementationOnce(async (_id, revision) => {
+      // The server returns the department in the same CAS result as the saved group.
+      serverDraft = { ...serverDraft, revision: revision + 1, department: target,
+        relatedApprovals: [second], relatedApprovalCount: 1,
+        relatedApprovalSummary: { count: 1, startDate: second.startDate, endDate: second.endDate } }
+      return serverDraft
+    })
+    const { wrapper, drafts, expense } = await mountView(auth => { auth.session!.departments.push(target) }, false, mobile, false, true)
+    const originalItems = expense.buildDraftExpenseItems()
+    const originalFiles = structuredClone(serverFiles)
+    try {
+      expect(wrapper.findAll('button').some(b => b.text() === '更换部门')).toBe(true)
+      const row = wrapper.get('[data-testid="travel-approval-section"]').findAll('.travel-approval-row')
+        .find(candidate => candidate.text().includes(first.title))!
+      await row.get<HTMLInputElement>('input[type="checkbox"]').setValue(false)
+      await flushPromises()
+      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledWith('draft-1', expect.any(Number), [
+        expect.objectContaining({ processInstanceId: second.processInstanceId }),
+      ], expect.anything())
+      expect(drafts.currentDraft?.department).toEqual(target)
+      expect(drafts.currentDraft?.relatedApprovals).toEqual([second])
+      expect(wrapper.get('[data-testid="reimbursement-basics-card"]').text()).toContain(target.name)
+      expect(wrapper.findAll('button').some(b => b.text() === '更换部门')).toBe(false)
+      expect(expense.buildDraftExpenseItems()).toEqual(originalItems)
+      expect(drafts.files).toEqual(originalFiles)
+      expect(drafts.currentDraft?.id).toBe('draft-1')
+      expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile => [false, true].map(multiple => ({ mobile, multiple }))))(
+    'recovers an obsolete travel department by choosing its first approval without replacing content, mobile=$mobile multiple=$multiple', async ({ mobile, multiple }) => {
+      serverDraft = makeDraft({ department: { id: 'former', name: '原部门已撤销' }, relatedApprovals: [], relatedApprovalCount: 0,
+        input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: false } })
+      const { wrapper, drafts, expense } = await mountView(auth => {
+        if (multiple) auth.session!.departments.push({ id: '200', name: '第二部门' })
+      }, false, mobile)
+      try {
+        const originalItems = expense.buildDraftExpenseItems()
+        const originalFiles = drafts.files.map(file => ({ ...file }))
+        expect(wrapper.text()).toContain('原办理部门已变更')
+        expect(wrapper.findAllComponents({ name: 'ElAlert' }).find(alert => String(alert.props('title')).includes('原办理部门已变更'))?.props('type')).toBe('info')
+        expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+        expect(wrapper.getComponent(TravelApprovalSelectorStub).props('readonly')).toBe(false)
+        expect(wrapper.findAll('button').some(button => button.text().trim() === '更换部门')).toBe(false)
+        await visibleButton(wrapper, '选择出差审批').trigger('click')
+        wrapper.getComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+        await flushPromises()
+        expect(correctReimbursementDepartment).toHaveBeenCalledWith('draft-1', 1, undefined, selection)
+        expect(replaceReimbursementRelatedApprovals).not.toHaveBeenCalled()
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+        expect(drafts.currentDraft?.id).toBe('draft-1')
+        expect(drafts.currentDraft?.department.id).toBe('100')
+        expect(expense.buildDraftExpenseItems()).toEqual(originalItems)
+        expect(drafts.files).toEqual(originalFiles)
+        expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true].flatMap(mobile => ['LOCKED', 'EXPIRED', 'recovery'].map(state => ({ mobile, state }))))(
+    'keeps the travel department recovery entry closed for protected drafts, mobile=$mobile state=$state', async ({ mobile, state }) => {
+      serverDraft = makeDraft({ department: { id: 'former', name: '原部门已撤销' },
+        status: state === 'recovery' ? 'DRAFT' : state as 'LOCKED' | 'EXPIRED', recoveryPending: state === 'recovery' })
+      const { wrapper } = await mountView(undefined, false, mobile)
+      try {
+        expect(wrapper.findAll('button').some(button => button.text().trim() === '选择出差审批')).toBe(false)
+        const picker = wrapper.findComponent(TravelApprovalSelectorStub)
+        if (picker.exists()) expect(picker.props('readonly')).toBe(true)
+        expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true].flatMap(mobile => ['100', '200'].map(departmentId => ({ mobile, departmentId }))))(
+    'corrects a renamed ordinary department with the same ID after cancel and preserves content, mobile=$mobile department=$departmentId', async ({ mobile, departmentId }) => {
+      serverDraft = makeDraft({ kind: 'general', department: { id: departmentId, name: '旧部门名称' }, input: canonicalNoSubsidyInput() })
+      const current = { id: departmentId, name: '新部门名称' }
+      vi.mocked(openReimbursementWorkspace).mockResolvedValue({ selectedDepartment: current })
+      const { wrapper, drafts, expense } = await mountView(auth => {
+        auth.session!.departments = [current]
+        auth.session!.selectedDepartment = departmentId === '100' ? current : { id: '100', name: '测试部门' }
+        useReimbursementDraftStore().reimbursementKind = 'general'
+      }, false, mobile)
+      try {
+        const originalItems = expense.buildDraftExpenseItems()
+        const originalFiles = drafts.files.map(file => ({ ...file }))
+        expect(wrapper.text()).toContain('原办理部门已变更')
+        await visibleButton(wrapper, '更换部门').trigger('click')
+        expect(visibleButton(wrapper, '确认更换').attributes('disabled')).toBeUndefined()
+        await visibleButton(wrapper, '取消').trigger('click')
+        expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+        expect(drafts.currentDraft?.department.name).toBe('旧部门名称')
+        await visibleButton(wrapper, '更换部门').trigger('click')
+        await visibleButton(wrapper, '确认更换').trigger('click')
+        await flushPromises()
+        expect(correctReimbursementDepartment).toHaveBeenCalledWith('draft-1', 2, departmentId, undefined)
+        expect(drafts.currentDraft?.department).toEqual(current)
+        expect(expense.buildDraftExpenseItems()).toEqual(originalItems)
+        expect(drafts.files).toEqual(originalFiles)
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+        expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true])('lets a single-department user correct an obsolete general department, mobile=%s', async mobile => {
+    serverDraft = makeDraft({ kind: 'general', department: { id: 'former', name: '原部门已撤销' }, input: canonicalNoSubsidyInput() })
+    const { wrapper, drafts } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+    try {
+      expect(wrapper.text()).toContain('原办理部门已变更')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+      await visibleButton(wrapper, '更换部门').trigger('click')
+      expect(visibleButton(wrapper, '确认更换').attributes('disabled')).toBeUndefined()
+      await visibleButton(wrapper, '确认更换').trigger('click'); await flushPromises()
+      expect(drafts.currentDraft?.id).toBe('draft-1')
+      expect(drafts.currentDraft?.department.id).toBe('100')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('restores the current ordinary draft across the Session department, mobile=%s', async mobile => {
+    const original = { id: '100', name: '测试部门' }, destination = { id: '200', name: '第二部门' }
+    serverDraft = makeDraft({ kind: 'general', department: destination, input: canonicalNoSubsidyInput() })
+    const { wrapper, drafts } = await mountView(auth => {
+      auth.session!.departments = [original, destination]
+      useReimbursementDraftStore().reimbursementKind = 'general'
+    }, false, mobile)
+    try {
+      expect(openReimbursementWorkspace).toHaveBeenCalledOnce()
+      expect(drafts.currentDraft?.id).toBe('draft-1')
+      expect(useAuthStore().session?.selectedDepartment).toEqual(destination)
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('does not carry a pending new travel reimbursement into the general workspace, mobile=%s', async (mobile) => {
+    const department = { id: '100', name: '测试部门' }
+    const otherDepartment = { id: '200', name: '示例项目部' }
+    serverDraft = makeDraft({ kind: 'general', department, input: { ...baseInput, items: [] } })
+    vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...options, travelProfiles: [] })
+    vi.mocked(selectDepartmentForGeneralReimbursement).mockResolvedValue(department)
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+    const { wrapper, drafts } = await mountView(auth => {
+      auth.session!.departments = [department, otherDepartment]
+      auth.session!.selectedDepartment = null
+      auth.status = 'department_required'
+    }, false, mobile)
+    try {
+      await visibleButton(wrapper, '新开一笔').trigger('click')
+      await visibleButton(wrapper, '普通费用报销').trigger('click')
+      await flushPromises()
+      const gate = wrapper.get('[data-testid="reimbursement-department-gate"]')
+      gate.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', department.id)
+      await nextTick()
+      await visibleButton(wrapper, '确认部门').trigger('click')
+      await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+      expect(confirm).not.toHaveBeenCalled()
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('keeps a restored general welfare expense ready without the travel-only subtype, mobile=%s', async (mobile) => {
+    const file = {
+      ...activeFile,
+      ocrResult: {
+        fileId: activeFile.id, type: 'invoice', categoryId: 'employee_welfare',
+        categoryName: '福利费', date: '2026-09-01', description: '合成福利费票据',
+        amount: '44.89', receiptCount: 1, source: 'ocr', confidence: '0.95',
+        warnings: ['WELFARE_TYPE_NEEDS_CONFIRMATION'], status: 'recognized', error: null,
+      },
+    } satisfies ReimbursementDraftFile
+    serverFiles = [file]
+    serverDraft = makeDraft({
+      kind: 'general',
+      input: { ...baseInput, items: [{
+        ...baseInput.items[0]!, category: 'employee_welfare', subjectValue: 'synthetic-welfare',
+      }] },
+    })
+    vi.mocked(getOaReimbursementOptions).mockResolvedValue({
+      ...options, travelProfiles: [],
+      subjectOptions: [{ value: 'synthetic-welfare', label: '福利费', categoryId: 'employee_welfare', key: null }],
+    })
+    const { wrapper, expense } = await mountView(() => {
+      useReimbursementDraftStore().reimbursementKind = 'general'
+    }, false, mobile)
+    try {
+      await openReviewStep(wrapper, mobile)
+      expect(expense.items[0]).toMatchObject({ subjectValue: 'synthetic-welfare', warnings: ['WELFARE_TYPE_NEEDS_CONFIRMATION'] })
+      expect(expense.itemReadinessError).toBe('')
+      expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toBe('')
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile => [false, true].map(lostResponse => ({ mobile, lostResponse }))))(
+    'shows general approvals inline and saves selection changes, mobile=$mobile lost=$lostResponse', async ({ mobile, lostResponse }) => {
+    const approval = {
+      processInstanceId: 'synthetic-purchase', title: '示例采购审批', businessId: 'PUR-01',
+      status: 'RUNNING', createdAt: '2026-09-01T00:00:00Z',
+    }
+    serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, trip: null, items: [] } })
+    vi.mocked(listGeneralApprovals).mockResolvedValueOnce({
+      items: [approval, ...Array.from({ length: 12 }, (_, i) => ({
+        ...approval, processInstanceId: `synthetic-approval-${i}`, title: `示例审批 ${i + 1}`,
+      }))], complete: true,
+    })
+    vi.mocked(replaceGeneralApprovals).mockImplementation(async (_id, revision, ids) => {
+      serverDraft = { ...serverDraft, revision: revision + 1,
+        input: { ...serverDraft.input, generalApprovalIds: ids } }
+      if (lostResponse && revision === 1) throw new Error('保存响应丢失')
+      return serverDraft
+    })
+    const { wrapper, drafts } = await mountView(() => {
+      useReimbursementDraftStore().reimbursementKind = 'general'
+    }, false, mobile)
+    try {
+      const basics = wrapper.get('[data-testid="reimbursement-basics-card"]')
+      const section = basics.get('[data-testid="general-approval-section"]')
+      expect(section.isVisible()).toBe(true)
+      const form = basics.get('.general-accounting-form')
+      expect(form.element.compareDocumentPosition(section.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      const content = section.get('#general-approval-content')
+      const toggle = section.findComponent({ name: 'ElSwitch' })
+      expect(toggle.props('modelValue')).toBe(false)
+      expect(content.isVisible()).toBe(false)
+      expect(listGeneralApprovals).not.toHaveBeenCalled()
+      toggle.vm.$emit('update:modelValue', true)
+      await flushPromises()
+      expect(section.text()).toContain('审批中')
+      expect(listGeneralApprovals).toHaveBeenCalledWith({}, expect.any(AbortSignal))
+      const filters = section.get('#general-approval-filters')
+      expect(filters.isVisible()).toBe(!mobile)
+      const checkbox = () => section.findAll<HTMLInputElement>('.travel-approval-list input[type="checkbox"]')[0]!
+      const rows = () => section.findAll('.travel-approval-row')
+      expect(rows()).toHaveLength(10)
+      await checkbox().setValue(true)
+      await flushPromises()
+      expect(replaceGeneralApprovals).toHaveBeenLastCalledWith(serverDraft.id, 1, [approval.processInstanceId], expect.any(AbortSignal))
+      expect(section.text()).toContain('已选 1 张')
+      expect(drafts.revisionConflict).toBe(false)
+      expect(drafts.mutationError).toBe('')
+      const pagination = section.get('.approval-pagination')
+      await pagination.get('button.btn-next').trigger('click')
+      expect(rows()).toHaveLength(3)
+      expect(checkbox().element.checked).toBe(false)
+      expect(section.text()).toContain('已选 1 张')
+      await pagination.get('button.btn-prev').trigger('click')
+      expect(checkbox().element.checked).toBe(true)
+      toggle.vm.$emit('update:modelValue', false)
+      await flushPromises()
+      expect(content.isVisible()).toBe(false)
+      expect(section.get('.travel-approval-count').text()).toBe('已选 1 张')
+      expect(replaceGeneralApprovals).toHaveBeenCalledTimes(1)
+      toggle.vm.$emit('update:modelValue', true)
+      await flushPromises()
+      expect(checkbox().element.checked).toBe(true)
+      if (mobile) await section.get('button[aria-label="筛选审批"]').trigger('click')
+      expect(filters.isVisible()).toBe(true)
+      const [fromDate, toDate] = section.findAllComponents({ name: 'ElDatePicker' })
+      fromDate!.vm.$emit('update:modelValue', '2026-08-01')
+      toDate!.vm.$emit('update:modelValue', '2026-09-04')
+      await filters.get('input[aria-label="搜索本人审批"]').setValue('示例差旅')
+      await filters.get('.travel-query-button').trigger('click')
+      await flushPromises()
+      expect(listGeneralApprovals).toHaveBeenLastCalledWith({
+        from: '2026-08-01', to: '2026-09-04', query: '示例差旅',
+      }, expect.any(AbortSignal))
+      expect(section.text()).toContain(approval.title)
+      expect(checkbox().element.checked).toBe(true)
+      vi.mocked(replaceGeneralApprovals).mockRejectedValueOnce(new Error('示例：保存失败'))
+      await checkbox().setValue(false)
+      await flushPromises()
+      expect(section.text()).toContain('示例：保存失败')
+      expect(checkbox().element.checked).toBe(true)
+      await checkbox().setValue(false)
+      await flushPromises()
+      expect(replaceGeneralApprovals).toHaveBeenLastCalledWith(serverDraft.id, 2, [], expect.any(AbortSignal))
+      expect(section.text()).toContain('已选 0 张')
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('restores each reimbursement workspace and its materials, mobile=%s', async (mobile) => {
+    const travel = makeDraft({ id: 'travel-draft' })
+    const general = makeDraft({
+      id: 'general-draft',
+      kind: 'general',
+      input: {
+        ...structuredClone(baseInput),
+        items: [{ ...baseInput.items[0]!, subjectValue: 'synthetic-office', description: '合成办公采购' }],
+      },
+    })
+    vi.mocked(getOaReimbursementOptions).mockImplementation(async request => request?.kind === 'general'
+      ? { ...options, travelProfiles: [], subjectOptions: [{ value: 'synthetic-office', label: '办公费', key: null, categoryId: 'office' }] }
+      : options)
+    vi.mocked(listWorkspaceReimbursements).mockImplementation(async request => ({
+      items: [request?.kind === 'general' ? general : travel], total: 1,
+    }))
+    vi.mocked(getReimbursementDraft).mockImplementation(async id => id === general.id ? general : travel)
+    vi.mocked(listReimbursementDraftFiles).mockImplementation(async id => ({
+      draftId: id, revision: 1,
+      items: [{ ...activeFile, id: id === general.id ? 'general-file' : 'travel-file' }],
+    }))
+    const { wrapper, drafts } = await mountView(undefined, false, mobile)
+    try {
+      expect(drafts.currentDraft?.id).toBe(travel.id)
+      expect(drafts.files.map(file => file.id)).toEqual(['travel-file'])
+      const switcher = wrapper.get('nav[aria-label="报销类型"]').element
+      const title = wrapper.get('#page-title').element
+      expect(switcher.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      const scroll = observeScrollIntoView()
+      await wrapper.get('[data-testid="switch-general"]').trigger('click')
+      await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(general.id)
+      expect(wrapper.get('nav[aria-label="报销类型"]').element).toBe(switcher)
+      expect(title.textContent).toContain('普通费用报销申请')
+      expect(scroll).not.toHaveBeenCalled()
+      if (mobile) expect(wrapper.findAll('.mobile-step-nav button')).toHaveLength(3)
+      expect(drafts.currentDraft?.input.items[0]?.description).toBe('合成办公采购')
+      const basics = wrapper.get('[data-testid="reimbursement-basics-card"]')
+      expect(basics.find('[aria-label="报销主体"]').exists()).toBe(true)
+      expect(basics.find('[aria-label="预算代码"]').exists()).toBe(true)
+      expect(basics.text()).not.toContain('报销事由')
+      await openReviewStep(wrapper, mobile)
+      const review = wrapper.get('[data-testid="review-overview"]')
+      expect(review.text()).toContain('报销主体')
+      expect(review.text()).toContain('报销部门')
+      const approvals = review.findAll('button').find(button => button.text() === '查看关联审批')!
+      await approvals.trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="general-approval-section"]').isVisible()).toBe(true)
+      expect(wrapper.get('#general-approval-content').isVisible()).toBe(true)
+      expect(drafts.files.map(file => file.id)).toEqual(['general-file'])
+      expect(wrapper.get('[data-testid="switch-general"]').attributes('aria-pressed')).toBe('true')
+      await wrapper.get('[data-testid="switch-travel"]').trigger('click')
+      await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(travel.id)
+      expect(drafts.files.map(file => file.id)).toEqual(['travel-file'])
+    } finally { wrapper.unmount() }
+  })
+
   it.each(([false, true] as const).flatMap((mobile) =>
     (['QUEUED', 'FAILED_RETRYABLE', 'MANUAL_REVIEW'] as const).flatMap((status) =>
       (['legacy', 'missing_calendar'] as const).map((kind) => ({ mobile, status, kind })),
@@ -767,6 +1693,66 @@ describe('ReimburseView single-form OA flow', () => {
     } finally { wrapper.unmount() }
   })
 
+  it.each([false, true].flatMap(mobile => ['unchanged', 'department', 'renamed', 'replaced'].map(state => ({ mobile, state }))))(
+    'adopts a consistent employee workspace across department changes and rejects replacement, mobile=$mobile state=$state',
+    async ({ mobile, state }) => {
+      serverDraft = makeDraft({ input: canonicalNoSubsidyInput() })
+      const first = { id: '300', name: '合成同事原部门' }
+      const second = { id: '400', name: '合成同事新部门' }
+      const targetSession = { ...delegatedSession, departments: [first, second], selectedDepartment: first }
+      const targetFile = { ...activeFile, id: 'synthetic-coworker-source' }
+      const initial = makeDraft({
+        id: 'synthetic-coworker-current', department: first,
+        input: { ...canonicalNoSubsidyInput(), items: [{ ...canonicalNoSubsidyInput().items[0]!, sourceFileId: targetFile.id }] },
+        relatedApprovals: [linkedApproval], relatedApprovalCount: 1,
+      })
+      const latest = {
+        ...initial, revision: state === 'unchanged' ? 1 : 2,
+        department: state === 'department' ? second : state === 'renamed' ? { ...first, name: '合成同事更名部门' } : first,
+        workspaceRetired: state === 'replaced',
+      }
+      vi.mocked(listReimbursementEmployees).mockResolvedValue([coworker])
+      vi.mocked(prepareReimbursementContext).mockResolvedValue(targetSession)
+      vi.mocked(listWorkspaceReimbursements).mockImplementation(async request => ({
+        items: [request?.reimbursementContext ? initial : serverDraft], total: 1,
+      }))
+      vi.mocked(getReimbursementDraft).mockImplementation(async (id, request) => {
+        if (id !== initial.id) return serverDraft
+        expect(request?.reimbursementContext).toBe(targetSession.reimbursementContext)
+        return latest
+      })
+      vi.mocked(listReimbursementDraftFiles).mockImplementation(async (id, request) => {
+        if (id !== initial.id) return { draftId: id, revision: serverDraft.revision, items: serverFiles }
+        expect(request?.reimbursementContext).toBe(targetSession.reimbursementContext)
+        return { draftId: id, revision: latest.revision, items: [targetFile] }
+      })
+      const { wrapper, drafts, expense } = await mountView(auth => { auth.session = personalSession }, false, mobile)
+      try {
+        await selectCoworker(wrapper)
+        if (state === 'replaced') {
+          expect(useAuthStore().session?.user.userId).toBe(personalSession.user.userId)
+          expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+          expect(drafts.files).toEqual(serverFiles)
+          expect(wrapper.text()).toContain('目标报销已发生变化，请重新选择报销人')
+        } else {
+          expect(useAuthStore().session?.user.userId).toBe(coworker.userId)
+          expect(drafts.currentDraft).toMatchObject({
+            id: initial.id, revision: latest.revision, department: latest.department,
+            input: latest.input, relatedApprovals: initial.relatedApprovals,
+          })
+          expect(drafts.files).toEqual([targetFile])
+          expect(expense.items[0]?.sourceFileId).toBe(targetFile.id)
+          expect(expense.items[0]?.description).toBe(initial.input.items[0]!.description)
+          expect(wrapper.text()).not.toContain('目标报销已发生变化，请重新选择报销人')
+        }
+        expect(openReimbursementWorkspace).not.toHaveBeenCalled()
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+        expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+        expect(submitOaReimbursement).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    },
+  )
+
   it.each([false, true])('holds a switch during upload and keeps the original when target loading fails, mobile=%s', async (mobile) => {
     serverDraft = makeDraft({ input: canonicalNoSubsidyInput() })
     vi.mocked(listReimbursementEmployees).mockResolvedValue([coworker])
@@ -889,6 +1875,7 @@ describe('ReimburseView single-form OA flow', () => {
         },
       }))
     vi.mocked(prepareReimbursementContext).mockResolvedValue(ownSession)
+    vi.mocked(openReimbursementWorkspace).mockResolvedValue({ selectedDepartment: ownDraft.department })
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
     const { wrapper, expense, drafts } = await mountView(auth => { auth.session = delegatedSession }, false, mobile)
     try {
@@ -909,12 +1896,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(confirm).toHaveBeenCalledOnce()
       expect(updateReimbursementDraft).not.toHaveBeenCalled()
       expect(wrapper.get('[data-testid="reimbursement-subject-name"]').text()).toBe('为本人报销')
-      if (ownSession.selectedDepartment) {
-        expect(drafts.currentDraft?.id).toBe(ownDraft.id)
-      } else {
-        expect(drafts.currentDraft).toBeNull()
-        expect(wrapper.get('[data-testid="select-reimbursement-employee"]').attributes('disabled')).toBeUndefined()
-      }
+      expect(drafts.currentDraft?.id).toBe(ownDraft.id)
     } finally { wrapper.unmount() }
   })
 
@@ -1169,7 +2151,7 @@ describe('ReimburseView single-form OA flow', () => {
     expect(wrapper.text()).not.toContain('选择本次报销部门')
     expect(wrapper.text()).not.toContain('确认部门')
     const headerActions = () => wrapper.get('.hero-links').findAll('button').map(button => button.text())
-    expect(headerActions()).toEqual([])
+    expect(headerActions()).toEqual(['报销记录', '新开一笔'])
     const selector = wrapper.findComponent(TravelApprovalSelectorStub)
     expect(selector.props('single')).toBe(true)
     selector.vm.$emit('update:modelValue', [selection])
@@ -1182,7 +2164,7 @@ describe('ReimburseView single-form OA flow', () => {
     departmentResolution.resolve(resolvedDepartment)
     await flushPromises()
 
-    expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(selection, undefined)
+    expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(selection, undefined, false, undefined)
     expect(useAuthStore().session?.selectedDepartment).toEqual({
       id: '200', name: '示例业务部门',
     })
@@ -1193,15 +2175,27 @@ describe('ReimburseView single-form OA flow', () => {
       { signal: expect.any(AbortSignal) },
     )
     expect(headerActions()).toEqual(['报销记录', '新开一笔'])
-    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValueOnce('cancel')
+    const confirm = vi.spyOn(ElMessageBox, 'confirm')
+      .mockRejectedValueOnce('cancel')
+      .mockResolvedValueOnce(undefined as never)
     await visibleButton(wrapper, '新开一笔').trigger('click')
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith(expect.any(String), '新开一笔报销', expect.anything())
+    expect(wrapper.find('[data-testid="reimbursement-department-gate"]').exists()).toBe(false)
     expect(createReimbursementDraft).not.toHaveBeenCalled()
+    await visibleButton(wrapper, '新开一笔').trigger('click')
+    await flushPromises()
+    expect(useReimbursementDraftStore().currentDraft?.id).toBe('draft-created')
+    expect(wrapper.findComponent(TravelApprovalSelectorStub).props('modelValue')).toEqual([])
+    wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
+    await flushPromises()
+    expect(correctReimbursementDepartment).toHaveBeenLastCalledWith(
+      'draft-created', expect.any(Number), undefined, selection,
+    )
+    expect(confirm).toHaveBeenCalledTimes(2)
     await visibleButton(wrapper, '报销记录').trigger('click')
     await flushPromises()
     expect(listReimbursementSubmissionHistory).toHaveBeenCalledWith({
-      expectedDepartment: businessDepartment,
       signal: expect.any(AbortSignal),
     })
     wrapper.unmount()
@@ -1258,6 +2252,7 @@ describe('ReimburseView single-form OA flow', () => {
       )).toEqual(['示例管理部门', '产品开发部'])
       wrapper.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', '400')
       await nextTick()
+      serverDraft = { ...serverDraft, department: { id: '400', name: '产品开发部' } }
       await visibleButton(wrapper, '确认部门').trigger('click')
       await flushPromises()
 
@@ -1265,11 +2260,15 @@ describe('ReimburseView single-form OA flow', () => {
         1,
         selection,
         undefined,
+        false,
+        undefined,
       )
       expect(selectDepartmentFromTravelApproval).toHaveBeenNthCalledWith(
         2,
         selection,
         '400',
+        false,
+        undefined,
       )
       expect(useAuthStore().session?.selectedDepartment).toEqual({
         id: '400',
@@ -1285,79 +2284,28 @@ describe('ReimburseView single-form OA flow', () => {
     },
   )
 
-  it.each([false, true])(
-    'switches to another current department before linking its approval (mobile=%s)',
-    async (mobile) => {
-      const { wrapper, drafts } = await mountView((auth) => {
-        auth.session!.departments = [
-          { id: '100', name: '示例管理部门' },
-          { id: '200', name: '产品开发部' },
-        ]
-        auth.session!.selectedDepartment = { id: '100', name: '示例管理部门' }
-      }, false, mobile)
-      drafts.travelApprovals = [{
-        ...linkedApproval,
-        originatorDepartmentId: '200',
-        profileDisplayName: '境内出差',
-        travelTypeOption: { value: 'business', label: '境内出差', key: null },
-        companyOption: options.companyOptions[0]!,
-        budgetCodeOption: options.budgetCodeOptions[0]!,
-        unavailableReason: null,
-        createdAt: '2026-08-30T00:00:00Z',
-        finishedAt: '2026-08-31T00:00:00Z',
-      }]
-      serverDraft = makeDraft({
-        department: { id: '200', name: '产品开发部' },
-      })
-      const departmentResolution = deferred<Awaited<ReturnType<typeof selectDepartmentFromTravelApproval>>>()
-      vi.mocked(selectDepartmentFromTravelApproval).mockReturnValue(departmentResolution.promise)
-      const resolvedDepartment = {
-        selectedDepartment: { id: '200', name: '产品开发部' },
-        selectionRequired: false,
-        departments: [
-          { id: '100', name: '示例管理部门' },
-          { id: '200', name: '产品开发部' },
-        ],
-      }
-
-      wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit(
-        'update:modelValue',
-        [selection],
-      )
-      await nextTick()
-      await vi.waitFor(() => expect(selectDepartmentFromTravelApproval).toHaveBeenCalledOnce())
-
-      const summary = wrapper.get('[data-testid="derived-accounting-summary"]')
-      expect(summary.text()).toContain('北京分公司')
-      expect(summary.text()).toContain('DEMO-001 · 示例项目')
-      expect(summary.text()).toContain('境内出差')
-      expect(summary.text()).toContain('2026-08-31')
-      expect(summary.text()).toContain('2026-09-02')
-      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('busy')).toBe(true)
-      expect(wrapper.findComponent(TravelApprovalSelectorStub).props('readonly')).toBe(true)
-      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(true)
-      expect(replaceReimbursementRelatedApprovals).not.toHaveBeenCalled()
-
-      departmentResolution.resolve(resolvedDepartment)
+  it.each([false, true])('verifies the travel approval before correcting the current department, mobile=%s', async mobile => {
+    const target = { id: '200', name: '第二部门' }
+    const { wrapper, drafts, expense } = await mountView(auth => { auth.session!.departments.push(target) }, false, mobile)
+    const pending = deferred<Awaited<ReturnType<typeof correctReimbursementDepartment>>>()
+    vi.mocked(correctReimbursementDepartment).mockReturnValueOnce(pending.promise)
+    try {
+      const before = JSON.parse(JSON.stringify(drafts.files))
+      wrapper.getComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
       await flushPromises()
-
-      expect(selectDepartmentFromTravelApproval).toHaveBeenCalledWith(
-        selection,
-        undefined,
-      )
-      expect(useAuthStore().session?.selectedDepartment).toEqual({
-        id: '200',
-        name: '产品开发部',
-      })
-      expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledWith(
-        'draft-1',
-        expect.any(Number),
-        [selection],
-        { signal: expect.any(AbortSignal) },
-      )
-      wrapper.unmount()
-    },
-  )
+      expect(correctReimbursementDepartment).toHaveBeenCalledWith('draft-1', expect.any(Number), undefined, selection)
+      expect(useAuthStore().session?.selectedDepartment?.id).toBe('100')
+      expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(true)
+      serverDraft = { ...serverDraft, revision: 2, department: target, relatedApprovals: [linkedApproval] }
+      pending.resolve({ draft: serverDraft, selectedDepartment: target }); await flushPromises()
+      expect(useAuthStore().session?.selectedDepartment).toEqual(target)
+      expect(drafts.currentDraft?.id).toBe('draft-1')
+      expect(drafts.files).toEqual(before)
+      expect(expense.items).toHaveLength(1)
+      expect(replaceReimbursementRelatedApprovals).not.toHaveBeenCalled()
+      expect(selectDepartmentFromTravelApproval).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
 
   it('cancels a pending calculation when authentication ends', async () => {
     vi.useFakeTimers()
@@ -1373,6 +2321,96 @@ describe('ReimburseView single-form OA flow', () => {
     expect(calculateTotals).not.toHaveBeenCalled()
     wrapper.unmount()
   })
+
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).flatMap(kind => ['remove', 'retry'].map(resolution => ({ mobile, kind, resolution })))))(
+    'blocks incomplete local uploads until $resolution without losing existing material, mobile=$mobile kind=$kind', async ({ mobile, kind, resolution }) => {
+      const proof = { ...activeFile, id: 'existing-payment', name: '已有付款凭证.pdf', role: 'ATTACHMENT_ONLY' as const, attachmentKind: 'payment_proof' as const, ocrStatus: 'NOT_REQUESTED' as const }
+      const input = canonicalNoSubsidyInput()
+      input.accountingSourceVerified = true
+      input.items[0]!.amount = '600.00'; input.items[0]!.paymentProofFileIds = [proof.id]
+      serverDraft = makeDraft({ kind, input, relatedApprovals: kind === 'travel' ? [linkedApproval] : [], relatedApprovalCount: kind === 'travel' ? 1 : 0,
+        totals: { expenseTotal: '600.00', subsidyTotal: '0.00', totalAmount: '600.00', receiptCount: 1, uppercaseAmount: '陆佰元整', subsidy: null } })
+      serverFiles = [activeFile, proof]
+      vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
+      vi.mocked(uploadReimbursementDraftFile).mockRejectedValueOnce(new Error('合成补传网络失败'))
+      if (kind === 'general') {
+        serverDraft.input.items[0]!.subjectValue = 'synthetic-local'
+        vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...options, travelProfiles: [], subjectOptions: [
+          { value: 'synthetic-local', label: '交通费', categoryId: 'local_transport', key: null },
+        ] })
+      }
+      vi.mocked(updateReimbursementDraft).mockImplementation(async (_id, revision, value) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: { ...structuredClone(value), ...(kind === 'travel' ? { accountingSourceVerified: true } : {}) } }
+        return serverDraft
+      })
+      const { wrapper, drafts, router } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = kind }, true, mobile)
+      try {
+        await wrapper.findAll('button').find(button => button.text() === '关联付款凭证')!.trigger('click')
+        await wrapper.get('[data-testid="proof-picker-upload"]').trigger('click')
+        const fileInput = wrapper.get<HTMLInputElement>('[data-testid="durable-payment-proof-input"]')
+        Object.defineProperty(fileInput.element, 'files', { configurable: true, value: [new File(['synthetic'], '待重试付款.pdf', { type: 'application/pdf' })] })
+        await fileInput.trigger('change'); await flushPromises()
+        const picker = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('title') === '关联付款凭证')!
+        await picker.findAll('button').find(button => button.text() === '取消')!.trigger('click')
+        await openReviewStep(wrapper, mobile); await flushPromises()
+        expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toContain('尚未上传成功')
+        expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeDefined()
+        await visibleButton(wrapper, '提交 OA').trigger('click'); await flushPromises()
+        expect(markReimbursementDraftReviewReady).not.toHaveBeenCalled(); expect(submitOaReimbursement).not.toHaveBeenCalled()
+        expect(wrapper.get('[data-testid="local-upload-failure"]').text()).toContain('去处理失败文件')
+        const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); expect(event.defaultPrevented).toBe(true)
+        await router.push(mobile ? '/m/settings' : '/admin/settings'); expect(router.currentRoute.value.path).toBe(mobile ? '/m' : '/')
+        await visibleButton(wrapper, '去处理失败文件').trigger('click'); await flushPromises()
+        const row = wrapper.findAll('[data-testid="batch-file"]').find(entry => entry.text().includes('待重试付款.pdf'))!
+        if (resolution === 'remove') await row.findAll('button').find(button => button.text() === '移除')!.trigger('click')
+        else {
+          vi.mocked(uploadReimbursementDraftFile).mockImplementationOnce(async (id, revision) => {
+            serverDraft = { ...serverDraft, revision: revision + 1 }
+            const file = { ...proof, id: 'retried-payment', name: '待重试付款.pdf' }; serverFiles = [...serverFiles, file]
+            return { draftId: id, revision: revision + 1, file }
+          })
+          await row.findAll('button').find(button => button.text() === '重试上传')!.trigger('click'); await flushPromises()
+          expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toContain('待关联材料')
+          // Select the newly uploaded proof; retry never silently appends a relationship.
+          await wrapper.findAll('button').find(button => button.text() === '关联付款凭证')!.trigger('click')
+          picker.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', [proof.id, 'retried-payment']); await flushPromises()
+          await picker.findAll('button').find(button => button.text() === '确认关联')!.trigger('click'); await flushPromises()
+        }
+        await openReviewStep(wrapper, mobile)
+        await vi.waitFor(() => expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toBe(''))
+        expect(drafts.files.some(file => file.id === proof.id)).toBe(true)
+        expect(drafts.currentDraft?.id).toBe('draft-1')
+        expect(markReimbursementDraftReviewReady).not.toHaveBeenCalled(); expect(submitOaReimbursement).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    })
+
+  it.each([false, true].flatMap(mobile => [
+    { category: 'office' as const, amount: '500.01', transportType: 'other' as const },
+    { category: 'lodging' as const, amount: '50.00', transportType: 'other' as const },
+    { category: 'local_transport' as const, amount: '50.00', transportType: 'ride_hailing' as const },
+  ].map(item => ({ ...item, mobile }))))(
+    'allows ordinary Excel preview with missing $category evidence while protecting submission and unlinked materials, mobile=$mobile',
+    async ({ mobile, category, amount, transportType }) => {
+      serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [{
+        category, subjectValue: 'synthetic-subject', date: '2026-09-01', displayDate: '9月1日',
+        description: '费用字段完整但证明待补', amount, receiptCount: 1, transportType,
+        requiresItinerary: transportType === 'ride_hailing',
+      }] } })
+      serverFiles = [{ ...activeFile, role: 'ATTACHMENT_ONLY', attachmentKind: 'other' }]
+      vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...options, travelProfiles: [], subjectOptions: [
+        { value: 'synthetic-subject', label: '合成科目', key: null, categoryId: category },
+      ] })
+      const { wrapper, drafts } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+      try {
+        await openReviewStep(wrapper, mobile)
+        expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toBe('')
+        expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeDefined()
+        expect(submitOaReimbursement).not.toHaveBeenCalled()
+        drafts.files[0]!.attachmentKind = 'payment_proof'
+        await flushPromises()
+        expect(wrapper.findComponent(ExpenseSummaryCardStub).props('previewDisabledReason')).toContain('待关联材料')
+      } finally { wrapper.unmount() }
+    })
 
   it('disables OA submission while keeping editing, saving and preview available when the worker is disabled', async () => {
     const { wrapper, expense } = await mountView(() => {
@@ -1522,6 +2560,43 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true].flatMap(mobile => [false, true].map(lateFailure => ({ mobile, lateFailure }))))(
+    'loads first-entry approvals after newer workspace options, mobile=$mobile lateFailure=$lateFailure',
+    async ({ mobile, lateFailure }) => {
+      const optionsRead = deferred<typeof options>()
+      const initialQuery = deferred<OaTravelApprovalList>()
+      const result: OaTravelApprovalList = {
+        templateConfigVersion: 12, reimbursementOptions: options, queryWindow: selection.queryWindow,
+        items: [{ ...linkedApproval, profileDisplayName: '合成出差', createdAt: '2026-09-01T08:00:00Z', finishedAt: '2026-09-01T09:00:00Z',
+          travelTypeOption: { value: 'business', label: '出差', key: null },
+          companyOption: { value: '北京', label: '北京分公司', key: null },
+          budgetCodeOption: { value: 'DEMO-001', label: '示例项目', key: null } }],
+      }
+      vi.mocked(getOaReimbursementOptions).mockReturnValueOnce(optionsRead.promise)
+      vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [], total: 0 })
+      vi.mocked(listOaTravelApprovals).mockReturnValueOnce(initialQuery.promise).mockResolvedValue(result)
+      const { wrapper, drafts } = await mountView(auth => {
+        auth.session!.selectedDepartment = null
+        auth.status = 'department_required'
+      }, false, mobile, false, true)
+      try {
+        expect(listOaTravelApprovals).toHaveBeenCalledTimes(1)
+        optionsRead.resolve(options)
+        await flushPromises()
+        expect(listOaTravelApprovals).toHaveBeenCalledTimes(2)
+        if (lateFailure) initialQuery.reject(new Error('旧审批查询失败'))
+        else initialQuery.resolve({ ...result, items: [] })
+        await flushPromises()
+        const gate = wrapper.get('[data-testid="reimbursement-department-gate"]')
+        expect(gate.text()).toContain(linkedApproval.title)
+        expect(gate.text()).not.toContain('当前查询范围内没有')
+        expect(gate.text()).not.toContain('旧审批查询失败')
+        expect(drafts.travelApprovals.map(a => a.processInstanceId)).toEqual([linkedApproval.processInstanceId])
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    },
+  )
+
   it.each([false, true])('silently updates queried budgets while retaining unsaved expenses, mobile=%s', async (mobile) => {
     serverDraft = makeDraft({ input: canonicalNoSubsidyInput() })
     const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
@@ -1571,6 +2646,40 @@ describe('ReimburseView single-form OA flow', () => {
     }
   })
 
+  it.each([false, true])('keeps ordinary expenses when a budget changes and prompts only if it disappears, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ kind: 'general', input: { ...baseInput,
+      items: [{ ...baseInput.items[0]!, subjectValue: 'synthetic-traffic' }],
+    } })
+    const generalOptions = { ...options, travelProfiles: [], subjectOptions: [
+      { value: 'synthetic-traffic', label: '交通费', key: null, categoryId: 'local_transport' as const },
+    ] }
+    vi.mocked(getOaReimbursementOptions).mockResolvedValue(generalOptions)
+    const { wrapper, drafts, expense } = await mountView(() => {
+      useReimbursementDraftStore().reimbursementKind = 'general'
+    }, false, mobile)
+    try {
+      const basics = wrapper.get('[data-testid="reimbursement-basics-card"]')
+      const renamed = { value: 'DEMO-001', label: '日常预算新名称', key: null }
+      const added = { value: 'DEMO-002', label: '新预算', key: null }
+      vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...generalOptions, budgetCodeOptions: [renamed, added] })
+      await drafts.loadReimbursementOptions({ background: true })
+      await flushPromises()
+      expect(basics.text()).toContain(renamed.label)
+      expect(basics.text()).not.toContain('原预算代码已停用')
+      vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...generalOptions, budgetCodeOptions: [added] })
+      await drafts.loadReimbursementOptions({ background: true })
+      await flushPromises()
+      await vi.waitFor(() => expect(basics.text()).toContain('原预算代码已停用，请重新选择'))
+      expect(expense.items[0]?.description).toBe(baseInput.items[0]?.description)
+      expect(drafts.files).toEqual([activeFile])
+      expect(updateReimbursementDraft).not.toHaveBeenCalled()
+      basics.findAllComponents({ name: 'ElSelect' })[1]!.vm.$emit('update:modelValue', added.value)
+      await nextTick()
+      expect(basics.text()).not.toContain('原预算代码已停用')
+      expect(basics.text()).toContain(added.label)
+    } finally { wrapper.unmount() }
+  })
+
   it.each([false, true].flatMap((mobile) => (['attachment', 'payment_proof'] as const).flatMap((kind) => [false, true].map((timeout) => ({ mobile, kind, timeout })))))(
     'keeps native file selection and proof target during budget refresh, mobile=$mobile kind=$kind timeout=$timeout', async ({ mobile, kind, timeout }) => {
     serverDraft = makeDraft({ input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: true },
@@ -1592,7 +2701,8 @@ describe('ReimburseView single-form OA flow', () => {
     })
     try {
       if (kind === 'payment_proof') {
-        await wrapper.findAll('button').find((button) => button.text().includes('添加付款凭证'))!.trigger('click')
+        await wrapper.findAll('button').find((button) => button.text() === '关联付款凭证')!.trigger('click')
+        await wrapper.get('[data-testid="proof-picker-upload"]').trigger('click')
       }
       window.dispatchEvent(new Event('focus'))
       document.dispatchEvent(new Event('visibilitychange'))
@@ -1607,7 +2717,15 @@ describe('ReimburseView single-form OA flow', () => {
       await flushPromises()
       expect(uploadReimbursementDraftFile).toHaveBeenCalledOnce()
       expect(drafts.files.some((file) => file.name === selectedFile.name)).toBe(true)
-      if (kind === 'payment_proof') expect(expense.items[0]!.paymentProofFileIds).toEqual(['native-selected'])
+      if (kind === 'payment_proof') {
+        expect(expense.items[0]!.paymentProofFileIds ?? []).toEqual([])
+        const picker = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('title') === '关联付款凭证')!
+        expect(picker.props('modelValue')).toBe(true)
+        picker.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', ['native-selected'])
+        await flushPromises()
+        await picker.findAll('button').find(button => button.text() === '确认关联')!.trigger('click')
+        expect(expense.items[0]!.paymentProofFileIds).toEqual(['native-selected'])
+      }
     } finally {
       pendingOptions.resolve(options)
       await flushPromises()
@@ -3559,33 +4677,22 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
-  it.each([false, true])('keeps a newly selected approval when the target department has a completed reimbursement, mobile=%s', async (mobile) => {
-    const original = { id: '100', name: '示例管理部门' }
-    const target = { id: '200', name: '产品开发部' }
-    serverDraft = makeDraft({ department: original, input: canonicalNoSubsidyInput() })
-    const { wrapper, drafts } = await mountView((auth) => {
-      auth.session!.departments = [original, target]
-      auth.session!.selectedDepartment = original
-    }, false, mobile)
-    serverDraft = makeDraft({ status: 'LOCKED', revision: 5, department: target })
-    vi.mocked(selectDepartmentFromTravelApproval).mockResolvedValue({
-      selectedDepartment: target, selectionRequired: false, departments: [original, target],
-    })
-    vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({
-      status: 'SUBMITTED', statusVersion: 8, processInstanceId: 'oa-process-1', pollAfterMs: 0,
-    }))
-    wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
-    await flushPromises()
-    expect(wrapper.get('[data-testid="submission-status"]').text()).toContain('打开报销表单后可继续处理该审批')
-    expect(replaceReimbursementRelatedApprovals).not.toHaveBeenCalled()
-    await visibleButton(wrapper, '新开一笔').trigger('click')
-    await flushPromises()
-    expect(drafts.currentDraft?.id).toBe('draft-created')
-    expect(replaceReimbursementRelatedApprovals).toHaveBeenCalledWith(
-      'draft-created', expect.any(Number), [selection], { signal: expect.any(AbortSignal) },
-    )
-    expect(submitOaReimbursement).not.toHaveBeenCalled()
-    wrapper.unmount()
+  it.each([false, true])('updates a travel department in place without opening completed history, mobile=%s', async mobile => {
+    const destination = { id: '200', name: '第二部门' }
+    const { wrapper, drafts } = await mountView(auth => { auth.session!.departments.push(destination) }, false, mobile)
+    try {
+      vi.mocked(correctReimbursementDepartment).mockImplementationOnce(async (_id, revision) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, department: destination,
+          relatedApprovals: [linkedApproval] }
+        return { draft: serverDraft, selectedDepartment: destination }
+      })
+      wrapper.getComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection]); await flushPromises()
+      expect(drafts.currentDraft?.id).toBe('draft-1')
+      expect(drafts.currentDraft?.status).toBe('DRAFT')
+      expect(drafts.currentDraft?.department).toEqual(destination)
+      expect(getOaReimbursementSubmissionForDraft).not.toHaveBeenCalled()
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
   })
 
   it.each([false, true])('refreshes unavailable options without replacing the draft, mobile=%s', async (mobile) => {
@@ -3721,7 +4828,7 @@ describe('ReimburseView single-form OA flow', () => {
     expect(listReimbursementSubmissionHistory).not.toHaveBeenCalled()
     await visibleButton(wrapper, '报销记录').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('最近 10 笔成功提交')
+    expect(wrapper.text()).toContain('本人最近 10 笔成功提交的报销')
     const list = wrapper.get('[data-testid="reimbursement-history"]')
     expect(list.text()).toContain('¥1280.50')
     expect(list.text()).toContain('DEMO-001 · 合成项目')
@@ -3753,10 +4860,51 @@ describe('ReimburseView single-form OA flow', () => {
     await flushPromises()
     await visibleButton(wrapper, '重新加载记录').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('当前部门还没有成功提交 OA 的报销记录')
+    expect(wrapper.text()).toContain('暂无成功提交 OA 的报销记录')
     expect(listReimbursementSubmissionHistory).toHaveBeenCalledTimes(2)
     expect(createReimbursementDraft).not.toHaveBeenCalled()
     wrapper.unmount()
+  })
+
+  it.each([false, true])('opens personal history before selecting a department, mobile=%s', async (mobile) => {
+    const department = { id: '200', name: '历史项目部' }
+    const historical = makeDraft({ id: 'historical-general', kind: 'general', department, status: 'LOCKED' })
+    const entry = { id: historical.id, kind: 'general' as const, department, lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 0 }
+    vi.mocked(listReimbursementSubmissionHistory).mockResolvedValue([
+      entry, ...Array.from({ length: 9 }, (_, i) => ({ ...entry, id: `recent-history-${i}` })),
+    ])
+    vi.mocked(getReimbursementDraft).mockResolvedValue(historical)
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({ draftId: historical.id, revision: historical.revision, items: [] })
+    vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({ draftId: historical.id, status: 'SUBMITTED' }))
+    const { wrapper, drafts } = await mountView(auth => {
+      auth.session = { ...auth.session!, departments: [auth.session!.departments[0]!, department], selectedDepartment: null }
+      auth.status = 'department_required'
+    }, false, mobile)
+    try {
+      const start = visibleButton(wrapper, '新开一笔')
+      expect(start.attributes('disabled')).toBeUndefined()
+      await start.trigger('click')
+      expect(wrapper.get('[data-testid="reimbursement-department-gate"]').element).toBe(document.activeElement)
+      await visibleButton(wrapper, '报销记录').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="reimbursement-history"]').findAll('li')).toHaveLength(10)
+      expect(wrapper.find('[aria-label="报销记录分页"]').exists()).toBe(false)
+      expect(listReimbursementSubmissionHistory).toHaveBeenLastCalledWith({ signal: expect.any(AbortSignal) })
+      expect(wrapper.get('[data-testid="reimbursement-history"]').text()).toContain('普通费用报销 · 历史项目部')
+      await visibleButton(wrapper, '查看明细').trigger('click')
+      await flushPromises()
+      expect(getReimbursementDraft).toHaveBeenCalledWith(historical.id, expect.objectContaining({ history: true }))
+      expect(wrapper.get('[data-testid="submission-status"]').text()).toContain('历史项目部')
+      expect(wrapper.get('[data-testid="submission-status"]').text()).not.toContain('出差补助')
+      useReimbursementSubmissionStore().oaSubmissionEnabled = false
+      await nextTick()
+      expect(wrapper.text()).not.toContain('请保留本次提交并稍后核对')
+      await visibleButton(wrapper, '返回当前报销').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[data-testid="reimbursement-department-gate"]').exists()).toBe(true)
+      expect(drafts.currentDraft).toBeNull()
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
   })
 
   it.each([false, true])('lists OA attachments inside the totals card, mobile=%s', async (mobile) => {
@@ -3931,7 +5079,7 @@ describe('ReimburseView single-form OA flow', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each([false, true].flatMap((mobile) => ['user', 'department'].map((changed) => ({ mobile, changed }))))('discards old-session recovery errors after $changed changes, mobile=$mobile', async ({ mobile, changed }) => {
+  it.each([false, true].flatMap((mobile) => ['user', 'session'].map((changed) => ({ mobile, changed }))))('discards old-session recovery errors after $changed changes, mobile=$mobile', async ({ mobile, changed }) => {
     serverDraft = makeDraft({ status: 'LOCKED', revision: 5, input: canonicalNoSubsidyInput() })
     vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({ status: 'FAILED_FINAL', pollAfterMs: 0 }))
     const pending = deferred<ReimbursementDraft>()
@@ -3947,6 +5095,7 @@ describe('ReimburseView single-form OA flow', () => {
       serverDraft.department = department
       authority.session!.departments = [department]
       authority.session!.selectedDepartment = department
+      authority.session!.csrfToken = 'synthetic-new-session'
     }
     await flushPromises()
     await vi.waitFor(() => expect(drafts.currentDraft?.id).toBe('next-session-draft'))
@@ -4036,7 +5185,7 @@ describe('ReimburseView single-form OA flow', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each([false, true].flatMap((mobile) => ['user', 'department', 'return-to-user'].map((change) => ({ mobile, change }))))('ignores an old confirmation continuation after a locked restore and $change switch, mobile=$mobile', async ({ mobile, change }) => {
+  it.each([false, true].flatMap((mobile) => ['user', 'session', 'return-to-user'].map((change) => ({ mobile, change }))))('ignores an old confirmation continuation after a locked restore and $change switch, mobile=$mobile', async ({ mobile, change }) => {
     serverDraft.input = canonicalNoSubsidyInput()
     vi.mocked(listWorkspaceReimbursements).mockImplementation(async () => ({ items: [serverDraft], total: 1 }))
     vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue('confirm' as never)
@@ -4054,11 +5203,12 @@ describe('ReimburseView single-form OA flow', () => {
     void visibleButton(wrapper, '核对当前报销').trigger('click')
     await vi.waitFor(() => expect(getOaReimbursementSubmissionForDraft).toHaveBeenCalledWith('locked-replacement', expect.anything()))
     serverDraft = makeDraft({ id: 'new-session-current', input: canonicalNoSubsidyInput() })
-    if (change === 'department') {
+    if (change === 'session') {
       const department = { id: '200', name: '下一合成部门' }
       serverDraft.department = department
       authority.session!.departments = [department]
       authority.session!.selectedDepartment = department
+      authority.session!.csrfToken = 'synthetic-new-session'
     } else authority.session!.user.userId = 'next-confirmation-user'
     await flushPromises()
     await vi.waitFor(() => expect(drafts.currentDraft?.id).toBe('new-session-current'))
@@ -4623,6 +5773,233 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true].flatMap(mobile => [false, true].flatMap(newCurrent =>
+    (['travel', 'general'] as const).map(historyKind => ({ mobile, newCurrent, historyKind })))))(
+    'restores the travel workspace and step after $historyKind history, mobile=$mobile newCurrent=$newCurrent',
+    async ({ mobile, newCurrent, historyKind }) => {
+      serverDraft = makeDraft({ kind: 'travel', input: canonicalNoSubsidyInput() })
+      const historical = makeDraft({ id: 'synthetic-history', kind: historyKind, status: 'LOCKED', revision: 8,
+        input: { ...canonicalNoSubsidyInput(), items: [] }, relatedApprovals: [], relatedApprovalCount: 0 })
+      vi.mocked(listWorkspaceReimbursements).mockImplementation(async () => ({ items: [serverDraft], total: 1 }))
+      if (newCurrent) vi.mocked(listWorkspaceReimbursements).mockResolvedValueOnce({ items: [], total: 0 })
+      vi.mocked(listReimbursementSubmissionHistory).mockResolvedValue([
+        { id: historical.id, kind: historyKind, lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 0 },
+      ])
+      vi.mocked(getReimbursementDraft).mockImplementation(async id => id === historical.id ? historical : serverDraft)
+      vi.mocked(listReimbursementDraftFiles).mockImplementation(async id => ({
+        draftId: id, revision: id === historical.id ? historical.revision : serverDraft.revision,
+        items: id === historical.id ? [] : serverFiles,
+      }))
+      vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({
+        draftId: historical.id, status: 'SUBMITTED', statusVersion: 8, pollAfterMs: 0,
+      }))
+      const { wrapper, drafts } = await mountView(auth => {
+        auth.session!.departments.push({ id: '200', name: '第二部门' })
+      }, false, mobile)
+      try {
+        const originalId = drafts.currentDraft!.id
+        const originalItems = structuredClone(serverDraft.input.items)
+        const originalFiles = drafts.files.map(file => file.id)
+        expect(createReimbursementDraft).toHaveBeenCalledTimes(newCurrent ? 1 : 0)
+        if (mobile) await wrapper.findAll('.mobile-step-nav button')[2]!.trigger('click')
+        await visibleButton(wrapper, '报销记录').trigger('click'); await flushPromises()
+        await visibleButton(wrapper, '查看明细').trigger('click'); await flushPromises()
+        expect(drafts.currentDraft?.id).toBe(historical.id)
+        const reads = vi.mocked(listWorkspaceReimbursements).mock.calls.length
+        await visibleButton(wrapper, '返回当前报销').trigger('click'); await flushPromises()
+        expect(drafts.currentDraft?.id).toBe(originalId)
+        expect(vi.mocked(listWorkspaceReimbursements).mock.calls.length).toBeGreaterThan(reads)
+        expect(drafts.currentDraft?.input.items).toEqual(originalItems)
+        expect(drafts.files.map(file => file.id)).toEqual(originalFiles)
+        expect(wrapper.get('[data-testid="switch-travel"]').attributes('aria-pressed')).toBe('true')
+        if (mobile) expect(wrapper.findAll('.mobile-step-nav button')[2]!.attributes('aria-current')).toBe('step')
+        expect(createReimbursementDraft).toHaveBeenCalledTimes(newCurrent ? 1 : 0)
+      } finally { wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true].flatMap(mobile => [false, true].flatMap(concurrentCurrent =>
+    [false, true].flatMap(unselected => (['travel', 'general'] as const).map(historyKind =>
+      ({ mobile, concurrentCurrent, historyKind, unselected }))))))(
+    'checks the general workspace before returning to its first department gate, mobile=$mobile history=$historyKind concurrent=$concurrentCurrent unselected=$unselected',
+    async ({ mobile, concurrentCurrent, historyKind, unselected }) => {
+      let current: ReimbursementDraft | undefined
+      const historical = makeDraft({ id: 'synthetic-history', kind: historyKind, status: 'LOCKED', revision: 8,
+        input: { ...canonicalNoSubsidyInput(), items: [] }, relatedApprovals: [], relatedApprovalCount: 0 })
+      vi.mocked(listWorkspaceReimbursements).mockImplementation(async () => ({
+        items: current ? [current] : [], total: current ? 1 : 0,
+      }))
+      vi.mocked(listReimbursementSubmissionHistory).mockResolvedValue([
+        { id: historical.id, kind: historyKind, lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 0 },
+      ])
+      vi.mocked(getReimbursementDraft).mockImplementation(async id => id === historical.id ? historical : current!)
+      vi.mocked(listReimbursementDraftFiles).mockImplementation(async id => ({
+        draftId: id, revision: id === historical.id ? historical.revision : current!.revision, items: [],
+      }))
+      vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({
+        draftId: historical.id, status: 'SUBMITTED', statusVersion: 8, pollAfterMs: 0,
+      }))
+      vi.mocked(correctReimbursementDepartment).mockImplementation(async (_id, revision, departmentId) => {
+        const selected = useAuthStore().session!.departments.find(item => item.id === departmentId)!
+        const department = { id: selected.id, name: selected.name }
+        current = { ...current!, revision: revision + 1, department }
+        return { draft: structuredClone(current), selectedDepartment: department }
+      })
+      const { wrapper, drafts } = await mountView(auth => {
+        auth.session!.departments.push({ id: '200', name: '第二部门' })
+        if (unselected) { auth.session!.selectedDepartment = null; auth.status = 'department_required' }
+        useReimbursementDraftStore().reimbursementKind = 'general'
+      }, false, mobile)
+      try {
+        expect(drafts.currentDraft).toBeNull()
+        expect(wrapper.find('[data-testid="reimbursement-department-gate"]').exists()).toBe(true)
+        await visibleButton(wrapper, '报销记录').trigger('click'); await flushPromises()
+        await visibleButton(wrapper, '查看明细').trigger('click'); await flushPromises()
+        expect(drafts.currentDraft?.id).toBe(historical.id)
+        if (concurrentCurrent) current = makeDraft({ id: 'synthetic-concurrent-general', kind: 'general',
+          department: { id: '200', name: '第二部门' }, input: { ocrDispositionVersion: 1,
+            companyValue: '北京', budgetCodeValue: 'DEMO-001', trip: null, items: [], dismissedOcrFileIds: [] } })
+        const reads = vi.mocked(listWorkspaceReimbursements).mock.calls.length
+        await visibleButton(wrapper, '返回当前报销').trigger('click'); await flushPromises()
+        expect(vi.mocked(listWorkspaceReimbursements).mock.calls.length).toBeGreaterThan(reads)
+        expect(drafts.currentDraft?.id).toBe(current?.id)
+        expect(wrapper.find('[data-testid="reimbursement-department-gate"]').exists()).toBe(!concurrentCurrent)
+        expect(wrapper.get('[data-testid="switch-general"]').attributes('aria-pressed')).toBe('true')
+        if (concurrentCurrent) {
+          expect(useAuthStore().session?.selectedDepartment?.id).toBe(unselected ? undefined : '100')
+          await visibleButton(wrapper, '更换部门').trigger('click'); await flushPromises()
+          const gate = wrapper.get('[data-testid="reimbursement-department-gate"]')
+          expect(gate.getComponent({ name: 'ElSelect' }).props('modelValue')).toBe('200')
+          await gate.findAll('button').find(button => button.text() === '取消')!.trigger('click'); await flushPromises()
+          expect(drafts.currentDraft?.department.id).toBe('200')
+          expect(correctReimbursementDepartment).not.toHaveBeenCalled()
+          expect(useAuthStore().session?.selectedDepartment?.id).toBe(unselected ? undefined : '100')
+          await visibleButton(wrapper, '更换部门').trigger('click'); await flushPromises()
+          wrapper.get('[data-testid="reimbursement-department-gate"]').getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', '100')
+          await nextTick(); await visibleButton(wrapper, '确认更换').trigger('click'); await flushPromises()
+          expect(drafts.currentDraft?.id).toBe('synthetic-concurrent-general')
+          expect(drafts.currentDraft?.department.id).toBe('100')
+          expect(wrapper.find('[data-testid="reimbursement-department-gate"]').exists()).toBe(false)
+          expect(correctReimbursementDepartment).toHaveBeenCalledTimes(1)
+          expect(selectDepartmentForGeneralReimbursement).not.toHaveBeenCalled()
+        }
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).flatMap(kind =>
+    (['lost-save', 'review'] as const).flatMap(stage => (['same', 'id', 'name'] as const).map(change =>
+      ({ mobile, kind, stage, change }))))))(
+    'rechecks the confirmed department after $stage, kind=$kind mobile=$mobile change=$change',
+    async ({ mobile, kind, stage, change }) => {
+      const first = { id: '100', name: '确认时的合成部门' }
+      const nextDepartment = change === 'id' ? { id: '200', name: '另一页更正后的合成部门' }
+        : change === 'name' ? { id: first.id, name: '另一页更正后的合成名称' } : first
+      const input = canonicalNoSubsidyInput()
+      input.accountingSourceVerified = true
+      if (kind === 'general') {
+        delete input.editingState
+        input.items[0]!.subjectValue = 'synthetic-local'
+        vi.mocked(getOaReimbursementOptions).mockResolvedValue({ ...options, travelProfiles: [], subjectOptions: [
+          { value: 'synthetic-local', label: '交通费', categoryId: 'local_transport', key: null },
+        ] })
+      }
+      serverDraft = makeDraft({ kind, department: first, input, relatedApprovalCount: kind === 'travel' ? 1 : 0,
+        relatedApprovals: kind === 'travel' ? [{ ...linkedApproval, originatorDepartmentId: 'synthetic-removed-department' }] : [] })
+      vi.mocked(getReimbursementDraft).mockImplementation(async () => structuredClone(serverDraft))
+      vi.mocked(updateReimbursementDraft).mockImplementation(async (_id, revision, value) => {
+        serverDraft = { ...serverDraft, revision: revision + 1,
+          input: { ...structuredClone(value), accountingSourceVerified: true } }
+        if (stage === 'lost-save') {
+          if (change !== 'same') serverDraft = { ...serverDraft, revision: serverDraft.revision + 1, department: nextDepartment }
+          throw new Error('合成保存响应丢失')
+        }
+        return structuredClone(serverDraft)
+      })
+      let reviewCalls = 0
+      vi.mocked(markReimbursementDraftReviewReady).mockImplementation(async (_id, revision) => {
+        serverDraft = { ...serverDraft, status: 'REVIEW_READY', revision: revision + 1 }
+        if (stage === 'review' && reviewCalls++ === 0 && change !== 'same') {
+          serverDraft = { ...serverDraft, revision: serverDraft.revision + 1, department: nextDepartment }
+        }
+        return structuredClone(serverDraft)
+      })
+      const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue(undefined as never)
+      const { wrapper, drafts, expense } = await mountView(auth => {
+        auth.session = kind === 'travel'
+          ? { ...delegatedSession, departments: [first, { id: '200', name: '第二部门' }], selectedDepartment: first }
+          : { ...personalSession, departments: [first, { id: '200', name: '第二部门' }], selectedDepartment: first }
+        useReimbursementDraftStore().reimbursementKind = kind
+      }, false, mobile)
+      try {
+        const originalFileIds = drafts.files.map(file => file.id)
+        expense.items[0]!.description = '确认前尚未保存的合成说明'
+        await nextTick(); await openReviewStep(wrapper, mobile)
+        expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeUndefined()
+        await visibleButton(wrapper, '提交 OA').trigger('click'); await flushPromises()
+        expect(confirm).toHaveBeenCalledTimes(1)
+        if (kind === 'travel') expect(confirm.mock.calls[0]![0]).toContain(first.name)
+        expect(updateReimbursementDraft).toHaveBeenCalledTimes(1)
+        if (change === 'same') {
+          expect(submitOaReimbursement).toHaveBeenCalledTimes(1)
+        } else {
+          expect(submitOaReimbursement).not.toHaveBeenCalled()
+          if (stage === 'lost-save') expect(markReimbursementDraftReviewReady).not.toHaveBeenCalled()
+          expect(drafts.currentDraft?.department).toEqual(nextDepartment)
+          expect(wrapper.text()).toContain('报销部门已更新，请核对后重新提交')
+          expect(expense.items[0]?.description).toBe('确认前尚未保存的合成说明')
+          expect(drafts.files.map(file => file.id)).toEqual(originalFileIds)
+          await visibleButton(wrapper, '提交 OA').trigger('click'); await flushPromises()
+          expect(confirm).toHaveBeenCalledTimes(2)
+          if (kind === 'travel') expect(confirm.mock.calls[1]![0]).toContain(nextDepartment.name)
+          expect(submitOaReimbursement).toHaveBeenCalledTimes(1)
+          expect(updateReimbursementDraft).toHaveBeenCalledTimes(1)
+        }
+        expect(useAuthStore().session?.selectedDepartment).toEqual(first)
+        expect(uploadReimbursementDraftFile).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true])('confirms the saved delegated department after removing an approval, mobile=%s', async mobile => {
+    const first = { id: '100', name: '原部门' }
+    const second = { id: '200', name: '已保存的新部门' }
+    const other = { ...linkedApproval, processInstanceId: 'synthetic-other-travel', originatorDepartmentId: second.id }
+    serverDraft = makeDraft({ department: first, input: { ...canonicalNoSubsidyInput(), accountingSourceVerified: true },
+      relatedApprovals: [{ ...linkedApproval, originatorDepartmentId: first.id }, other], relatedApprovalCount: 2 })
+    vi.mocked(replaceReimbursementRelatedApprovals).mockImplementation(async (_id, revision) => {
+      serverDraft = { ...serverDraft, revision: revision + 1, department: second, relatedApprovals: [other], relatedApprovalCount: 1 }
+      return serverDraft
+    })
+    vi.mocked(updateReimbursementDraft).mockImplementation(async (_id, revision, input) => {
+      // The backend retains its verified accounting marker during an ordinary save.
+      serverDraft = { ...serverDraft, revision: revision + 1,
+        input: { ...structuredClone(input), accountingSourceVerified: true } }
+      return serverDraft
+    })
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+    const { wrapper, drafts } = await mountView(auth => {
+      auth.session = { ...delegatedSession, departments: [first, second], selectedDepartment: first }
+    }, false, mobile)
+    try {
+      wrapper.getComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [
+        { ...selection, processInstanceId: other.processInstanceId },
+      ])
+      await flushPromises()
+      expect(drafts.currentDraft?.department).toEqual(second)
+      expect(useAuthStore().session?.selectedDepartment).toEqual(first)
+      await openReviewStep(wrapper, mobile)
+      expect(visibleButton(wrapper, '提交 OA').attributes('disabled')).toBeUndefined()
+      await visibleButton(wrapper, '提交 OA').trigger('click'); await flushPromises()
+      expect(confirm).toHaveBeenCalledWith(expect.stringContaining(`${delegatedSession.user.name}（${second.name}）`),
+        '提交报销申请', expect.anything())
+      expect(confirm.mock.calls[0]![0]).not.toContain(first.name)
+      expect(markReimbursementDraftReviewReady).not.toHaveBeenCalled()
+      expect(submitOaReimbursement).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
   it.each([false, true].flatMap((mobile) => ['pending', 'expired'].flatMap((state) =>
     ['missingEditingState', 'legacyClockTimes'].flatMap((format) =>
       ['settings', 'history'].map((destination) => ({ mobile, state, format, destination }))),
@@ -4698,7 +6075,7 @@ describe('ReimburseView single-form OA flow', () => {
       wrapper.unmount()
     },
   )
-  it.each([false, true])('ignores a late workspace initialization after department returns mobile=%s', async (mobile) => {
+  it.each([false, true])('ignores a late workspace initialization after a session returns mobile=%s', async (mobile) => {
     vi.useFakeTimers()
     const staleWorkspace = deferred<{ items: ReimbursementDraft[]; total: number }>()
     const oldA = makeDraft({ id: 'old-a', workspaceRetired: true, input: canonicalNoSubsidyInput() })
@@ -4713,11 +6090,11 @@ describe('ReimburseView single-form OA flow', () => {
     const auth = useAuthStore()
     try {
       drafts.reset(); expense.reset(); useReimbursementSubmissionStore().reset()
-      auth.session!.selectedDepartment = currentB.department
+      auth.session!.csrfToken = 'synthetic-session-b'
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe(currentB.id)
       drafts.reset(); expense.reset(); useReimbursementSubmissionStore().reset()
-      auth.session!.selectedDepartment = currentA.department
+      auth.session!.csrfToken = 'synthetic-csrf'
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe(currentA.id)
       expense.items[0]!.description = '返回原部门后，用户正在填写的新内容'
@@ -4729,7 +6106,7 @@ describe('ReimburseView single-form OA flow', () => {
     } finally { staleWorkspace.resolve({ items: [oldA], total: 1 }); wrapper.unmount() }
   })
 
-  it.each([false, true])('ignores a late autosave failure after a department roundtrip mobile=%s', async (mobile) => {
+  it.each([false, true])('ignores a late autosave failure after a session roundtrip mobile=%s', async (mobile) => {
     vi.useFakeTimers()
     const save = deferred<ReimbursementDraft>()
     serverDraft.input = canonicalNoSubsidyInput()
@@ -4746,12 +6123,12 @@ describe('ReimburseView single-form OA flow', () => {
       vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [currentB], total: 1 })
       serverDraft = currentB
       drafts.reset(); expense.reset(); useReimbursementSubmissionStore().reset()
-      auth.session!.selectedDepartment = currentB.department
+      auth.session!.csrfToken = 'synthetic-session-b'
       await flushPromises()
       vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [currentA], total: 1 })
       serverDraft = currentA
       drafts.reset(); expense.reset(); useReimbursementSubmissionStore().reset()
-      auth.session!.selectedDepartment = currentA.department
+      auth.session!.csrfToken = 'synthetic-csrf'
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe(currentA.id)
       expect(expense.items[0]?.description).toBe(currentA.input.items[0]?.description)
@@ -4773,7 +6150,7 @@ describe('ReimburseView single-form OA flow', () => {
   })
 
   it.each([false, true].flatMap((mobile) => ['confirmation', 'review'].map((stage) => ({ mobile, stage }))))(
-    'does not continue an old OA $stage after a department roundtrip, mobile=$mobile', async ({ mobile, stage }) => {
+    'does not continue an old OA $stage after a session roundtrip, mobile=$mobile', async ({ mobile, stage }) => {
       vi.useFakeTimers()
       const confirmation = deferred<Awaited<ReturnType<typeof ElMessageBox.confirm>>>()
       const review = deferred<ReimbursementDraft>()
@@ -4796,7 +6173,7 @@ describe('ReimburseView single-form OA flow', () => {
         serverDraft = current
         vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [current], total: 1 })
         drafts.reset(); expense.reset(); useReimbursementSubmissionStore().reset()
-        auth.session!.selectedDepartment = current.department
+        auth.session!.csrfToken = current.id === currentA.id ? 'synthetic-csrf' : 'synthetic-session-b'
         await flushPromises()
         expect(drafts.currentDraft?.id).toBe(current.id)
       }
@@ -4850,12 +6227,12 @@ describe('ReimburseView single-form OA flow', () => {
       vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [currentB], total: 1 })
       serverDraft = currentB
       drafts.reset(); expense.reset(); useReimbursementSubmissionStore().reset()
-      auth.session!.selectedDepartment = currentB.department
+      auth.session!.csrfToken = 'synthetic-session-b'
       await flushPromises()
       vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [currentA], total: 1 })
       serverDraft = currentA
       drafts.reset(); expense.reset(); useReimbursementSubmissionStore().reset()
-      auth.session!.selectedDepartment = currentA.department
+      auth.session!.csrfToken = 'synthetic-csrf'
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe(currentA.id)
       expect(drafts.currentDraft?.relatedApprovals).toEqual([])
@@ -5146,18 +6523,18 @@ describe('ReimburseView single-form OA flow', () => {
       vi.useFakeTimers()
       serverDraft.input = canonicalNoSubsidyInput()
       const pendingSave = deferred<ReimbursementDraft>()
-      const pendingDepartment = deferred<{ selectedDepartment: { id: string; name: string }; selectionRequired: boolean; departments: { id: string; name: string }[] }>()
+      const pendingDepartment = deferred<Awaited<ReturnType<typeof correctReimbursementDepartment>>>()
       const { wrapper, drafts, expense } = await mountView((auth) => {
         auth.session!.departments.push({ id: '200', name: '另一部门' })
       }, false, mobile)
       if (stage === 'saving') {
         vi.mocked(updateReimbursementDraft).mockReturnValueOnce(pendingSave.promise)
         expense.items[0]!.description = '旧部门尚未保存的输入'
-      } else vi.mocked(selectDepartmentFromTravelApproval).mockReturnValueOnce(pendingDepartment.promise)
+      } else vi.mocked(correctReimbursementDepartment).mockReturnValueOnce(pendingDepartment.promise)
       wrapper.findComponent(TravelApprovalSelectorStub).vm.$emit('update:modelValue', [selection])
       await flushPromises()
       const oldInput = vi.mocked(updateReimbursementDraft).mock.calls.at(-1)?.[2]
-      expect(selectDepartmentFromTravelApproval).toHaveBeenCalledTimes(stage === 'resolving' ? 1 : 0)
+      expect(correctReimbursementDepartment).toHaveBeenCalledTimes(stage === 'resolving' ? 1 : 0)
       expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(true)
       expect(visibleButton(wrapper, '新开一笔').attributes()).toHaveProperty('disabled')
       serverDraft = makeDraft({ id: 'new-identity-current', input: canonicalNoSubsidyInput() })
@@ -5168,7 +6545,7 @@ describe('ReimburseView single-form OA flow', () => {
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe('new-identity-current')
       if (stage === 'saving') pendingSave.resolve(makeDraft({ revision: 2, input: oldInput! }))
-      else pendingDepartment.resolve({ selectedDepartment: { id: '200', name: '另一部门' }, selectionRequired: false, departments: [{ id: '200', name: '另一部门' }] })
+      else pendingDepartment.resolve({ draft: makeDraft({ department: { id: '200', name: '另一部门' } }), selectedDepartment: { id: '200', name: '另一部门' } })
       await flushPromises()
       expect(drafts.currentDraft?.id).toBe('new-identity-current')
       expect(auth.session?.selectedDepartment?.id).toBe('100')

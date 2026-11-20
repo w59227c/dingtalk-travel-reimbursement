@@ -15,7 +15,7 @@ from app.database.session import get_db
 from app.models.reimbursement import ReimbursementAttachmentKind, ReimbursementDraftFileRole
 from app.models.session import UserSession, utc_now
 from app.schemas.common import success
-from app.schemas.reimbursements import DraftRevisionRequest
+from app.schemas.reimbursements import DraftRevisionRequest, ReimbursementDraftInput
 from app.services.excel_generator import XLSX_MEDIA_TYPE, content_disposition
 from app.services.excel_preview_tickets import (
     InvalidExcelPreviewTicket,
@@ -26,6 +26,11 @@ from app.services.file_coordination import (
     SessionFileCoordinator,
     SessionFilesRetired,
     UploadBusy,
+)
+from app.services.general_reimbursement import (
+    get_general_catalog,
+    refresh_general_catalog,
+    verify_general_approvals,
 )
 from app.services.multipart_uploads import parse_upload_files
 from app.services.oa_template_profiles import load_fresh_submission_catalog
@@ -45,6 +50,8 @@ from app.services.reimbursement_context import (
 )
 from app.services.reimbursement_drafts import (
     draft_actor,
+    history_draft_actor,
+    require_general_draft_options,
     require_owned_draft,
     require_previewable_draft,
 )
@@ -118,11 +125,13 @@ def get_files(
     request: Request,
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
+    history: bool = False,
 ) -> dict[str, object]:
     revision, files, pending_uploads = list_draft_files(
         database,
         draft_id=draft_id,
-        actor=draft_actor(current),
+        actor=history_draft_actor(database, current, draft_id) if history else draft_actor(current),
+        history=history,
     )
     return success(
         {
@@ -131,9 +140,7 @@ def get_files(
             "items": [
                 serialize_draft_file(
                     item,
-                    ocr_timeout_seconds=(
-                        request.app.state.settings.ocr_operation_timeout_seconds
-                    ),
+                    ocr_timeout_seconds=(request.app.state.settings.ocr_operation_timeout_seconds),
                 )
                 for item in files
             ],
@@ -494,6 +501,7 @@ async def preview_excel(
     request: Request,
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
+    history: bool = False,
 ) -> StreamingResponse:
     return await _excel_preview_response(
         draft_id=draft_id,
@@ -501,6 +509,7 @@ async def preview_excel(
         request=request,
         database=database,
         current=current,
+        history=history,
     )
 
 
@@ -522,24 +531,38 @@ async def open_excel_preview(
 
 
 @router.post("/reimbursements/drafts/{draft_id}/excel-preview-ticket")
-def create_excel_preview_ticket(
+async def create_excel_preview_ticket(
     draft_id: str,
     body: DraftRevisionRequest,
     request: Request,
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
+    history: bool = False,
 ) -> dict[str, object]:
-    actor = draft_actor(current)
-    require_previewable_draft(
-        database, draft_id=draft_id, actor=actor, expected_revision=body.expected_revision,
+    actor = history_draft_actor(database, current, draft_id) if history else draft_actor(current)
+    draft = require_previewable_draft(
+        database,
+        draft_id=draft_id,
+        actor=actor,
+        expected_revision=body.expected_revision,
     )
+    if draft.kind == "general" and draft.status != "LOCKED":
+        database.rollback()
+        await refresh_general_catalog(
+            request.app.state.database_session_factory, request.app.state.dingtalk_workflow
+        )
+        draft = require_previewable_draft(
+            database, draft_id=draft_id, actor=actor, expected_revision=body.expected_revision
+        )
+        require_general_draft_options(draft, get_general_catalog(database))
     token = issue_excel_preview_ticket(
         draft_id=draft_id,
         expected_revision=body.expected_revision,
         session_id_hash=current.record.session_id_hash,
         secret=request.app.state.settings.session_secret,
         lifetime=_EXCEL_PREVIEW_TICKET_LIFETIME,
-        reimbursement_context=current.reimbursement_context,
+        reimbursement_context=None if history else current.reimbursement_context,
+        history=history,
     )
     return success(
         {
@@ -605,6 +628,7 @@ async def download_native_excel_preview(
         request=request,
         database=database,
         current=current,
+        history=ticket.history,
     )
 
 
@@ -615,18 +639,34 @@ async def _excel_preview_response(
     request: Request,
     database: Session,
     current: CurrentSession,
+    history: bool = False,
 ) -> StreamingResponse:
-    actor = draft_actor(current)
+    actor = history_draft_actor(database, current, draft_id) if history else draft_actor(current)
     employee_name = current.reimbursement_name
     draft = require_previewable_draft(
-        database, draft_id=draft_id, actor=actor, expected_revision=expected_revision,
+        database,
+        draft_id=draft_id,
+        actor=actor,
+        expected_revision=expected_revision,
     )
     locked = draft.status == "LOCKED"
+    kind = draft.kind
+    general_ids = (
+        ReimbursementDraftInput.model_validate_json(draft.input_json).general_approval_ids
+        if kind == "general" and not locked
+        else []
+    )
     database.rollback()
     if not locked:
-        await load_fresh_submission_catalog(
-            request.app.state.database_session_factory,
-            request.app.state.dingtalk_workflow,
+        refresh_catalog = (
+            refresh_general_catalog if kind == "general" else load_fresh_submission_catalog
+        )
+        await refresh_catalog(
+            request.app.state.database_session_factory, request.app.state.dingtalk_workflow
+        )
+    if general_ids:
+        await verify_general_approvals(
+            request.app.state.dingtalk_workflow, user_id=actor.user_id, instance_ids=general_ids
         )
     await verify_delegated_saved_approvals(
         database,

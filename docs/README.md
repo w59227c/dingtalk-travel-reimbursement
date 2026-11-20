@@ -21,7 +21,7 @@
 
 ## 调研依据
 
-`research/` 保留附件生命周期、权限、审批关联和票据判断的专题依据；依赖与构建依据直接放在对应开发、集成和发布文档中。
+`research/` 保留附件生命周期、权限、审批关联和票据判断的专题依据；其中调研日期、PoC 结果及当时建议按历史记录保留，当前产品范围和实现以产品契约、集成设计为准。依赖与构建依据直接放在对应开发、集成和发布文档中。
 
 - [`research/DINGTALK_APPROVAL_ATTACHMENT_STORAGE_LIFECYCLE.md`](research/DINGTALK_APPROVAL_ATTACHMENT_STORAGE_LIFECYCLE.md)：审批附件归属、引用和清理边界。
 - [`research/DINGTALK_PERMISSION_CODES.md`](research/DINGTALK_PERMISSION_CODES.md)：生产所需钉钉权限编码。

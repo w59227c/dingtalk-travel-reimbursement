@@ -33,6 +33,9 @@ def load_receipt_keyword_rules(database: Session) -> tuple[ReceiptKeywordRule, .
                 transport_type=transport_type
                 if transport_type in {"ride_hailing", "taxi"}
                 else None,
+                welfare_type=(row.welfare_type or "other")
+                if category == ExpenseCategory.EMPLOYEE_WELFARE
+                else None,
             )
         )
     return tuple(rules)

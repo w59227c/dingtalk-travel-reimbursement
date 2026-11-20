@@ -6,6 +6,7 @@ export interface OcrReceiptError {
 }
 
 export interface OcrReceiptCandidate {
+  welfareType?: 'express' | 'other'
   fileId: string
   type: string
   categoryId: string

@@ -6,7 +6,9 @@ withDefaults(defineProps<{
   department: string
   periods: Array<{ startDate: string; endDate: string }>
   approvalCount: number
-}>(), { mobile: false })
+  general?: boolean
+  subjects?: string[]
+}>(), { mobile: false, subjects: () => [] })
 const emit = defineEmits<{ approvals: [] }>()
 </script>
 
@@ -28,12 +30,19 @@ const emit = defineEmits<{ approvals: [] }>()
       </el-button>
     </header>
     <dl>
-      <div><dt>所属公司</dt><dd>{{ company || '尚未关联审批' }}</dd></div>
+      <div><dt>{{ general ? '报销主体' : '所属公司' }}</dt><dd>{{ company || (general ? '待选择' : '尚未关联审批') }}</dd></div>
       <div><dt>报销部门</dt><dd>{{ department }}</dd></div>
       <div>
-        <dt>预算项目</dt><dd>{{ budget || '尚未关联审批' }}</dd>
+        <dt>{{ general ? '预算代码' : '预算代码 / 项目' }}</dt><dd>{{ budget || (general ? '待选择' : '尚未关联审批') }}</dd>
       </div>
-      <div class="review-overview__dates">
+      <template v-if="general">
+        <div><dt>关联审批单</dt><dd>{{ approvalCount ? `已关联 ${approvalCount} 张` : '未关联' }}</dd></div>
+        <div><dt>费用科目</dt><dd>{{ subjects.join('、') || '待选择' }}</dd></div>
+      </template>
+      <div
+        v-else
+        class="review-overview__dates"
+      >
         <dt>出差日期</dt>
         <dd>
           <span
@@ -64,7 +73,7 @@ dd { margin: 0; min-width: 0; overflow-wrap: anywhere; line-height: 1.6; }
 .review-overview__date { white-space: nowrap; }
 small { display: block; margin-top: 4px; color: var(--el-text-color-secondary); font-size: 12px; }
 .review-overview--mobile dl { grid-template-columns: minmax(0, 1fr); gap: 10px; }
-.review-overview--mobile dl > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; }
+.review-overview--mobile dl > div { display: grid; grid-template-columns: 5.5em minmax(0, 1fr); gap: 8px; }
 .review-overview--mobile dt { margin-bottom: 0; }
 @media (max-width: 600px) { .review-overview:not(.review-overview--mobile) dl { grid-template-columns: minmax(0, 1fr); } }
 </style>

@@ -225,12 +225,15 @@ def test_pipeline_completion_never_overwrites_changed_state(client_factory, monk
         finally:
             release.set()
         response = future.result(10)
-    assert response.status_code in {401, 404, 409}, response.text
+    if change == "department":
+        assert response.status_code == 200, response.text
+    else:
+        assert response.status_code in {401, 404, 409}, response.text
     with client.app.state.database_session_factory() as database:
         draft = database.get(ReimbursementDraft, draft_id)
         file = database.get(ReimbursementDraftFile, file_id)
         assert draft.input_json == expected_input
-        assert file.ocr_status != "COMPLETE"
+        assert (file.ocr_status == "COMPLETE") == (change == "department")
         if change == "role":
             assert file.attachment_kind == "payment_proof" and file.ocr_result_json is None
         if change == "delete":

@@ -9,6 +9,7 @@ const props = withDefaults(defineProps<{
   mobile?: boolean
   readonly?: boolean
   previewOnly?: boolean
+  history?: boolean
   previewDisabledReason?: string
   beforePreview?: () => Promise<void>
 }>(), {
@@ -54,10 +55,12 @@ async function downloadExcel(): Promise<void> {
     await props.beforePreview?.()
     if (!acceptsPreview()) return
     if (props.mobile) {
-      await drafts.openExcelPreviewInDingTalk()
+      if (props.history) await drafts.openExcelPreviewInDingTalk(true)
+      else await drafts.openExcelPreviewInDingTalk()
       if (acceptsPreview()) ElMessage.success('已在钉钉中打开 Excel 预览')
     } else {
-      await drafts.downloadExcelPreview()
+      if (props.history) await drafts.downloadExcelPreview(true)
+      else await drafts.downloadExcelPreview()
       if (acceptsPreview()) ElMessage.success('已生成报销单 Excel 预览')
     }
   } catch (error) {
@@ -80,9 +83,12 @@ async function downloadExcel(): Promise<void> {
     <div
       v-if="!props.previewOnly"
       class="totals-grid"
+      :class="{ 'totals-grid--general': expense.generalMode, 'totals-grid--mobile': props.mobile }"
     >
       <div><span>票据金额</span><strong>¥{{ expense.displayExpenseTotal }}</strong></div>
-      <div><span>出差补助</span><strong>{{ expense.pendingTotalLabel || `¥${expense.displaySubsidyTotal}` }}</strong></div>
+      <div v-if="!expense.generalMode">
+        <span>出差补助</span><strong>{{ expense.pendingTotalLabel || `¥${expense.displaySubsidyTotal}` }}</strong>
+      </div>
       <div><span>票据张数</span><strong>{{ expense.displayReceiptCount }} 张</strong></div>
       <div class="grand-total">
         <span>合计</span><strong>{{ expense.pendingTotalLabel || `¥${expense.displayTotal}` }}</strong>
@@ -131,6 +137,14 @@ async function downloadExcel(): Promise<void> {
 </template>
 
 <style scoped>
+.totals-grid.totals-grid--general { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.totals-grid--general.totals-grid--mobile { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.totals-grid--general.totals-grid--mobile .grand-total { grid-column: 1 / -1; }
+
+@media (max-width: 600px) {
+  .totals-grid.totals-grid--general { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .totals-grid--general .grand-total { grid-column: 1 / -1; }
+}
 .summary-card--preview-only { margin: 0; border: 0; border-radius: 0; background: transparent; overflow: visible; }
 .summary-card.summary-card--preview-only :deep(.el-card__body) { padding: 0; }
 .summary-card--preview-only .excel-download-action { margin: 0; justify-items: start; }

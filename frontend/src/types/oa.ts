@@ -156,3 +156,17 @@ export interface ConfirmOaTemplateCatalogInput {
   reimbursement: ConfirmOaReimbursementTemplateInput
   travelProfiles: ConfirmOaTravelTemplateInput[]
 }
+
+export interface GeneralOaTemplate {
+  processCode: string
+  templateName: string
+  configVersion: number
+  status: 'COMPATIBLE' | 'DRIFTED'
+}
+
+export interface GeneralOaTemplateInspection {
+  processCode: string
+  templateName: string
+  schemaFingerprint: string
+  fields: { label: string; type: string }[]
+}

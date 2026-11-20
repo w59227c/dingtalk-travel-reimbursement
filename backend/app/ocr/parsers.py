@@ -338,6 +338,14 @@ class ReceiptParserRegistry:
         parsed = _with_transport_evidence(
             self._apply_keyword_fallback(parsed, lines), lines, self._keyword_rules
         )
+        if parsed.category is ExpenseCategory.EMPLOYEE_WELFARE:
+            is_express = any(
+                rule.category is ExpenseCategory.EMPLOYEE_WELFARE and rule.welfare_type == "express"
+                for rule in GenericInvoiceParser(keyword_rules=self._keyword_rules).matching_rules(
+                    lines
+                )
+            )
+            parsed = replace(parsed, welfare_type="express" if is_express else "other")
         if trace is not None:
             matches = GenericInvoiceParser(keyword_rules=self._keyword_rules).matching_rules(lines)
             keyword_text = "\n".join(line.text for line in invoice_keyword_lines(lines))

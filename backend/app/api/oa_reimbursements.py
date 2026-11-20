@@ -6,11 +6,24 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
+from app.core.errors import ApiError
 from app.database.session import get_db
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
+from app.models.reimbursement import ReimbursementKind
 from app.schemas.common import success
 from app.services.attendance_calendar import attendance_calendar
-from app.services.oa_template_profiles import load_fresh_submission_catalog
+from app.services.general_reimbursement import (
+    find_general_approvals,
+    general_approval_date_range,
+    general_options,
+    get_general_catalog,
+    refresh_general_catalog,
+    subject_category,
+)
+from app.services.oa_template_profiles import (
+    load_fresh_submission_catalog,
+    require_submission_ready_catalog,
+)
 from app.services.reimbursement_context import (
     get_reimbursement_session,
     require_live_reimbursement_actor,
@@ -29,14 +42,79 @@ router = APIRouter(tags=["oa-reimbursements"])
 async def get_reimbursement_options(
     request: Request,
     _current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
+    kind: ReimbursementKind = ReimbursementKind.TRAVEL,
 ) -> dict[str, object]:
-    catalog = await load_fresh_submission_catalog(
-        request.app.state.database_session_factory,
-        request.app.state.dingtalk_workflow,
+    if kind == "general" and _current.beneficiary is not None:
+        raise ApiError("OA_GENERAL_SELF_ONLY", "普通费用暂只支持本人报销", 403)
+    refresh_catalog = (
+        refresh_general_catalog if kind == "general" else load_fresh_submission_catalog
     )
+    catalog = await refresh_catalog(
+        request.app.state.database_session_factory, request.app.state.dingtalk_workflow
+    )
+    if catalog.is_general:
+        return success(
+            {
+                "templateConfigVersion": catalog.config_version,
+                "schemaFingerprint": catalog.reimbursement.schema.fingerprint,
+                "reimbursementProcessCode": catalog.reimbursement.process_code,
+                "companyOptions": [item.as_dict() for item in general_options(catalog, "company")],
+                "budgetCodeOptions": [
+                    item.as_dict() for item in general_options(catalog, "budgetCode")
+                ],
+                "subjectOptions": [
+                    {**item.as_dict(), "categoryId": subject_category(item.label)}
+                    for item in general_options(catalog, "subjects")
+                ],
+                "travelTypeOptions": [],
+                "travelProfiles": [],
+            }
+        )
     with request.app.state.database_session_factory() as database:
         calendar = attendance_calendar(database)
     return success({**runtime_options(catalog), "attendanceCalendar": calendar})
+
+
+@router.get("/oa/general-approvals")
+async def get_current_user_general_approvals(
+    request: Request,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
+    days: Annotated[int, Query(ge=1, le=365)] = 183,
+    from_date: Annotated[date | None, Query(alias="from")] = None,
+    to_date: Annotated[date | None, Query(alias="to")] = None,
+    query: Annotated[str, Query(alias="q", max_length=100)] = "",
+    cursor: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
+) -> dict[str, object]:
+    if current.beneficiary is not None:
+        raise ApiError("OA_GENERAL_SELF_ONLY", "普通费用暂只支持本人报销", 403)
+    date_range = general_approval_date_range(from_date, to_date, days=days)
+    session_id = current.record.session_id_hash
+    user_id = current.reimbursement_user_id
+    known_codes = []
+    for kind in ("general", "travel"):
+        try:
+            catalog = (
+                get_general_catalog if kind == "general" else require_submission_ready_catalog
+            )(database)
+        except ApiError:
+            continue
+        known_codes.extend(
+            (catalog.reimbursement.process_code, *catalog.allowed_travel_process_codes)
+        )
+    database.rollback()
+    result = await find_general_approvals(
+        request.app.state.dingtalk_workflow,
+        user_id=user_id,
+        date_range=date_range,
+        keyword=query.strip(),
+        session_id=session_id,
+        secret=request.app.state.settings.session_secret,
+        cursor=cursor,
+        known_codes=tuple(known_codes),
+    )
+    require_live_reimbursement_actor(database, current, session_id)
+    return success(result)
 
 
 @router.get("/oa/travel-approvals")

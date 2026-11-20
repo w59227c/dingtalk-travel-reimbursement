@@ -34,6 +34,7 @@ export function inputSignature(input: ReimbursementDraftInput): string {
     ocrDispositionVersion: input.ocrDispositionVersion,
     companyValue: input.companyValue,
     budgetCodeValue: input.budgetCodeValue,
+    generalApprovalIds: input.generalApprovalIds ?? [],
     trip: tripSignature(input.trip),
     trips: (input.trips ?? []).map(tripSignature),
     editingState: input.editingState
@@ -51,6 +52,9 @@ export function inputSignature(input: ReimbursementDraftInput): string {
       paymentProofFileIds: item.paymentProofFileIds ?? [],
       hotelBillFileIds: item.hotelBillFileIds ?? [],
       receiptAttachmentFileIds: item.receiptAttachmentFileIds ?? [],
+      waybillFileIds: item.waybillFileIds ?? [],
+      welfareType: item.welfareType,
+      subjectValue: item.subjectValue,
       railType: item.railType ?? 'unknown',
       requiresItinerary: item.requiresItinerary ?? false,
       originalCurrency: item.originalCurrency,
@@ -58,7 +62,8 @@ export function inputSignature(input: ReimbursementDraftInput): string {
       originalDetailsEdited: item.originalDetailsEdited ?? false,
       cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
       requiresCnyConfirmation: item.requiresCnyConfirmation ?? false,
-      category: item.category,
+      // Ordinary expense categories are derived from the employee's selected OA option.
+      category: item.subjectValue ? undefined : item.category,
       date: item.date,
       displayDate: item.displayDate,
       description: item.description,

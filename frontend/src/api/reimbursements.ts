@@ -2,9 +2,10 @@ import axios, { type AxiosProgressEvent } from 'axios'
 
 import { filenameFromContentDisposition } from './excel'
 import { http, reimbursementContextHeaders } from './http'
-import type { ApiEnvelope } from '@/types/auth'
+import type { ApiEnvelope, Department } from '@/types/auth'
 import type {
   OaReimbursementOptions,
+  GeneralApproval,
   OaTravelApprovalList,
   ReimbursementDraft,
   ReimbursementDraftDepartment,
@@ -24,17 +25,25 @@ import type {
   ReimbursementSubmission,
   ReimbursementSubmissionHistoryEntry,
   ReimbursementDraftSummary,
+  ReimbursementKind,
   SubmitReimbursementInput,
 } from '@/types/reimbursements'
 
 const DRAFT_EXCEL_PREVIEW_FILENAME = '差旅费报销单预览.xlsx'
+const EXCEL_PREVIEW_REQUEST_TIMEOUT_MS = 60_000
 // Keep the client attached through the OCR worker ceiling and its settlement window.
 // Covers the bounded server queue, one OCR run, and process cleanup headroom.
 const OCR_REQUEST_TIMEOUT_MS = 360_000
 
 export interface ReimbursementRequestOptions {
+  kind?: ReimbursementKind
   signal?: AbortSignal
   reimbursementContext?: string | null
+  history?: boolean
+}
+
+function personalHistoryRequest(history?: boolean) {
+  return history ? { params: { history: true }, headers: reimbursementContextHeaders(null) } : {}
 }
 
 export interface ListReimbursementDraftsOptions extends ReimbursementRequestOptions {
@@ -85,7 +94,8 @@ export async function getOaReimbursementOptions(
 ): Promise<OaReimbursementOptions> {
   const response = await http.get<ApiEnvelope<OaReimbursementOptions>>(
     '/oa/reimbursements/options',
-    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext),
+      ...(options.kind === 'general' ? { params: { kind: options.kind } } : {}) },
   )
   return response.data.data
 }
@@ -130,6 +140,7 @@ export async function createReimbursementDraft(
   const response = await http.post<ApiEnvelope<ReimbursementDraft>>(
     '/reimbursements/drafts',
     { expectedRevision: 0, input, ...(options.reuseExisting ? { reuseExisting: true } : {}),
+      ...(options.kind === 'general' ? { kind: options.kind } : {}),
       ...(options.replaceCurrent ? { replacesDraftId: options.replaceCurrent.id, replacesDraftRevision: options.replaceCurrent.revision } : {}),
       ...expectedDepartmentParams(options.expectedDepartment) },
     { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
@@ -147,6 +158,7 @@ export async function listReimbursementDrafts(
         offset: options.offset ?? 0,
         limit: options.limit ?? 50,
         ...expectedDepartmentParams(options.expectedDepartment),
+        ...(options.kind === 'general' ? { kind: options.kind } : {}),
       },
       signal: options.signal,
     },
@@ -155,11 +167,11 @@ export async function listReimbursementDrafts(
 }
 
 export async function listReimbursementSubmissionHistory(
-  options: ReimbursementRequestOptions & { expectedDepartment?: ReimbursementDraftDepartment } = {},
+  options: { signal?: AbortSignal } = {},
 ): Promise<ReimbursementSubmissionHistoryEntry[]> {
   const response = await http.get<ApiEnvelope<ReimbursementSubmissionHistoryEntry[]>>(
     '/reimbursements/submission-history',
-    { signal: options.signal, params: expectedDepartmentParams(options.expectedDepartment) },
+    { signal: options.signal, headers: reimbursementContextHeaders(null) },
   )
   return response.data.data
 }
@@ -172,7 +184,8 @@ export async function listWorkspaceReimbursements(
     {
       signal: options.signal,
       headers: reimbursementContextHeaders(options.reimbursementContext),
-      params: { ...expectedDepartmentParams(options.expectedDepartment), offset: options.offset ?? 0 },
+      params: { ...expectedDepartmentParams(options.expectedDepartment), offset: options.offset ?? 0,
+        ...(options.kind === 'general' ? { kind: options.kind } : {}) },
     },
   )
   return response.data.data
@@ -187,13 +200,36 @@ export async function recoverReimbursementDraft(
   return response.data.data
 }
 
+export async function listGeneralApprovals(
+  filters: { from?: string; to?: string; query?: string; cursor?: string },
+  signal: AbortSignal,
+) {
+  const response = await http.get<ApiEnvelope<{ items: GeneralApproval[]; complete: boolean; nextCursor?: string }>>(
+    '/oa/general-approvals',
+    { params: { from: filters.from, to: filters.to, q: filters.query, cursor: filters.cursor }, timeout: 120_000, signal },
+  )
+  return response.data.data
+}
+
+export async function getSavedGeneralApprovals(draftId: string, signal: AbortSignal): Promise<GeneralApproval[]> {
+  const response = await http.get<ApiEnvelope<GeneralApproval[]>>(`${draftUrl(draftId)}/general-approvals`, { signal })
+  return response.data.data
+}
+
+export async function replaceGeneralApprovals(draftId: string, expectedRevision: number, instanceIds: string[], signal?: AbortSignal) {
+  const response = await http.put<ApiEnvelope<ReimbursementDraft>>(
+    `${draftUrl(draftId)}/general-approvals`, { expectedRevision, instanceIds }, { timeout: 60_000, signal },
+  )
+  return response.data.data
+}
+
 export async function getReimbursementDraft(
   draftId: string,
   options: ReimbursementRequestOptions = {},
 ): Promise<ReimbursementDraft> {
   const response = await http.get<ApiEnvelope<ReimbursementDraft>>(
     draftUrl(draftId),
-    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext), ...personalHistoryRequest(options.history) },
   )
   return response.data.data
 }
@@ -260,7 +296,7 @@ export async function listReimbursementDraftFiles(
 ): Promise<ReimbursementDraftFileList> {
   const response = await http.get<ApiEnvelope<ReimbursementDraftFileList>>(
     `${draftUrl(draftId)}/files`,
-    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext), ...personalHistoryRequest(options.history) },
   )
   return response.data.data
 }
@@ -360,7 +396,8 @@ export async function getReimbursementDraftExcelPreview(
     {
       responseType: 'blob',
       signal: options.signal,
-      timeout: 60_000,
+      timeout: EXCEL_PREVIEW_REQUEST_TIMEOUT_MS,
+      ...personalHistoryRequest(options.history),
     },
   ).catch(normalizeBlobApiError)
   return {
@@ -380,7 +417,7 @@ export async function requestReimbursementDraftExcelPreviewTicket(
   const response = await http.post<ApiEnvelope<ReimbursementExcelPreviewTicket>>(
     `${draftUrl(draftId)}/excel-preview-ticket`,
     { expectedRevision },
-    { signal: options.signal },
+    { signal: options.signal, timeout: EXCEL_PREVIEW_REQUEST_TIMEOUT_MS, ...personalHistoryRequest(options.history) },
   )
   return response.data.data
 }
@@ -476,7 +513,32 @@ export async function getOaReimbursementSubmissionForDraft(
 ): Promise<ReimbursementSubmission> {
   const response = await http.get<ApiEnvelope<ReimbursementSubmission>>(
     `/oa/reimbursements/drafts/${encodeURIComponent(draftId)}/submission`,
-    { signal: options.signal },
+    { signal: options.signal, ...personalHistoryRequest(options.history) },
   )
+  return response.data.data
+}
+
+
+export interface WorkspaceContextResult {
+  selectedDepartment: Department
+  reimbursementContext?: string
+}
+
+export async function openReimbursementWorkspace(
+  draftId: string, candidates: { id: string; revision: number }[],
+  options: ReimbursementRequestOptions = {},
+): Promise<WorkspaceContextResult> {
+  const response = await http.post<ApiEnvelope<WorkspaceContextResult>>('/reimbursements/workspace/open',
+    { draftId, candidates, kind: options.kind ?? 'travel' },
+    { signal: options.signal, headers: reimbursementContextHeaders(options.reimbursementContext) })
+  return response.data.data
+}
+
+export async function correctReimbursementDepartment(
+  draftId: string, expectedRevision: number,
+  departmentId?: string, selection?: ReimbursementRelatedApprovalSelection,
+): Promise<WorkspaceContextResult & { draft: ReimbursementDraft }> {
+  const response = await http.put<ApiEnvelope<WorkspaceContextResult & { draft: ReimbursementDraft }>>(
+    `${draftUrl(draftId)}/department`, { expectedRevision, departmentId, selection }, { timeout: 60_000 })
   return response.data.data
 }

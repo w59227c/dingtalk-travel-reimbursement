@@ -7,7 +7,7 @@ import ReimburseView from '@/views/ReimburseView.vue'
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   scrollBehavior(to) {
-    if (to.hash === '#oa-template-catalog') return { el: to.hash, top: 16 }
+    if (['#oa-template-catalog', '#general-oa-template'].includes(to.hash)) return { el: '#oa-template-catalog', top: 16 }
   },
   routes: [
     {
@@ -25,13 +25,14 @@ const router = createRouter({
       path: '/admin/settings',
       name: 'admin-settings',
       component: () => import('@/views/SettingsAdminView.vue'),
+      props: (route) => ({ initialTemplateTab: route.hash === '#general-oa-template' ? 'general' : 'travel' }),
       meta: { requiresAdmin: true },
     },
     {
       path: '/m/settings',
       name: 'mobile-admin-settings',
       component: () => import('@/views/SettingsAdminView.vue'),
-      props: { mobile: true },
+      props: (route) => ({ mobile: true, initialTemplateTab: route.hash === '#general-oa-template' ? 'general' : 'travel' }),
       meta: { requiresAdmin: true },
     },
   ],

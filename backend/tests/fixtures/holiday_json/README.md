@@ -1,6 +1,6 @@
 # 年度 JSON 格式回归样本
 
-2026-10-28 从用户指定的两个公开来源保存 2023—2026 年共 8 份响应，仅用于离线回归测试。具体来源与响应大小见 `sources.json`。生产代码不读取这些样本、不访问接口、也不获取 JSON 中的 `$schema` 或 `papers`。
+2026-10-28 从用户指定的两个公开来源保存 2023—2026 年共 8 份响应，仅用于离线回归测试。具体来源与响应大小见 `sources.json`。运行时不读取这些样本，不访问提莫接口或 JSON 中的 `$schema`、`papers`；自动获取日历只读取固定的 holiday-cn 年度资源，见[出口放行清单](../../../../docs/deployment/NETWORK_EGRESS.md)。
 
 - 提莫：`https://timor.tech/api/holiday/year/{year}/`，必须保留年度后的斜杠。`code` 必须为整数 0；`holiday` 中日期键为 MM-DD，条目包含完整 date、name 和严格布尔 holiday，true 为休息、false 为补班。以所有日期共同确定适用年，混年或月度／单日结果拒绝。wage/rest/after/target 等元数据不参与出勤或金额计算。
 - holiday-cn：`https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json`，使用整数 year 及 days 数组中的 date/name/isOffDay。year 是原政府通知的适用年份，允许含相邻年日期，沿用原通知的跨年合并规则。isOffDay 必须是布尔值，true 为休息、false 为补班。

@@ -4,10 +4,12 @@ import type { ReimbursementAttachmentKind, ReimbursementDraftFile } from '@/type
 import { moneyToCents } from '@/utils/money'
 
 export function requiresPaymentProof(item: Pick<ExpenseItem, 'amount' | 'category' | 'railType'>
-  & Partial<Pick<ExpenseItem, 'receiptCount' | 'sourceFileId' | 'source'>>): boolean {
+  & Partial<Pick<ExpenseItem, 'receiptCount' | 'sourceFileId' | 'source' | 'subjectValue' | 'transportType'>>): boolean {
   const count = item.sourceFileId || item.source === 'ocr' ? 1 : item.receiptCount ?? 1
+  const rail = item.category === 'rail_fare'
+    || (item.subjectValue && item.category === 'local_transport' && item.transportType === 'rail')
   return count === 1 && (moneyToCents(item.amount) ?? 0) > 50_000
-    && !(item.category === 'rail_fare' && item.railType === 'high_speed')
+    && !(rail && item.railType === 'high_speed')
 }
 
 export function isActiveProof(file: ReimbursementDraftFile, kind: ReimbursementAttachmentKind): boolean {
@@ -105,4 +107,8 @@ export function evidenceRailType(category: string, selected: RailType | undefine
 
 export function hasKnownNonRailEvidence(evidence: OcrReceiptCandidate | null): boolean {
   return Boolean(evidence?.categoryId && !['rail_fare', 'other'].includes(evidence.categoryId))
+}
+
+export function isCourierExpense(item: Pick<ExpenseItem, 'category' | 'welfareType'>): boolean {
+  return item.category === 'express' || (item.category === 'employee_welfare' && item.welfareType === 'express')
 }

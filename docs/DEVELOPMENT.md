@@ -106,7 +106,11 @@ HTTP 或 HTTPS 地址按钉钉开放平台要求配置到应用中。首次部�
 - `POST /api/auth/dingtalk`：接收一次性 `authCode` 并建立服务端 Session。
 - `GET /api/me`：读取当前身份并返回仅保存在前端内存中的 CSRF token；同一登录 Session 内保持稳定。
 - `POST /api/me/department/from-travel-approval`：核验出差审批并按当前有效部门规则确定本次报销部门；历史发起部门无法匹配且存在多个当前部门时，返回过滤、去重后的部门候选供员工确认。
+- `POST /api/me/department/for-general-reimbursement`：普通费用首次填写时选择当前有效部门；已有当前单的部门更正使用原单接口。
+- `PUT /api/reimbursements/drafts/{id}/department`：更正当前报销部门，携带原单 revision；差旅重新核验审批，普通费用核验有效部门，均保留原单及材料。
 - `POST /api/auth/logout`：校验 CSRF 后注销服务端 Session。
+
+Session 所选部门是办理信息提示；已有报销的部门以原单保存值为准。两种报销类型各有一笔跨部门当前记录，部门未选、撤销或改名不阻止原单恢复、保存、材料处理或任务查询。新建时采用经服务端核验的本页明确选择，不能用其他标签页后来修改的 Session 部门覆盖。
 
 预算选项、设置读取和全部管理接口都要求 Session；写接口还要求
 `X-CSRF-Token`。开发环境用 Vite `/api` 同源代理，生产环境由 Nginx 同源反向代理，不启用

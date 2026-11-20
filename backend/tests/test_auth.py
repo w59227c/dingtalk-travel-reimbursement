@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from app.api import auth
 from app.core.security import token_hash
+from app.models.reimbursement import ReimbursementDraft
 from app.models.session import UserSession, utc_now
 
 
@@ -237,6 +238,99 @@ def test_multiple_departments_bind_from_verified_travel_approval(
         "id": "20",
         "name": "部门-20",
     }
+
+
+def test_travel_department_selection_preserves_an_occupied_target_workspace(
+    client_factory, monkeypatch
+) -> None:
+    transport, _calls = success_transport([10, 20])
+    client = client_factory(transport=transport)
+    login = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"}).json()["data"]
+    headers = {"X-CSRF-Token": login["csrfToken"]}
+    assert (
+        client.post(
+            "/api/me/department/for-general-reimbursement",
+            headers=headers,
+            json={"departmentId": "10"},
+        ).status_code
+        == 200
+    )
+    with client.app.state.database_session_factory() as database:
+        row = database.query(UserSession).one()
+        old = ReimbursementDraft(
+            corp_id=row.corp_id,
+            owner_user_id=row.dingtalk_user_id,
+            kind="travel",
+            department_id="20",
+            department_name="部门-20",
+            status="DRAFT",
+            revision=3,
+            template_process_code="PROC-SYNTHETIC",
+            template_config_version=1,
+            schema_fingerprint="a" * 64,
+            input_json='{"items":[]}',
+            expires_at=utc_now() + timedelta(days=1),
+        )
+        database.add(old)
+        database.commit()
+        old_id = old.id
+
+    monkeypatch.setattr(auth, "require_submission_ready_catalog", lambda database: object())
+
+    async def verified_selection(*args, **kwargs):
+        return SimpleNamespace(department_id="20")
+
+    monkeypatch.setattr(auth, "reverify_travel_approval_selection", verified_selection)
+    url = "/api/me/department/from-travel-approval"
+    body = {
+        "processInstanceId": "travel-instance-20",
+        "profileKey": "domestic",
+        "queryWindow": {"from": "2026-07-01", "to": "2026-07-31"},
+    }
+    for extra in (
+        {"keepCurrentWorkspace": True},
+        {"selectedDepartmentId": "20"},
+        {"keepCurrentWorkspace": True, "currentDepartmentId": "10"},
+    ):
+        response = client.post(url, headers=headers, json={**body, **extra})
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["selectedDepartment"]["id"] == "20"
+    assert client.get("/api/me").json()["data"]["selectedDepartment"]["id"] == "20"
+    with client.app.state.database_session_factory() as database:
+        old = database.get(ReimbursementDraft, old_id)
+        assert old is not None and not old.workspace_retired
+        assert old.revision == 3
+
+
+def test_initial_travel_department_resolution_does_not_reserve_another_draft(
+    client_factory, monkeypatch
+):
+    transport, _ = success_transport([10, 20])
+    client = client_factory(transport=transport)
+    session = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"}).json()["data"]
+    headers = {"X-CSRF-Token": session["csrfToken"]}
+    monkeypatch.setattr(auth, "require_submission_ready_catalog", lambda database: object())
+
+    async def verified_selection(*args, **kwargs):
+        return SimpleNamespace(department_id="20")
+
+    monkeypatch.setattr(auth, "reverify_travel_approval_selection", verified_selection)
+    response = client.post(
+        "/api/me/department/from-travel-approval",
+        headers=headers,
+        json={
+            "processInstanceId": "travel-instance-20",
+            "profileKey": "domestic",
+            "queryWindow": {"from": "2026-07-01", "to": "2026-07-31"},
+            "keepCurrentWorkspace": True,
+            "currentDepartmentId": "10",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["selectedDepartment"]["id"] == "20"
+    assert "reservedDraftId" not in response.json()["data"]
+    with client.app.state.database_session_factory() as database:
+        assert database.query(ReimbursementDraft).count() == 0
 
 
 def test_travel_approval_department_resolution_uses_latest_session_departments(
@@ -487,7 +581,7 @@ def test_login_filters_other_departments_and_deduplicates_remaining_names(
     ]
 
 
-def test_login_rejects_identity_when_all_departments_start_with_other(
+def test_login_keeps_identity_when_no_reimbursement_department_is_selectable(
     client_factory,
 ) -> None:
     transport, _calls = success_transport(
@@ -498,9 +592,10 @@ def test_login_rejects_identity_when_all_departments_start_with_other(
 
     login = client.post("/api/auth/dingtalk", json={"authCode": "one-time-code"})
 
-    assert login.status_code == 502
-    assert login.json()["error"]["code"] == "DINGTALK_PERMISSION_MISSING"
-    assert "expense_session" not in client.cookies
+    assert login.status_code == 200, login.text
+    assert login.json()["data"]["departments"] == []
+    assert login.json()["data"]["selectedDepartment"] is None
+    assert client.get("/api/me").status_code == 200
 
 
 def test_existing_session_departments_are_filtered_and_deduplicated(

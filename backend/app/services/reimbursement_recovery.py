@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
@@ -21,6 +21,7 @@ from app.models.reimbursement import (
     utc_now,
 )
 from app.schemas.reimbursements import ReimbursementDraftInput
+from app.services.general_reimbursement import get_general_catalog
 from app.services.oa_reimbursement_payload import (
     SnapshotOriginalFile,
     parse_locked_submission_snapshot,
@@ -29,10 +30,11 @@ from app.services.oa_template_profiles import require_submission_ready_catalog
 from app.services.reimbursement_drafts import (
     DraftActor,
     _canonical_input_data,
-    _department_drafts,
     _draft_summary,
+    _workspace_drafts,
     draft_data,
     require_owned_draft,
+    require_resolved_workspace,
 )
 from app.services.reimbursement_quota import ReimbursementQuotaCoordinator
 from app.services.reimbursement_staging import (
@@ -96,21 +98,38 @@ def workspace_reimbursements(
     database: Session,
     *,
     actor: DraftActor,
+    kind: str = "travel",
 ) -> dict[str, object]:
     """Return the one current reimbursement, independently of task progress."""
     actor.require_current_delegation(database)
-    draft = database.scalar(
-        _department_drafts(actor)
-        .where(
-            ReimbursementDraft.workspace_retired.is_(False),
+    drafts = database.scalars(
+        _workspace_drafts(actor, kind=kind).order_by(
+            ReimbursementDraft.created_at.desc(), ReimbursementDraft.id.desc()
         )
-        .order_by(ReimbursementDraft.created_at.desc(), ReimbursementDraft.id.desc())
-        .limit(1)
+    ).all()
+    file_counts = (
+        dict(
+            database.execute(
+                select(ReimbursementDraftFile.draft_id, func.count())
+                .where(ReimbursementDraftFile.draft_id.in_([draft.id for draft in drafts]))
+                .group_by(ReimbursementDraftFile.draft_id)
+            ).all()
+        )
+        if len(drafts) > 1
+        else {}
     )
-    return {
-        "items": [_draft_summary(draft, now=utc_now())] if draft else [],
-        "total": int(draft is not None),
-    }
+    summaries = []
+    for draft in drafts:
+        summary = _draft_summary(draft, now=utc_now())
+        if len(drafts) > 1:
+            items = json.loads(draft.input_json).get("items", [])
+            summary.update(
+                itemCount=len(items),
+                fileCount=file_counts.get(draft.id, 0),
+                itemDescriptions=[item.get("description", "") for item in items[:3]],
+            )
+        summaries.append(summary)
+    return {"items": summaries, "total": len(drafts)}
 
 
 def recover_failed_reimbursement(
@@ -151,6 +170,7 @@ def recover_failed_reimbursement(
             raise ApiError(
                 "REIMBURSEMENT_RECOVERY_NOT_ALLOWED", "审批结果尚未确认未创建，不能重新处理", 409
             )
+        require_resolved_workspace(database, actor, kind=source.kind)
         snapshot = parse_locked_submission_snapshot(source, task)
         target = database.scalar(
             select(ReimbursementDraft).where(
@@ -177,7 +197,7 @@ def recover_failed_reimbursement(
                     409,
                 )
             current_id = database.scalar(
-                _department_drafts(actor)
+                _workspace_drafts(actor, kind=source.kind)
                 .where(
                     ReimbursementDraft.workspace_retired.is_(False),
                 )
@@ -188,7 +208,11 @@ def recover_failed_reimbursement(
                 raise ApiError(
                     "REIMBURSEMENT_DRAFT_REPLACED", "已放弃这笔报销，请返回当前报销", 409
                 )
-            catalog = require_submission_ready_catalog(database)
+            catalog = (
+                get_general_catalog
+                if source.kind == "general"
+                else require_submission_ready_catalog
+            )(database)
             files = {
                 file.id: file
                 for file in database.scalars(
@@ -206,11 +230,12 @@ def recover_failed_reimbursement(
                 )
             quota.admit_recovery_copy(database, total_size)
             target = ReimbursementDraft(
+                kind=source.kind,
                 corp_id=actor.corp_id,
                 owner_user_id=actor.user_id,
                 operator_user_id=actor.operator_user_id,
-                department_id=actor.department_id,
-                department_name=actor.department_name,
+                department_id=source.department_id,
+                department_name=source.department_name,
                 template_process_code=catalog.reimbursement.process_code,
                 template_config_version=catalog.config_version,
                 schema_fingerprint=catalog.reimbursement.schema.fingerprint,
@@ -226,8 +251,7 @@ def recover_failed_reimbursement(
                     ReimbursementDraft.corp_id == actor.corp_id,
                     ReimbursementDraft.owner_user_id == actor.user_id,
                     ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                    ReimbursementDraft.department_id == actor.department_id,
-                    ReimbursementDraft.department_name == actor.department_name,
+                    ReimbursementDraft.kind == source.kind,
                 )
                 .values(workspace_retired=True, updated_at=ReimbursementDraft.updated_at)
             )
@@ -275,6 +299,7 @@ def recover_failed_reimbursement(
                     "paymentProofFileIds",
                     "hotelBillFileIds",
                     "receiptAttachmentFileIds",
+                    "waybillFileIds",
                 ):
                     if key in item:
                         item[key] = [mapping[file_id] for file_id in item[key]]

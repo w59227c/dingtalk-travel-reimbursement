@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { ref, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import AttendanceCalendarSettingsCard from '@/components/settings/AttendanceCalendarSettingsCard.vue'
 import ApprovalDiagnosticsCard from '@/components/settings/ApprovalDiagnosticsCard.vue'
 import ReceiptDiagnosticsCard from '@/components/settings/ReceiptDiagnosticsCard.vue'
 import OaTemplateSettingsCard from '@/components/settings/OaTemplateSettingsCard.vue'
+import GeneralOaTemplateSettingsCard from '@/components/settings/GeneralOaTemplateSettingsCard.vue'
 import ReceiptKeywordSettingsCard from '@/components/settings/ReceiptKeywordSettingsCard.vue'
 import ReimbursementDelegationSettingsCard from '@/components/settings/ReimbursementDelegationSettingsCard.vue'
 import SubmissionRecoveryCard from '@/components/settings/SubmissionRecoveryCard.vue'
@@ -13,9 +15,13 @@ const auth = useAuthStore()
 
 const props = withDefaults(defineProps<{
   mobile?: boolean
+  initialTemplateTab?: 'travel' | 'general'
 }>(), {
   mobile: false,
+  initialTemplateTab: 'travel',
 })
+const templateTab = ref(props.initialTemplateTab)
+watch(() => props.initialTemplateTab, (tab) => { templateTab.value = tab })
 </script>
 
 <template>
@@ -57,7 +63,30 @@ const props = withDefaults(defineProps<{
     <SubmissionRecoveryCard :mobile="props.mobile" />
     <ApprovalDiagnosticsCard :mobile="props.mobile" />
     <ReceiptDiagnosticsCard :mobile="props.mobile" />
-    <OaTemplateSettingsCard />
+    <section
+      id="oa-template-catalog"
+      class="oa-template-catalog"
+      aria-labelledby="oa-template-catalog-title"
+    >
+      <h2 id="oa-template-catalog-title">
+        钉钉 OA 模板目录
+      </h2>
+      <el-tabs v-model="templateTab">
+        <el-tab-pane
+          label="差旅报销"
+          name="travel"
+        >
+          <OaTemplateSettingsCard />
+        </el-tab-pane>
+        <el-tab-pane
+          label="普通费用报销"
+          name="general"
+          lazy
+        >
+          <GeneralOaTemplateSettingsCard />
+        </el-tab-pane>
+      </el-tabs>
+    </section>
   </main>
 </template>
 
@@ -76,4 +105,6 @@ const props = withDefaults(defineProps<{
   margin: 0;
   border-radius: 8px;
 }
+
+.oa-template-catalog > h2 { margin: 0 0 8px; }
 </style>

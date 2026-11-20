@@ -36,6 +36,8 @@ from app.services.reimbursement_delegation_policy import (
     normalize_directory_id,
     require_delegation_permission_for_session,
 )
+from app.services.reimbursement_recovery import workspace_reimbursements
+from app.services.reimbursement_workspaces import workspace_actor
 from app.services.sessions import (
     CurrentSession,
     create_session,
@@ -64,6 +66,10 @@ class DingTalkLoginRequest(BaseModel):
 
 
 class DepartmentFromTravelApprovalRequest(RelatedApprovalSelectionInput):
+    keep_current_workspace: bool = Field(default=False, alias="keepCurrentWorkspace")
+    current_department_id: str | None = Field(
+        default=None, alias="currentDepartmentId", min_length=1, max_length=128
+    )
     selected_department_id: str | None = Field(
         default=None,
         alias="selectedDepartmentId",
@@ -71,7 +77,7 @@ class DepartmentFromTravelApprovalRequest(RelatedApprovalSelectionInput):
         max_length=128,
     )
 
-    @field_validator("selected_department_id", mode="before")
+    @field_validator("selected_department_id", "current_department_id", mode="before")
     @classmethod
     def normalize_selected_department_id(cls, value: object) -> object:
         return value.strip() if isinstance(value, str) else value
@@ -123,9 +129,10 @@ def _login_response(
             ),
             csrf_token,
             can_delegate=can_delegate_reimbursements(database, record),
-            is_admin=record.is_admin or not get_admin_department_ids(
-                database, record.corp_id
-            ).isdisjoint(item.id for item in identity.departments),
+            is_admin=record.is_admin
+            or not get_admin_department_ids(database, record.corp_id).isdisjoint(
+                item.id for item in identity.departments
+            ),
         )
     )
 
@@ -234,7 +241,9 @@ async def _me_response(
             raise
     return success(
         session_payload(
-            current, csrf_token, can_delegate=can_delegate,
+            current,
+            csrf_token,
+            can_delegate=can_delegate,
             is_admin=is_admin,
         )
     )
@@ -276,6 +285,38 @@ async def get_reimbursement_employees(
     require_delegation_permission_for_session(database, fresh.record, department_ids)
     response.headers["Cache-Control"] = "no-store"
     return success({"items": [item for item in items if item["userId"] != operator_id]})
+
+
+class GeneralDepartmentRequest(BaseModel):
+    department_id: str = Field(alias="departmentId", min_length=1, max_length=128)
+
+
+@router.post("/me/department/for-general-reimbursement")
+def select_general_department(
+    body: GeneralDepartmentRequest,
+    database: Annotated[Session, Depends(get_db)],
+    current: Annotated[CurrentSession, Depends(require_reimbursement_csrf)],
+) -> dict[str, object]:
+    if current.beneficiary is not None:
+        raise ApiError("OA_GENERAL_SELF_ONLY", "普通费用暂只支持本人报销", 403)
+    department = next(
+        (item for item in current.reimbursement_departments if item.id == body.department_id), None
+    )
+    if department is None:
+        raise ApiError("REIMBURSEMENT_DEPARTMENT_INVALID", "所选部门不在当前可用部门中", 422)
+    existing = workspace_reimbursements(database, actor=workspace_actor(current), kind="general")[
+        "items"
+    ]
+    if existing and any(item["department"]["id"] != department.id for item in existing):
+        raise ApiError(
+            "REIMBURSEMENT_DEPARTMENT_CORRECTION_REQUIRED",
+            "请在当前报销中更正办理部门，原内容和材料会保留",
+            409,
+        )
+    current.record.current_department_id = department.id
+    current.record.current_department_name = department.name
+    database.commit()
+    return success({"selectedDepartment": {"id": department.id, "name": department.name}})
 
 
 @router.post("/me/department/from-travel-approval")
@@ -353,29 +394,36 @@ async def select_department_from_travel_approval(
             {
                 "selectedDepartment": None,
                 "selectionRequired": True,
-                "departments": [
-                    {"id": item.id, "name": item.name} for item in departments
-                ],
+                "departments": [{"id": item.id, "name": item.name} for item in departments],
             }
         )
 
+    # Existing content must be corrected through the draft CAS endpoint. Legacy
+    # clients cannot reserve another department's slot or silently replace it.
+    actor = workspace_actor(fresh_current)
+    existing = workspace_reimbursements(database, actor=actor)["items"]
+    if existing and any(item["department"]["id"] != selected.id for item in existing):
+        raise ApiError(
+            "REIMBURSEMENT_DEPARTMENT_CORRECTION_REQUIRED",
+            "请在当前报销中更正办理部门，原内容和材料会保留",
+            409,
+        )
     if fresh_current.beneficiary is None:
         record = fresh_current.record
         record.current_department_id = selected.id
         record.current_department_name = selected.name
         database.commit()
-    else:
+    elif fresh_current.beneficiary is not None:
         fresh_current = with_reimbursement_department(fresh_current, selected, request)
     return success(
         {
             "selectedDepartment": {"id": selected.id, "name": selected.name},
             "selectionRequired": False,
-            "departments": [
-                {"id": item.id, "name": item.name} for item in departments
-            ],
+            "departments": [{"id": item.id, "name": item.name} for item in departments],
             **(
                 {"reimbursementContext": fresh_current.reimbursement_context}
-                if fresh_current.reimbursement_context else {}
+                if fresh_current.reimbursement_context
+                else {}
             ),
         }
     )

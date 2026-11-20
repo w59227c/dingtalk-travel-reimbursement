@@ -57,9 +57,16 @@ describe('application routes', () => {
 
   it('keeps the settings round trip in the mobile presentation', () => {
     const resolved = router.resolve('/m/settings')
-    const record = resolved.matched.at(-1)
-
+    const props = resolved.matched.at(-1)?.props.default
+    if (typeof props !== 'function') throw new Error('Settings routes must resolve the active template tab')
     expect(resolved.name).toBe('mobile-admin-settings')
-    expect(record?.props.default).toEqual({ mobile: true })
+    expect(props({ ...resolved, name: resolved.name ?? undefined })).toEqual({ mobile: true, initialTemplateTab: 'travel' })
+  })
+
+  it.each(['/admin/settings', '/m/settings'])('opens the ordinary template directly from %s', (path) => {
+    const resolved = router.resolve(`${path}#general-oa-template`)
+    const props = resolved.matched.at(-1)?.props.default
+    if (typeof props !== 'function') throw new Error('Settings routes must resolve the active template tab')
+    expect(props({ ...resolved, name: resolved.name ?? undefined })).toMatchObject({ initialTemplateTab: 'general' })
   })
 })

@@ -490,7 +490,7 @@ def _travel_catalog():
         ),
     )
     return SimpleNamespace(
-        config_version=12, reimbursement=reimbursement, travel_profiles=(travel,)
+        config_version=12, reimbursement=reimbursement, travel_profiles=(travel,), is_general=False,
     )
 
 

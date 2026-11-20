@@ -53,6 +53,16 @@ describe('ExpenseSummaryCard', () => {
     setActivePinia(createPinia())
   })
 
+  it.each([false, true])('lays out the three general reimbursement metrics, mobile=%s', (mobile) => {
+    useReimbursementDraftStore().reimbursementKind = 'general'
+    const wrapper = mount(ExpenseSummaryCard, { props: { mobile }, global: { plugins: [ElementPlus] } })
+    const grid = wrapper.get('.totals-grid')
+    expect(grid.classes()).toContain('totals-grid--general')
+    expect(grid.classes().includes('totals-grid--mobile')).toBe(mobile)
+    expect(grid.findAll(':scope > div > span').map(label => label.text())).toEqual(['票据金额', '票据张数', '合计'])
+    wrapper.unmount()
+  })
+
   it.each([false, true])('omits uppercase amount before and after calculation (calculated: %s)', (calculated) => {
     const expense = useExpenseStore()
     expense.totals = calculated ? draft().totals : null

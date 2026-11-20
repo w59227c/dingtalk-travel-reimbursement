@@ -10,7 +10,7 @@ import {
   listReceiptKeywords,
   updateReceiptKeyword,
 } from '@/api/receiptKeywords'
-import type { ReceiptKeywordMapping, ReceiptKeywordTransportType } from '@/api/receiptKeywords'
+import type { ReceiptKeywordMapping, ReceiptKeywordTransportType, WelfareKeywordType } from '@/api/receiptKeywords'
 import type { ExpenseCategoryMetadata } from '@/types/expenses'
 
 const keywordMappings = ref<ReceiptKeywordMapping[]>([])
@@ -21,7 +21,8 @@ const loadError = ref('')
 const dialogOpen = ref(false)
 const editingKeywordId = ref<number | null>(null)
 const validationError = ref('')
-const form = reactive({ keyword: '', categoryId: '', transportType: 'other' as ReceiptKeywordTransportType })
+const form = reactive({ keyword: '', categoryId: '', transportType: 'other' as ReceiptKeywordTransportType,
+  welfareType: 'other' as WelfareKeywordType })
 let disposed = false
 let editorVersion = 0
 let loadVersion = 0
@@ -30,6 +31,9 @@ const transportGroups: Array<{ id: ReceiptKeywordTransportType; label: string }>
   { id: 'other', label: '通用' },
   { id: 'ride_hailing', label: '网约车' },
   { id: 'taxi', label: '出租车' },
+]
+const welfareGroups: Array<{ id: WelfareKeywordType; label: string }> = [
+  { id: 'express', label: '快递' }, { id: 'other', label: '其他' },
 ]
 
 const configurableCategories = computed(() =>
@@ -44,6 +48,11 @@ const keywordGroups = computed(() =>
   })),
 )
 function mappingGroups(categoryId: string, mappings: ReceiptKeywordMapping[]) {
+  if (categoryId === 'employee_welfare') {
+    return welfareGroups.map(group => ({
+      ...group, mappings: mappings.filter(mapping => (mapping.welfareType ?? 'other') === group.id),
+    }))
+  }
   return categoryId === 'local_transport'
     ? transportGroups.map((group) => ({ ...group, mappings: mappings.filter((mapping) => (mapping.transportType ?? 'other') === group.id) }))
     : [{ id: 'other' as const, label: '', mappings }]
@@ -80,12 +89,14 @@ async function load(): Promise<void> {
   }
 }
 
-function openCreate(categoryId: string, transportType: ReceiptKeywordTransportType = 'other'): void {
+function openCreate(categoryId: string, subgroup: ReceiptKeywordTransportType | WelfareKeywordType = 'other'): void {
   if (saving.value || loading.value || disposed) return
   editorVersion++
   editingKeywordId.value = null
   validationError.value = ''
-  Object.assign(form, { keyword: '', categoryId, transportType })
+  Object.assign(form, { keyword: '', categoryId,
+    transportType: subgroup === 'express' ? 'other' : subgroup,
+    welfareType: subgroup === 'express' ? 'express' : 'other' })
   dialogOpen.value = true
 }
 
@@ -97,6 +108,7 @@ function openEdit(mapping: ReceiptKeywordMapping): void {
   Object.assign(form, {
     keyword: mapping.keyword,
     categoryId: mapping.categoryId,
+    welfareType: mapping.welfareType ?? 'other',
     transportType: mapping.transportType ?? 'other',
   })
   dialogOpen.value = true
@@ -110,7 +122,7 @@ function closeEditor(done?: () => void): void {
 }
 
 function editorSignature(): string {
-  return JSON.stringify([editingKeywordId.value, form.keyword, form.categoryId, form.transportType])
+  return JSON.stringify([editingKeywordId.value, form.keyword, form.categoryId, form.transportType, form.welfareType])
 }
 
 async function save(): Promise<void> {
@@ -132,6 +144,7 @@ async function save(): Promise<void> {
   try {
     const input = { keyword, categoryId: form.categoryId,
       ...(form.categoryId === 'local_transport' ? { transportType: form.transportType } : {}),
+      ...(form.categoryId === 'employee_welfare' ? { welfareType: form.welfareType } : {}),
     }
     const saved = editingKeywordId.value === null
       ? await createReceiptKeyword(input)
@@ -230,7 +243,7 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
         <div
           v-else
           class="settings-keyword-subgroups"
-          :class="{ 'settings-keyword-subgroups--transport': group.category.id === 'local_transport' }"
+          :class="{ 'settings-keyword-subgroups--transport': ['local_transport', 'employee_welfare'].includes(group.category.id) }"
         >
           <div
             v-for="subgroup in mappingGroups(group.category.id, group.mappings)"
@@ -329,6 +342,23 @@ async function remove(mapping: ReceiptKeywordMapping): Promise<void> {
         <p class="field-help">
           网约车需关联行程单；出租车不提供行程单关联，通用类型不要求。
         </p>
+      </el-form-item>
+      <el-form-item
+        v-if="form.categoryId === 'employee_welfare'"
+        label="福利费细分"
+      >
+        <el-select
+          v-model="form.welfareType"
+          class="full-width"
+          aria-label="关键词福利费细分"
+        >
+          <el-option
+            v-for="group in welfareGroups"
+            :key="group.id"
+            :label="group.label"
+            :value="group.id"
+          />
+        </el-select>
       </el-form-item>
       <el-form-item
         v-if="editingKeywordId !== null"

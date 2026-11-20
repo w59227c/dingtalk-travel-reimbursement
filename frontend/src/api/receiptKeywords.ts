@@ -3,6 +3,7 @@ import type { ApiEnvelope } from '@/types/auth'
 import type { ExpenseCategoryId } from '@/types/expenses'
 
 export type ReceiptKeywordTransportType = 'other' | 'ride_hailing' | 'taxi'
+export type WelfareKeywordType = 'express' | 'other'
 
 export interface ReceiptKeywordMapping {
   id: number
@@ -10,12 +11,14 @@ export interface ReceiptKeywordMapping {
   categoryId: ExpenseCategoryId
   categoryName: string
   transportType?: ReceiptKeywordTransportType
+  welfareType?: WelfareKeywordType
 }
 
 export interface ReceiptKeywordInput {
   keyword: string
   categoryId: ExpenseCategoryId
   transportType?: ReceiptKeywordTransportType
+  welfareType?: WelfareKeywordType
 }
 
 export async function listReceiptKeywords(): Promise<ReceiptKeywordMapping[]> {

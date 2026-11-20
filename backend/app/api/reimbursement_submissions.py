@@ -14,8 +14,8 @@ from app.database.session import get_db
 from app.models.reimbursement import ReimbursementSubmission, ReimbursementSubmissionStatus
 from app.schemas.common import success
 from app.schemas.reimbursement_submissions import SubmitReimbursementRequest
+from app.services.general_reimbursement import refresh_general_catalog, verify_general_approvals
 from app.services.oa_reimbursement_payload import (
-    SNAPSHOT_VERSION,
     SnapshotOaInitiator,
     build_snapshot,
     collect_snapshot_source,
@@ -29,7 +29,7 @@ from app.services.reimbursement_context import (
     get_reimbursement_session,
     require_reimbursement_csrf,
 )
-from app.services.reimbursement_drafts import draft_actor
+from app.services.reimbursement_drafts import draft_actor, history_draft_actor, require_owned_draft
 from app.services.reimbursement_submissions import (
     admin_confirm_manual_review_not_created,
     admin_resume_manual_review_with_instance,
@@ -138,10 +138,13 @@ async def submit_reimbursement(
     # Verify the live OA schemas before producing an immutable snapshot or
     # locking the draft. The helper persists DRIFTED so every session stops
     # using an outdated catalog until an administrator reconfirms it.
+    draft_kind = require_owned_draft(database, draft_id=draft_id, actor=actor).kind
     database.rollback()
-    await load_fresh_submission_catalog(
-        request.app.state.database_session_factory,
-        request.app.state.dingtalk_workflow,
+    refresh_catalog = (
+        refresh_general_catalog if draft_kind == "general" else load_fresh_submission_catalog
+    )
+    await refresh_catalog(
+        request.app.state.database_session_factory, request.app.state.dingtalk_workflow
     )
     oa_initiator = None
     if actor.operator_user_id is not None:
@@ -151,9 +154,7 @@ async def submit_reimbursement(
         )
         if operator.user_id != actor.operator_user_id or operator.union_id != operator_union_id:
             raise ApiError("UNAUTHORIZED", "登录身份已变化，请重新进入", 401)
-        departments = tuple(
-            item for item in operator.departments if is_oa_department_id(item.id)
-        )
+        departments = tuple(item for item in operator.departments if is_oa_department_id(item.id))
         department_id = next(
             (item.id for item in departments if item.id == preferred_department_id), None
         )
@@ -169,7 +170,9 @@ async def submit_reimbursement(
             actor, operator_department_ids=tuple(item.id for item in operator.departments)
         )
         oa_initiator = SnapshotOaInitiator(
-            user_id=operator.user_id, union_id=operator.union_id, department_id=department_id,
+            user_id=operator.user_id,
+            union_id=operator.union_id,
+            department_id=department_id,
         )
     await verify_delegated_saved_approvals(
         database,
@@ -193,6 +196,13 @@ async def submit_reimbursement(
         oa_initiator=oa_initiator,
     )
     snapshot = build_snapshot(source)
+    if snapshot.input.general_approval_ids:
+        database.rollback()
+        await verify_general_approvals(
+            request.app.state.dingtalk_workflow,
+            user_id=actor.user_id,
+            instance_ids=list(snapshot.input.general_approval_ids),
+        )
     if (
         body.expected_total_amount is not None
         and body.expected_total_amount != snapshot.totals.total_amount
@@ -211,7 +221,7 @@ async def submit_reimbursement(
         originator_union_id=current.reimbursement_union_id,
         originator_name=current.reimbursement_name,
         idempotency_key=normalized_key,
-        snapshot_version=SNAPSHOT_VERSION,
+        snapshot_version=snapshot.snapshot_version,
         schema_fingerprint=snapshot.template.schema_fingerprint,
         form_snapshot_json=snapshot_json,
         snapshot_sha256=snapshot_sha256(snapshot),
@@ -301,12 +311,13 @@ def get_reimbursement_submission_for_draft(
     draft_id: str,
     database: Annotated[Session, Depends(get_db)],
     current: Annotated[CurrentSession, Depends(get_reimbursement_session)],
+    history: bool = False,
 ) -> dict[str, object]:
     """Recover an existing submission without mutating or locking its draft."""
 
     submission = find_owned_submission_for_draft(
         database,
-        actor=draft_actor(current),
+        actor=history_draft_actor(database, current, draft_id) if history else draft_actor(current),
         draft_id=draft_id,
         allow_submitted_beneficiary=True,
     )

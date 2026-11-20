@@ -46,6 +46,7 @@ from app.services.excel_generator import (
     WorkbookResult,
     generate_expense_workbook,
 )
+from app.services.general_reimbursement import general_options, get_general_catalog
 from app.services.multipart_uploads import prepare_spool_directory
 from app.services.oa_reimbursement_payload import (
     ExcelGenerationInput,
@@ -63,6 +64,7 @@ from app.services.ocr_service import (
 from app.services.process_jobs import KillableProcessRunner
 from app.services.receipt_keywords import load_receipt_keyword_rules
 from app.services.reimbursement_drafts import (
+    CatalogBinding,
     DraftActor,
     apply_ocr_evidence,
     bump_owned_draft_revision,
@@ -70,6 +72,7 @@ from app.services.reimbursement_drafts import (
     detach_draft_file_from_input,
     detach_draft_files_from_input,
     require_complete_draft_input,
+    require_draft_catalog_binding,
     require_owned_draft,
     require_previewable_draft,
     validate_and_calculate_input,
@@ -228,11 +231,17 @@ def list_draft_files(
     *,
     draft_id: str,
     actor: DraftActor,
+    history: bool = False,
 ) -> tuple[int, list[DraftFileSnapshot], list[dict[str, str]]]:
     draft = require_owned_draft(
-        database, draft_id=draft_id, actor=actor, allow_submitted_beneficiary=True
+        database,
+        draft_id=draft_id,
+        actor=actor,
+        allow_submitted_beneficiary=True,
     )
-    beneficiary_history = actor.operator_user_id is None and draft.operator_user_id is not None
+    metadata_only = history or (
+        actor.operator_user_id is None and draft.operator_user_id is not None
+    )
     pending_statuses = {
         ReimbursementDraftFileStatus.RESERVED.value,
         ReimbursementDraftFileStatus.WRITING.value,
@@ -241,7 +250,8 @@ def list_draft_files(
         {
             ReimbursementDraftFileStatus.ACTIVE.value,
             ReimbursementDraftFileStatus.DELETING.value,
-        } | pending_statuses
+        }
+        | pending_statuses
     )
     if draft.status == ReimbursementDraftStatus.LOCKED.value:
         submission = database.scalar(
@@ -265,7 +275,7 @@ def list_draft_files(
                 )
                 if file_id is not None
             }
-        if beneficiary_history:
+        if metadata_only:
             visible_file_status = ReimbursementDraftFile.id.in_(referenced_file_ids)
         elif referenced_file_ids:
             visible_file_status = or_(
@@ -288,9 +298,7 @@ def list_draft_files(
             pending.append({"id": file.id, "name": file.original_name, "status": file.file_status})
         else:
             snapshot = _snapshot(file)
-            complete.append(
-                replace(snapshot, ocr_result_json=None) if beneficiary_history else snapshot
-            )
+            complete.append(replace(snapshot, ocr_result_json=None) if metadata_only else snapshot)
     return draft.revision, complete, pending
 
 
@@ -446,13 +454,19 @@ async def persist_draft_upload(
         metadata = {
             _PIPELINE_INPUT_HASH_KEY: pipeline_input_hash,
             MATERIAL_CLASSIFICATION_KEY: {
-                "status": "pending", "kind": "unknown", "reason": None, "pageCount": page_count,
+                "status": "pending",
+                "kind": "unknown",
+                "reason": None,
+                "pageCount": page_count,
             },
         }
     elif manual_itinerary_association:
         metadata[MATERIAL_CLASSIFICATION_KEY] = {
-            "status": "confirmed", "kind": "itinerary", "reason": None,
-            "pageCount": page_count, "manualAssociation": True,
+            "status": "confirmed",
+            "kind": "itinerary",
+            "reason": None,
+            "pageCount": page_count,
+            "manualAssociation": True,
         }
     try:
         reservation = quota.reserve_draft_file(
@@ -591,7 +605,8 @@ def update_draft_file(
             "pageCount": classification.get("pageCount") if classification else None,
         }
         if (
-            next_kind == "itinerary" and classification
+            next_kind == "itinerary"
+            and classification
             and classification.get("manualAssociation") is True
         ):
             next_classification["manualAssociation"] = True
@@ -1005,7 +1020,7 @@ async def recognize_draft_file(
                 "warnings": ["HOTEL_BILL_INCOMPLETE", "HOTEL_BILL_REVIEW_REQUIRED"],
                 "hotelBillDetails": {
                     "warnings": ["HOTEL_BILL_INCOMPLETE", "HOTEL_BILL_REVIEW_REQUIRED"]
-                }
+                },
             }
 
     try:
@@ -1143,16 +1158,34 @@ async def generate_draft_excel_preview(
         compact_subsidies=snapshot.excel.compact_subsidies,
         attendance_description_format=snapshot.excel.attendance_description_format,
         detail_order=snapshot.excel.detail_order,
+        expense_labels=snapshot.excel.expense_labels,
+        subject_labels=snapshot.excel.subject_labels,
     )
 
     # Do not serve a workbook calculated from a draft that changed during the
     # CPU-bound generation step.
     with session_factory() as database:
         current = require_previewable_draft(
-            database, draft_id=draft_id, actor=actor, expected_revision=expected_revision,
+            database,
+            draft_id=draft_id,
+            actor=actor,
+            expected_revision=expected_revision,
         )
         if current.input_json != snapshot.canonical_input_json:
             raise _revision_conflict_error()
+        if current.kind == "general" and current.status != ReimbursementDraftStatus.LOCKED.value:
+            latest = _workbook_preview_snapshot(
+                database,
+                actor=actor,
+                employee_name=employee_name,
+                draft_id=draft_id,
+                expected_revision=expected_revision,
+                settings=settings,
+            )
+            if latest != snapshot:
+                raise ApiError(
+                    "REIMBURSEMENT_PREVIEW_CHANGED", "报销选项或材料已更新，请重新预览", 409
+                )
     return result
 
 
@@ -1166,7 +1199,10 @@ def _workbook_preview_snapshot(
     settings: Settings,
 ) -> WorkbookPreviewSnapshot:
     draft = require_previewable_draft(
-        database, draft_id=draft_id, actor=actor, expected_revision=expected_revision,
+        database,
+        draft_id=draft_id,
+        actor=actor,
+        expected_revision=expected_revision,
     )
     recover_stale_running_ocr(
         database,
@@ -1207,7 +1243,11 @@ def _workbook_preview_snapshot(
     if draft.locked_at is None:
         draft_input = apply_ocr_evidence(database, draft_id=draft.id, draft_input=draft_input)
     require_complete_draft_input(draft_input)
-    catalog = require_submission_ready_catalog(database)
+    catalog = (
+        get_general_catalog if draft.kind == "general" else require_submission_ready_catalog
+    )(database)
+    if catalog.is_general:
+        require_draft_catalog_binding(draft, CatalogBinding.from_catalog(catalog))
     calculation = validate_and_calculate_input(
         database,
         catalog=catalog,
@@ -1220,7 +1260,17 @@ def _workbook_preview_snapshot(
         draft_id=draft.id,
         draft_input=draft_input,
         require_terminal_disposition=True,
+        require_submission_proofs=False,
     )
+    if catalog.is_general and not database.scalar(
+        select(ReimbursementDraftFile.id)
+        .where(
+            ReimbursementDraftFile.draft_id == draft.id,
+            ReimbursementDraftFile.file_status == ReimbursementDraftFileStatus.ACTIVE.value,
+        )
+        .limit(1)
+    ):
+        raise ApiError("REIMBURSEMENT_DRAFT_NOT_READY", "请先上传至少一个有效附件", 409)
     project = ResolvedProject(
         display_text=draft_input.project.text, filename_component=draft_input.project.text
     )
@@ -1233,6 +1283,24 @@ def _workbook_preview_snapshot(
     output_trips = merge_overlapping_subsidy_trips(
         request_trips(trip=draft_input.trip, trips=draft_input.trips)
     )
+    subject_labels, expense_labels = (), ()
+    order = "current"
+    if catalog.is_general:
+        subjects = general_options(catalog, "subjects")
+        subject_labels = tuple(option.label for option in subjects)
+        by_value = {option.value: (index, option.label) for index, option in enumerate(subjects)}
+        order = tuple(
+            sorted(
+                range(len(draft_input.items)),
+                key=lambda index: (
+                    draft_input.items[index].date,
+                    by_value[draft_input.items[index].subject_value][0],
+                ),
+            )
+        )
+        expense_labels = tuple(
+            by_value[draft_input.items[index].subject_value][1] for index in order
+        )
     return WorkbookPreviewSnapshot(
         canonical_input_json=draft.input_json,
         excel=ExcelGenerationInput(
@@ -1245,6 +1313,9 @@ def _workbook_preview_snapshot(
             subsidy=subsidy,
             subsidies=tuple(subsidies),
             totals=totals,
+            detail_order=order,
+            subject_labels=subject_labels,
+            expense_labels=expense_labels,
         ),
     )
 
@@ -1351,8 +1422,6 @@ def _delete_file_and_release_quota(
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
                 ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                ReimbursementDraft.department_id == actor.department_id,
-                ReimbursementDraft.department_name == actor.department_name,
                 ReimbursementDraft.revision == deletion.revision,
             )
         )
@@ -1536,8 +1605,6 @@ def _set_ocr_failed_without_revision(
                 ReimbursementDraft.corp_id == actor.corp_id,
                 ReimbursementDraft.owner_user_id == actor.user_id,
                 ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                ReimbursementDraft.department_id == actor.department_id,
-                ReimbursementDraft.department_name == actor.department_name,
             )
         )
         if file is None:
@@ -1564,8 +1631,6 @@ def _set_ocr_failed_without_revision(
                         ReimbursementDraft.corp_id == actor.corp_id,
                         ReimbursementDraft.owner_user_id == actor.user_id,
                         ReimbursementDraft.operator_user_id == actor.operator_user_id,
-                        ReimbursementDraft.department_id == actor.department_id,
-                        ReimbursementDraft.department_name == actor.department_name,
                     )
                 ),
             )
@@ -1663,6 +1728,7 @@ def _input_references_file(input_json: str, file_id: str) -> bool:
         or file_id in item.itinerary_file_ids
         or file_id in item.payment_proof_file_ids
         or file_id in item.hotel_bill_file_ids
+        or file_id in item.waybill_file_ids
         or file_id in item.receipt_attachment_file_ids
         for item in value.items
     )
@@ -1737,8 +1803,6 @@ def _guard_ocr_draft(
             ReimbursementDraft.corp_id == actor.corp_id,
             ReimbursementDraft.owner_user_id == actor.user_id,
             ReimbursementDraft.operator_user_id == actor.operator_user_id,
-            ReimbursementDraft.department_id == actor.department_id,
-            ReimbursementDraft.department_name == actor.department_name,
             ReimbursementDraft.revision == expected_revision
             if pipeline_input_json is None
             else ReimbursementDraft.input_json == pipeline_input_json,
@@ -1767,13 +1831,11 @@ def _guard_ocr_draft(
                 UserSession.session_id_hash == session_id_hash,
                 UserSession.corp_id == actor.corp_id,
                 UserSession.dingtalk_user_id == actor.user_id,
-                UserSession.current_department_id == actor.department_id,
-                UserSession.current_department_name == actor.department_name,
                 UserSession.expires_at > now,
             )
         )
         if active_session is None:
-            raise ApiError("UNAUTHORIZED", "登录状态或部门已变更，请重新进入", 401)
+            raise ApiError("UNAUTHORIZED", "登录状态已失效，请重新进入", 401)
 
 
 def _snapshot(file: ReimbursementDraftFile) -> DraftFileSnapshot:
