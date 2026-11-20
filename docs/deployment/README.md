@@ -56,6 +56,8 @@ docker compose up -d --wait --wait-timeout 300
 
 镜像名和 `.env` 不需要随版本修改，`main` 会指向最新一次通过验证的主线镜像。
 
+如果早期 0029 升级因 I/O 等异常中断，重启时报 `duplicate column name: kind`，先保留并一致性备份现状，不要手工修改 `alembic_version` 或删除列／表。包含恢复补丁的新镜像会核验已添加列的完整定义，再安全续跑；不一致的结构仍拒绝启动。新版 0029 失败时整体回滚，持续的存储 I/O 故障仍需先排查存储，不能靠反复重启绕过。
+
 OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX Runtime CPU。旧 `.env` 的 `OCR_ENGINE=paddle_static` 由新版映射到默认引擎，镜像内模型路径保持兼容。`OCR_CPU_THREADS` 控制每个模型的算子线程数，使用目标服务器的批量样本决定线程配置。
 
 ## 回滚

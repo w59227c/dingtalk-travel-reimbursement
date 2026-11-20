@@ -1,5 +1,6 @@
 """Keep separate travel and general reimbursement workspaces."""
 
+import re
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -10,6 +11,45 @@ revision: str = "20261119_0029"
 down_revision: str = "20261116_0028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+
+def _begin_sqlite_transaction() -> None:
+    connection = op.get_bind()
+    if (
+        connection.dialect.name == "sqlite"
+        and not connection.connection.driver_connection.in_transaction
+    ):
+        # sqlite3's legacy transaction mode otherwise commits leading ALTER
+        # statements before the first UPDATE. Keep schema and revision atomic.
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def _add_or_verify_column(table_name: str, column: sa.Column) -> None:
+    inspector = sa.inspect(op.get_bind())
+    existing = next(
+        (item for item in inspector.get_columns(table_name) if item["name"] == column.name),
+        None,
+    )
+    if existing is None:
+        op.add_column(table_name, column)
+        return
+    expected_default = "'travel'" if column.name == "kind" else None
+    valid = (
+        isinstance(existing["type"], sa.String)
+        and existing["type"].length == 16
+        and existing["nullable"] == column.nullable
+        and existing["default"] == expected_default
+    )
+    if column.name == "kind":
+        valid = valid and any(
+            check["name"] == "ck_reimbursement_drafts_kind"
+            and re.sub(r"\s+", "", check["sqltext"]) == "kindIN('travel','general')"
+            for check in inspector.get_check_constraints(table_name)
+        )
+    if not valid:
+        raise RuntimeError(
+            f"Cannot resume 0029: {table_name}.{column.name} differs from the migration schema"
+        )
 
 
 def _update_file_kinds(*, upgrade: bool) -> None:
@@ -54,7 +94,8 @@ def _update_file_kinds(*, upgrade: bool) -> None:
 
 
 def upgrade() -> None:
-    op.add_column(
+    _begin_sqlite_transaction()
+    _add_or_verify_column(
         "reimbursement_drafts",
         sa.Column(
             "kind",
@@ -66,16 +107,17 @@ def upgrade() -> None:
             server_default="travel",
         ),
     )
-    op.add_column("receipt_keyword_mappings", sa.Column("welfare_type", sa.String(16)))
+    _add_or_verify_column("receipt_keyword_mappings", sa.Column("welfare_type", sa.String(16)))
     op.execute(
         "UPDATE receipt_keyword_mappings SET welfare_type = "
         "CASE WHEN normalized_keyword = '收派服务' THEN 'express' ELSE 'other' END "
-        "WHERE category_id = 'employee_welfare'"
+        "WHERE category_id = 'employee_welfare' AND welfare_type IS NULL"
     )
     _update_file_kinds(upgrade=True)
 
 
 def downgrade() -> None:
+    _begin_sqlite_transaction()
     connection = op.get_bind()
     if any(
         connection.exec_driver_sql(query).scalar()
