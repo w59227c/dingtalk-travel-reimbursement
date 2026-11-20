@@ -25,6 +25,7 @@ from test_oa_reimbursement_integration import (
 from test_reimbursement_files import _upload
 
 from app.core.errors import ApiError
+from app.integrations.dingtalk.approval_summary import ApprovalSummaryField
 from app.integrations.dingtalk.client import DingTalkOpenAPIError
 from app.integrations.dingtalk.workflow import (
     FormOption,
@@ -452,6 +453,86 @@ def test_general_template_confirmation_and_excel_share_draft_binding(client_fact
     assert client.get(path).json()["data"]["revision"] == revision["expectedRevision"]
 
 
+def test_approval_descriptions_are_searchable_saved_restored_and_preserved_on_removal(
+    client_factory,
+):
+    class DescribedWorkflow(GeneralWorkflow):
+        async def get_process_instance_summary(self, instance_id):
+            entry = await super().get_process_instance_summary(instance_id)
+            return replace(
+                entry,
+                summary_fields=(
+                    ApprovalSummaryField("所属公司", "合成公司"),
+                    ApprovalSummaryField("预算项目", "SYNTHETIC-SEARCH-42"),
+                ),
+            )
+
+    client = client_factory(auth_mock_enabled=True)
+    headers = {"X-CSRF-Token": mock_login(client)["csrfToken"]}
+    workflow = DescribedWorkflow()
+    asyncio.run(configure_profiles(client.app, workflow))
+    page = client.get("/api/oa/general-approvals", params={"q": "search-42"}).json()["data"]
+    assert page["items"]
+    entry = next(item for item in page["items"] if item["processInstanceId"] == PURCHASE_INSTANCE)
+    assert entry["summaryFields"][1]["value"] == "SYNTHETIC-SEARCH-42"
+    assert (
+        client.get("/api/oa/general-approvals", params={"q": "not-present"}).json()["data"]["items"]
+        == []
+    )
+    draft = client.post(
+        "/api/reimbursements/drafts",
+        headers=headers,
+        json={
+            "kind": "general",
+            "expectedRevision": 0,
+            "input": {"items": []},
+        },
+    ).json()["data"]
+    path = f"/api/reimbursements/drafts/{draft['id']}"
+    linked = client.put(
+        f"{path}/general-approvals",
+        headers=headers,
+        json={
+            "expectedRevision": draft["revision"],
+            "instanceIds": [PURCHASE_INSTANCE],
+        },
+    )
+    assert linked.status_code == 200, linked.text
+    current = client.get(path).json()["data"]
+    assert (
+        current["input"]["generalApprovalSummaries"][0]["summaryFields"] == entry["summaryFields"]
+    )
+    saved = client.get(f"{path}/general-approvals").json()["data"]
+    assert saved[0]["summaryFields"] == entry["summaryFields"]
+    forged = json.loads(json.dumps(current["input"]))
+    forged["generalApprovalSummaries"][0]["summaryFields"] = [
+        {"label": "伪造", "value": "客户端值"}
+    ]
+    updated = client.put(
+        path,
+        headers=headers,
+        json={
+            "expectedRevision": current["revision"],
+            "input": forged,
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    current = updated.json()["data"]
+    assert (
+        current["input"]["generalApprovalSummaries"][0]["summaryFields"] == entry["summaryFields"]
+    )
+    removed = client.put(
+        f"{path}/general-approvals",
+        headers=headers,
+        json={
+            "expectedRevision": current["revision"],
+            "instanceIds": [],
+        },
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["data"]["input"].get("generalApprovalIds", []) == []
+
+
 def test_general_approval_removal_works_when_both_saved_approvals_are_unavailable(client_factory):
     class UnavailableApprovals(GeneralWorkflow):
         unavailable = False
@@ -720,7 +801,7 @@ def test_general_rechecks_approved_associations_before_preview_and_submit(client
 
 
 @pytest.mark.parametrize("failure", [None, "directory", "list", "detail"])
-def test_general_approval_search_reports_incomplete_stage(client_factory, failure):
+def test_general_approval_search_reports_incomplete_stage(client_factory, failure, capsys):
     class PartialWorkflow(GeneralWorkflow):
         async def list_visible_template_codes(self, user_id):
             return (PURCHASE_CODE,), failure != "directory"
@@ -753,6 +834,17 @@ def test_general_approval_search_reports_incomplete_stage(client_factory, failur
     assert [row["processInstanceId"] for row in page["items"]] == (
         [] if failure == "list" else [PURCHASE_INSTANCE]
     )
+    if failure == "detail":
+        records = [
+            json.loads(line)
+            for line in capsys.readouterr().err.splitlines()
+            if line.startswith("{")
+            and json.loads(line).get("logger") == "app.services.general_reimbursement"
+        ]
+        assert len(records) == 1
+        assert records[0]["errorCode"] == "DINGTALK_OPENAPI_FAILED"
+        assert "synthetic-unavailable" not in json.dumps(records[0])
+        assert PURCHASE_INSTANCE not in json.dumps(records[0])
 
 
 @pytest.mark.parametrize("directory_partial", [False, True])

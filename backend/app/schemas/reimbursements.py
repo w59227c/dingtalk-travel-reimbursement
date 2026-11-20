@@ -247,6 +247,13 @@ class ReimbursementDraftExpenseItemInput(BaseModel):
         return self
 
 
+class GeneralApprovalSummaryField(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1, max_length=40)
+    value: str = Field(min_length=1, max_length=160)
+
+
 class GeneralApprovalSummary(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -256,6 +263,9 @@ class GeneralApprovalSummary(BaseModel):
     status: str
     result: str | None = None
     created_at: str = Field(alias="createdAt")
+    summary_fields: list[GeneralApprovalSummaryField] = Field(
+        default_factory=list, alias="summaryFields", max_length=3
+    )
 
 
 class ReimbursementDraftInput(ExcelGenerateRequest):

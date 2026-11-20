@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -20,7 +21,7 @@ from app.integrations.dingtalk.workflow import (
     DingTalkWorkflowClient,
     FormOption,
     FormSchema,
-    WorkflowProcessInstance,
+    WorkflowApprovalSummary,
     form_schema_from_dict,
 )
 from app.models.oa_template_profile import OaTemplateProfile, utc_now
@@ -47,6 +48,7 @@ _CATEGORIES = {
     "快递费": ExpenseCategory.EXPRESS,
 }
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
+logger = logging.getLogger(__name__)
 
 
 def subject_category(label: str) -> ExpenseCategory:
@@ -274,10 +276,10 @@ async def verify_general_approvals(
     *,
     user_id: str,
     instance_ids: list[str],
-) -> tuple[WorkflowProcessInstance, ...]:
+) -> tuple[WorkflowApprovalSummary, ...]:
     approved = []
     for instance_id in instance_ids:
-        instance = await workflow.get_process_instance(instance_id)
+        instance = await workflow.get_process_instance_summary(instance_id)
         if instance.instance_id != instance_id or instance.originator_user_id != user_id:
             raise ApiError("OA_GENERAL_APPROVAL_NOT_OWNED", "只能关联本人发起的审批", 422)
         if not _is_approved(instance):
@@ -290,11 +292,11 @@ async def verify_general_approvals(
     return tuple(approved)
 
 
-def _is_approved(instance: WorkflowProcessInstance) -> bool:
+def _is_approved(instance: WorkflowApprovalSummary) -> bool:
     return instance.status == "COMPLETED" and instance.result == "agree"
 
 
-def approval_summary(instance: WorkflowProcessInstance) -> dict[str, str | None]:
+def approval_summary(instance: WorkflowApprovalSummary) -> dict[str, object]:
     return {
         "processInstanceId": instance.instance_id,
         "title": instance.title,
@@ -302,6 +304,16 @@ def approval_summary(instance: WorkflowProcessInstance) -> dict[str, str | None]
         "status": instance.status,
         "result": instance.result,
         "createdAt": instance.created_at,
+        **(
+            {
+                "summaryFields": [
+                    {"label": field.label, "value": field.value}
+                    for field in instance.summary_fields
+                ]
+            }
+            if instance.summary_fields
+            else {}
+        ),
     }
 
 
@@ -408,7 +420,7 @@ async def find_general_approvals(
     windows = approval_windows(*date_range)
     scope = token_hash(
         json.dumps(
-            ["general-approved-approval-search-v2", session_id, user_id, windows, keyword, codes]
+            ["general-approved-approval-search-v3", session_id, user_id, windows, keyword, codes]
         ),
         secret,
     )
@@ -468,12 +480,16 @@ async def find_general_approvals(
 
     upstream_limit = asyncio.Semaphore(4)
 
-    async def read(instance_id: str) -> WorkflowProcessInstance | None:
+    async def read(instance_id: str) -> WorkflowApprovalSummary | None:
         try:
             async with upstream_limit:
-                instance = await workflow.get_process_instance(instance_id)
+                instance = await workflow.get_process_instance_summary(instance_id)
             return instance if instance.instance_id == instance_id else None
-        except ApiError:
+        except ApiError as exc:
+            logger.warning(
+                "General approval detail could not be read",
+                extra={"error_code": exc.code},
+            )
             return None
 
     details = await asyncio.gather(*(read(instance_id) for instance_id in ids))
@@ -486,7 +502,17 @@ async def find_general_approvals(
         if item is not None
         and item.originator_user_id == user_id
         and _is_approved(item)
-        and (not keyword or keyword.casefold() in (item.title + " " + item.business_id).casefold())
+        and (
+            not keyword
+            or keyword.casefold()
+            in " ".join(
+                (
+                    item.title,
+                    item.business_id,
+                    *(field.label + " " + field.value for field in item.summary_fields),
+                )
+            ).casefold()
+        )
     ]
     matches.sort(key=lambda item: (item.created_at, item.instance_id), reverse=True)
     has_more = bool(codes) and window_index < len(windows)

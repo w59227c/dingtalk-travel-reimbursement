@@ -19,6 +19,7 @@ from app.api import reimbursement_submissions as submission_api
 from app.core.errors import ApiError
 from app.database.base import Base
 from app.domain.categories import CATEGORY_BY_ID, ExpenseCategory
+from app.integrations.dingtalk.approval_summary import approval_summary_fields
 from app.integrations.dingtalk.storage import (
     ApprovalAttachment,
     ApprovalFile,
@@ -37,6 +38,7 @@ from app.integrations.dingtalk.workflow import (
     FormOption,
     FormSchema,
     RelatedTemplatePolicy,
+    WorkflowApprovalSummary,
     WorkflowFormValue,
     WorkflowInstanceIdPage,
     WorkflowProcessInstance,
@@ -274,6 +276,22 @@ class LocalWorkflowBoundary:
         assert self.created_command is None
         self.created_command = command
         return CreatedProcessInstance(OA_INSTANCE_ID)
+
+    async def get_process_instance_summary(self, instance_id: str) -> WorkflowApprovalSummary:
+        instance = await self.get_process_instance(instance_id)
+        return WorkflowApprovalSummary(
+            instance_id=instance.instance_id,
+            title=instance.title,
+            business_id=instance.business_id,
+            originator_user_id=instance.originator_user_id,
+            status=instance.status,
+            result=instance.result,
+            created_at=instance.created_at,
+            summary_fields=approval_summary_fields([
+                {"name": field.name, "value": field.value, "componentType": field.component_type}
+                for field in instance.form_values
+            ]),
+        )
 
     async def get_process_instance(self, instance_id: str) -> WorkflowProcessInstance:
         if instance_id in {TRAVEL_INSTANCE_ID, TRAVEL_INSTANCE_ID_2}:

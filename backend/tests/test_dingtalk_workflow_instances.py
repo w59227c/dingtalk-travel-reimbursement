@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import httpx
 import pytest
@@ -14,7 +15,9 @@ from app.integrations.dingtalk.workflow import (
     DingTalkProcessInstanceCreateRejected,
     DingTalkWorkflowClient,
     normalize_process_instance,
+    normalize_process_instance_summary,
 )
+from app.services.general_reimbursement import find_general_approvals, verify_general_approvals
 
 LIST_PATH = "/v1.0/workflow/processes/instanceIds/query"
 INSTANCE_PATH = "/v1.0/workflow/processInstances"
@@ -387,6 +390,62 @@ async def test_list_process_instance_ids_rejects_malformed_upstream_payload(
     assert caught.value.status_code == 502
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"componentType": "DDSelectField"},
+        {"componentType": "UnknownField"},
+        {"value": "unlabeled business value"},
+        {"value": 3},
+        {"extValue": "unlabeled business evidence"},
+        {"extValue": 3},
+        {"bizAlias": {"invalid": "alias"}},
+        {"id": "budget-id"},
+        {"name": "x" * 256},
+    ],
+)
+def test_empty_text_note_compatibility_keeps_business_and_shape_validation(overrides):
+    note = {
+        "id": "note-id",
+        "componentType": "TextNote",
+        "name": None,
+        "value": None,
+        "extValue": None,
+        **overrides,
+    }
+    with pytest.raises(ApiError) as caught:
+        normalize_process_instance(
+            "instance-1",
+            process_instance_payload(
+                formComponentValues=[
+                    note,
+                    {"id": "budget-id", "name": "预算代码", "value": "SYNTHETIC-001"},
+                ]
+            ),
+        )
+    assert caught.value.code == "DINGTALK_WORKFLOW_INSTANCE_INVALID"
+
+
+def test_named_text_note_content_remains_in_strict_instance_readback():
+    instance = normalize_process_instance(
+        "instance-1",
+        process_instance_payload(
+            formComponentValues=[
+                {
+                    "id": "note-id",
+                    "componentType": "TextNote",
+                    "name": "合成说明",
+                    "value": "保留的合成说明",
+                    "extValue": "合成附加信息",
+                },
+            ]
+        ),
+    )
+    assert instance.form_values[0].name == "合成说明"
+    assert instance.form_values[0].value == "保留的合成说明"
+    assert instance.form_values[0].ext_value == "合成附加信息"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("returned_next_token", ["20", "19"])
 async def test_list_process_instance_ids_rejects_nonadvancing_cursor(
@@ -525,6 +584,164 @@ async def test_get_process_instance_rejects_malformed_upstream_payload(
 
     assert caught.value.code == "DINGTALK_WORKFLOW_INSTANCE_INVALID"
     assert caught.value.status_code == 502
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, "", "   "])
+async def test_general_approval_search_accepts_empty_unnamed_text_notes(settings_factory, name):
+    values = [
+        {
+            "id": "note-id",
+            "componentType": "TextNote",
+            "bizAlias": "synthetic-note",
+            "name": name,
+            "value": None,
+            "extValue": None,
+        },
+        {
+            "id": "budget-id",
+            "componentType": "DDSelectField",
+            "name": "预算代码",
+            "value": "SYNTHETIC-001 合成项目",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return token_response()
+        if request.url.path.endswith("/templates"):
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "processList": [
+                            {"processCode": "PROC-SYNTHETIC"},
+                        ]
+                    }
+                },
+            )
+        if request.url.path == LIST_PATH:
+            return httpx.Response(200, json={"success": True, "result": {"list": ["instance-1"]}})
+        assert request.url.path == INSTANCE_PATH
+        return httpx.Response(200, json=process_instance_payload(formComponentValues=values))
+
+    client, workflow = workflow_client(settings_factory, handler)
+    try:
+        page = await find_general_approvals(
+            workflow,
+            user_id="employee-1",
+            date_range=(date(2026, 9, 1), date(2026, 9, 1)),
+            keyword="",
+            session_id="synthetic-session",
+            secret="synthetic-secret",
+        )
+        assert page["complete"] is True
+        assert page["incompleteReasons"] == []
+        assert [item["processInstanceId"] for item in page["items"]] == ["instance-1"]
+        approved = await verify_general_approvals(
+            workflow,
+            user_id="employee-1",
+            instance_ids=["instance-1"],
+        )
+        assert approved[0].title == "测试员工提交的境内出差申请"
+        instance = await workflow.get_process_instance("instance-1")
+        assert len(instance.form_values) == 1
+        assert instance.form_values[0].value == "SYNTHETIC-001 合成项目"
+        with pytest.raises(ApiError, match="只能关联本人发起的审批"):
+            await verify_general_approvals(
+                workflow, user_id="other-user", instance_ids=["instance-1"]
+            )
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "form_values",
+    [
+        None,
+        {"syntheticFutureLayout": []},
+        [None],
+        [{"componentType": "SyntheticFutureLayout", "name": None, "value": {"nested": []}}],
+    ],
+)
+async def test_approval_summary_uses_metadata_without_relaxing_full_readback(
+    settings_factory, form_values
+):
+    payload = process_instance_payload(formComponentValues=form_values, originatorDeptId=None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return (
+            token_response()
+            if request.url.path.endswith("/token")
+            else httpx.Response(200, json=payload)
+        )
+
+    client, workflow = workflow_client(settings_factory, handler)
+    try:
+        summary = await workflow.get_process_instance_summary("instance-1")
+        assert summary.instance_id == "instance-1"
+        assert summary.originator_user_id == "employee-1"
+        assert summary.status == "COMPLETED"
+        assert summary.result == "agree"
+        assert not hasattr(summary, "form_values")
+        assert not hasattr(summary, "originator_department_id")
+        with pytest.raises(ApiError) as caught:
+            await workflow.get_process_instance("instance-1")
+        assert caught.value.code == "DINGTALK_WORKFLOW_INSTANCE_INVALID"
+        await verify_general_approvals(workflow, user_id="employee-1", instance_ids=["instance-1"])
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"title": ""},
+        {"businessId": None},
+        {"originatorUserId": None},
+        {"status": None},
+        {"createTime": ""},
+    ],
+)
+def test_approval_summary_rejects_missing_required_metadata(overrides):
+    with pytest.raises(ApiError) as caught:
+        normalize_process_instance_summary("instance-1", process_instance_payload(**overrides))
+    assert caught.value.code == "DINGTALK_WORKFLOW_INSTANCE_INVALID"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "result"),
+    [
+        ("RUNNING", "agree"),
+        ("TERMINATED", "agree"),
+        ("COMPLETED", "refuse"),
+        ("COMPLETED", None),
+    ],
+)
+async def test_summary_reads_do_not_allow_unapproved_associations(settings_factory, status, result):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return token_response()
+        return httpx.Response(
+            200,
+            json=process_instance_payload(
+                status=status,
+                result=result,
+                formComponentValues=None,
+            ),
+        )
+
+    client, workflow = workflow_client(settings_factory, handler)
+    try:
+        with pytest.raises(ApiError) as caught:
+            await verify_general_approvals(
+                workflow, user_id="employee-1", instance_ids=["instance-1"]
+            )
+        assert caught.value.code == "OA_GENERAL_APPROVAL_NOT_APPROVED"
+    finally:
+        await client.close()
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,7 @@
 }
 
 .travel-approval-main {
+  flex: 1;
   display: grid;
   min-width: 0;
   gap: 5px;
@@ -105,6 +106,8 @@
   gap: 8px;
   color: var(--el-text-color-primary);
 }
+
+.travel-approval-title strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 
 @container approval-filters (min-width: 640px) {
   .travel-query-grid:not(.travel-query-grid--mobile) {

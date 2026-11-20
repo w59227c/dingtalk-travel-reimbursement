@@ -54,6 +54,41 @@ beforeEach(() => {
 afterEach(() => { for (const wrapper of mounted.splice(0)) wrapper.unmount() })
 
 describe.each([false, true])('automatic general approval search, mobile=%s', (mobile) => {
+  it('shows bounded plain descriptions and approved status beside the title in both modes', async () => {
+    const entry = { ...first, summaryFields: [
+      { label: '所属公司', value: '合成公司' },
+      { label: '预算项目', value: 'SYNTHETIC-42' },
+      { label: '申请事项', value: '<b>合成内容</b>' },
+      { label: '额外', value: '不显示第四条' },
+    ] }
+    vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [entry], complete: true })
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true })
+    await flushPromises()
+    const row = wrapper.get('.travel-approval-row')
+    expect(row.get('.travel-approval-title').text()).toContain('已通过')
+    expect(row.get('[data-testid="approval-summary-fields"]').findAll('small')).toHaveLength(3)
+    expect(row.text()).toContain('预算项目：SYNTHETIC-42')
+    expect(row.text()).toContain('<b>合成内容</b>')
+    expect(row.find('b').exists()).toBe(false)
+    expect(row.text()).not.toContain('不显示第四条')
+    expect(row.text()).toContain('发起日期：2026-11-10')
+    expect(wrapper.get('input[aria-label="搜索本人审批"]').attributes('placeholder')).toContain('说明')
+  })
+
+  it('restores saved descriptions outside the current query and keeps legacy entries selectable', async () => {
+    const saved = { ...first, summaryFields: [{ label: '项目', value: '合成已存项目' }] }
+    vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [last], complete: true })
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true, modelValue: [first.processInstanceId], savedApprovals: [saved] })
+    await flushPromises()
+    expect(wrapper.text()).toContain('项目：合成已存项目')
+    expect(wrapper.text()).toContain('已选 1 张')
+    const legacyRow = wrapper.findAll('.travel-approval-row').find(row => row.text().includes(last.title))!
+    expect(legacyRow.find('[data-testid="approval-summary-fields"]').exists()).toBe(false)
+    expect(legacyRow.get('input[type="checkbox"]').attributes('disabled')).toBeUndefined()
+  })
+
   it('starts on expansion and reaches later matches without a search or continuation click', async () => {
     vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [], complete: false, nextCursor: 'synthetic-page-2' })
       .mockResolvedValueOnce({ items: [last], complete: true })

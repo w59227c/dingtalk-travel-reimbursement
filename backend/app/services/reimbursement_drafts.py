@@ -957,7 +957,7 @@ async def replace_general_approvals(
 
 async def read_general_approval_summaries(
     database: Session, workflow: DingTalkWorkflowClient, *, actor: DraftActor, draft_id: str
-) -> list[dict[str, str | None]]:
+) -> list[dict[str, object]]:
     draft = require_owned_draft(database, draft_id=draft_id, actor=actor)
     if draft.kind != "general" or actor.operator_user_id is not None:
         raise _not_found_error()

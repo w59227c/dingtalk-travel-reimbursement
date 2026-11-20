@@ -140,7 +140,7 @@ function search() {
             v-model="keyword"
             clearable
             maxlength="100"
-            placeholder="标题或审批编号"
+            :placeholder="general ? '标题、审批编号或说明' : '标题或审批编号'"
             :aria-label="general ? '搜索本人审批' : '搜索出差审批'"
             @keyup.enter="search"
           />
@@ -200,6 +200,10 @@ function search() {
               >
                 已关联
               </el-tag>
+              <slot
+                name="status"
+                :row="row"
+              />
             </span>
             <slot
               name="details"

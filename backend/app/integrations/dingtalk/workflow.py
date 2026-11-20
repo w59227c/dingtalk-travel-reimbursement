@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.errors import ApiError
+from app.integrations.dingtalk.approval_summary import ApprovalSummaryField, approval_summary_fields
 from app.integrations.dingtalk.client import DingTalkOpenAPIClient, DingTalkOpenAPIError
 
 FORM_SCHEMA_PATH = "/v1.0/workflow/forms/schemas/processCodes"
@@ -94,6 +95,18 @@ class WorkflowFormValue:
     value: str | None
     ext_value: str | None
     biz_alias: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowApprovalSummary:
+    instance_id: str
+    title: str
+    business_id: str
+    originator_user_id: str
+    status: str
+    result: str | None
+    created_at: str
+    summary_fields: tuple[ApprovalSummaryField, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,17 +364,26 @@ class DingTalkWorkflowClient:
             raise _process_code_error()
         return normalize_instance_id_page(payload, requested_next_token=next_token)
 
-    async def get_process_instance(self, process_instance_id: str) -> WorkflowProcessInstance:
+    async def _read_process_instance_payload(self, process_instance_id: str) -> dict[str, Any]:
         instance_id = _required_identifier(
             process_instance_id,
             field_name="process_instance_id",
         )
-        payload = await self._client.request_openapi_json(
+        return await self._client.request_openapi_json(
             "GET",
             PROCESS_INSTANCES_PATH,
             params={"processInstanceId": instance_id},
         )
-        return normalize_process_instance(instance_id, payload)
+
+    async def get_process_instance_summary(
+        self, process_instance_id: str
+    ) -> WorkflowApprovalSummary:
+        payload = await self._read_process_instance_payload(process_instance_id)
+        return normalize_process_instance_summary(process_instance_id, payload)
+
+    async def get_process_instance(self, process_instance_id: str) -> WorkflowProcessInstance:
+        payload = await self._read_process_instance_payload(process_instance_id)
+        return normalize_process_instance(process_instance_id, payload)
 
     async def create_process_instance(
         self,
@@ -446,15 +468,39 @@ def normalize_instance_id_page(
     )
 
 
-def normalize_process_instance(
+def normalize_process_instance_summary(
     process_instance_id: str,
     payload: dict[str, Any],
-) -> WorkflowProcessInstance:
+) -> WorkflowApprovalSummary:
     if not _successful_read_response(payload.get("success")):
         raise _instance_detail_error()
     result = payload.get("result")
     if not isinstance(result, dict):
         raise _instance_detail_error()
+    try:
+        approval_result = _optional_bounded_text(result.get("result"), max_length=64)
+        return WorkflowApprovalSummary(
+            instance_id=_required_identifier(process_instance_id, field_name="process_instance_id"),
+            title=_required_bounded_text(result.get("title"), max_length=1024),
+            business_id=_required_identifier(result.get("businessId"), field_name="business_id"),
+            originator_user_id=_required_identifier(
+                result.get("originatorUserId"), field_name="originator_user_id"
+            ),
+            status=_required_bounded_text(result.get("status"), max_length=64).upper(),
+            result=approval_result.lower() if approval_result is not None else None,
+            created_at=_required_bounded_text(result.get("createTime"), max_length=128),
+            summary_fields=approval_summary_fields(result.get("formComponentValues")),
+        )
+    except ValueError:
+        raise _instance_detail_error() from None
+
+
+def normalize_process_instance(
+    process_instance_id: str,
+    payload: dict[str, Any],
+) -> WorkflowProcessInstance:
+    summary = normalize_process_instance_summary(process_instance_id, payload)
+    result = payload["result"]
 
     raw_values = result.get("formComponentValues")
     if not isinstance(raw_values, list):
@@ -473,49 +519,47 @@ def normalize_process_instance(
                 if component_id in seen_component_ids:
                     raise ValueError
                 seen_component_ids.add(component_id)
+            name = _optional_bounded_text(
+                raw_value.get("name"), max_length=_MAX_FORM_COMPONENT_NAME_LENGTH
+            )
+            component_type = _optional_bounded_text(raw_value.get("componentType"), max_length=128)
+            value = _optional_form_value(raw_value.get("value"))
+            ext_value = _optional_form_value(raw_value.get("extValue"))
+            biz_alias = _optional_bounded_text(raw_value.get("bizAlias"), max_length=255)
+            # DingTalk includes empty display-only notes without a field label.
+            # Check their shape and identifier uniqueness before omitting them.
+            if (
+                name is None
+                and component_type == "TextNote"
+                and value in (None, "")
+                and ext_value in (None, "")
+            ):
+                continue
+            if name is None:
+                raise ValueError
             form_values.append(
                 WorkflowFormValue(
                     component_id=component_id,
-                    name=_required_bounded_text(
-                        raw_value.get("name"),
-                        max_length=_MAX_FORM_COMPONENT_NAME_LENGTH,
-                    ),
-                    component_type=_optional_bounded_text(
-                        raw_value.get("componentType"),
-                        max_length=128,
-                    ),
-                    value=_optional_form_value(raw_value.get("value")),
-                    ext_value=_optional_form_value(raw_value.get("extValue")),
-                    biz_alias=_optional_bounded_text(
-                        raw_value.get("bizAlias"),
-                        max_length=255,
-                    ),
+                    name=name,
+                    component_type=component_type,
+                    value=value,
+                    ext_value=ext_value,
+                    biz_alias=biz_alias,
                 )
             )
 
-        status = _required_bounded_text(result.get("status"), max_length=64).upper()
-        approval_result = _optional_bounded_text(result.get("result"), max_length=64)
         return WorkflowProcessInstance(
-            instance_id=_required_identifier(
-                process_instance_id,
-                field_name="process_instance_id",
-            ),
-            title=_required_bounded_text(result.get("title"), max_length=1024),
-            business_id=_required_identifier(
-                result.get("businessId"),
-                field_name="business_id",
-            ),
-            originator_user_id=_required_identifier(
-                result.get("originatorUserId"),
-                field_name="originator_user_id",
-            ),
+            instance_id=summary.instance_id,
+            title=summary.title,
+            business_id=summary.business_id,
+            originator_user_id=summary.originator_user_id,
             originator_department_id=_required_identifier(
                 result.get("originatorDeptId"),
                 field_name="originator_department_id",
             ),
-            status=status,
-            result=approval_result.lower() if approval_result is not None else None,
-            created_at=_required_bounded_text(result.get("createTime"), max_length=128),
+            status=summary.status,
+            result=summary.result,
+            created_at=summary.created_at,
             finished_at=_optional_bounded_text(result.get("finishTime"), max_length=128),
             form_values=tuple(form_values),
             executed_cc_user_ids=_executed_cc_user_ids(result.get("operationRecords")),

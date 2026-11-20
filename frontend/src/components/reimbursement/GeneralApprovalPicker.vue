@@ -271,10 +271,39 @@ onBeforeUnmount(cancelSearch)
         show-icon
       />
     </template>
+    <template #status="{ row }">
+      <span
+        v-if="row.entry"
+        class="approval-row-status"
+        :class="{ 'is-approved': isApproved(row.entry) }"
+      >{{ statusLabel(row.entry) }}</span>
+    </template>
     <template #details="{ row }">
-      <span v-if="row.entry">{{ row.entry.createdAt.slice(0, 10) }} · {{ statusLabel(row.entry) }}</span>
+      <div
+        v-if="row.entry?.summaryFields?.length"
+        class="approval-summary-fields"
+        data-testid="approval-summary-fields"
+      >
+        <small
+          v-for="(field, index) in row.entry.summaryFields.slice(0, 3)"
+          :key="index"
+          :title="`${field.label}：${field.value}`"
+        >{{ field.label }}：{{ field.value }}</small>
+      </div>
+      <small
+        v-if="row.entry"
+        class="approval-created-at"
+      >发起日期：{{ row.entry.createdAt.slice(0, 10) }}</small>
       <small v-else>审批详情暂不可用</small>
       <small v-if="row.entry && !isApproved(row.entry) && !readonly">该关联审批未通过，请取消关联后再办理。</small>
     </template>
   </ApprovalSelectorPanel>
 </template>
+
+<style scoped>
+.approval-row-status { margin-left: auto; flex: none; color: var(--el-text-color-secondary); font-size: 12px; font-weight: normal; }
+.approval-row-status.is-approved { color: var(--el-color-success); }
+.approval-summary-fields { display: grid; gap: 4px; min-width: 0; }
+.approval-summary-fields small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--el-text-color-secondary); }
+.approval-created-at { margin-top: 3px; }
+</style>

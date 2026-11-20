@@ -18,6 +18,7 @@ export interface GeneralApproval {
   status: string
   result?: string | null
   createdAt: string
+  summaryFields?: { label: string; value: string }[]
 }
 
 export type GeneralApprovalIncompleteReason = 'directory' | 'list' | 'detail' | 'pagination'
