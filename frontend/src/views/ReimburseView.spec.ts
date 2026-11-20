@@ -4447,13 +4447,79 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
-  it.each([false, true])('lets an administrator enter settings to repair unavailable OA templates after confirming unsaved input, mobile=%s', async (mobile) => {
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).map(kind => ({ mobile, kind }))))(
+    'opens settings from an unconfigured blank workspace without a discard warning, mobile=$mobile kind=$kind',
+    async ({ mobile, kind }) => {
+      vi.useFakeTimers()
+      const unavailable = Object.assign(new Error('请先配置 OA 表单'), {
+        isAxiosError: true,
+        response: { data: { error: { code: kind === 'general' ? 'OA_GENERAL_TEMPLATE_NOT_CONFIGURED' : 'OA_TEMPLATE_NOT_CONFIGURED' } } },
+      })
+      vi.mocked(getOaReimbursementOptions).mockRejectedValue(unavailable)
+      vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [], total: 0 })
+      const { wrapper, drafts, router } = await mountView(() => {
+        useReimbursementDraftStore().reimbursementKind = kind
+      }, false, mobile)
+      try {
+        expect(drafts.currentDraft).toBeNull()
+        const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+        await router.push(mobile ? '/m/settings' : '/admin/settings')
+        expect(confirm).not.toHaveBeenCalled()
+        expect(router.currentRoute.value.path).toBe(mobile ? '/m/settings' : '/admin/settings')
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+        expect(updateReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).map(kind => ({ mobile, kind }))))(
+    'opens settings after switching to an unconfigured empty reimbursement type, mobile=$mobile kind=$kind',
+    async ({ mobile, kind }) => {
+      vi.useFakeTimers()
+      const sourceKind = kind === 'general' ? 'travel' : 'general'
+      serverDraft = makeDraft({ kind: sourceKind, input: canonicalNoSubsidyInput(),
+        ...(sourceKind === 'travel' ? { relatedApprovals: [linkedApproval], relatedApprovalCount: 1 } : {}) })
+      const unavailable = Object.assign(new Error('请先配置 OA 表单'), {
+        isAxiosError: true,
+        response: { data: { error: { code: kind === 'general' ? 'OA_GENERAL_TEMPLATE_NOT_CONFIGURED' : 'OA_TEMPLATE_NOT_CONFIGURED' } } },
+      })
+      vi.mocked(getOaReimbursementOptions).mockImplementation(async request => {
+        if ((request?.kind ?? 'travel') === kind) throw unavailable
+        return options
+      })
+      const { wrapper, drafts, router } = await mountView(() => {
+        useReimbursementDraftStore().reimbursementKind = sourceKind
+      }, false, mobile)
+      try {
+        expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+        await wrapper.get(`[data-testid="switch-${kind}"]`).trigger('click')
+        await flushPromises()
+        expect(drafts.reimbursementKind).toBe(kind)
+        expect(drafts.currentDraft).toBeNull()
+        const sourceInput = structuredClone(serverDraft.input)
+        vi.mocked(updateReimbursementDraft).mockClear()
+        const confirm = vi.spyOn(ElMessageBox, 'confirm').mockRejectedValue('cancel')
+        await router.push(mobile ? '/m/settings' : '/admin/settings')
+        expect(confirm).not.toHaveBeenCalled()
+        expect(router.currentRoute.value.path).toBe(mobile ? '/m/settings' : '/admin/settings')
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+        expect(updateReimbursementDraft).not.toHaveBeenCalled()
+        expect(serverDraft.input).toEqual(sourceInput)
+        expect(serverFiles).toEqual([activeFile])
+      } finally { wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).map(kind => ({ mobile, kind }))))('lets an administrator enter settings to repair unavailable OA templates after confirming unsaved input, mobile=$mobile kind=$kind', async ({ mobile, kind }) => {
+    serverDraft = makeDraft({ kind, input: canonicalNoSubsidyInput() })
     const unavailable = Object.assign(new Error('请先确认 OA 表单'), {
       isAxiosError: true,
       response: { data: { error: { code: 'OA_TEMPLATE_CONFIRMATION_REQUIRED', message: '请先确认 OA 表单' } } },
     })
     vi.mocked(getOaReimbursementOptions).mockRejectedValue(unavailable)
-    const { wrapper, expense, router } = await mountView(undefined, false, mobile)
+    const { wrapper, expense, router } = await mountView(() => {
+      useReimbursementDraftStore().reimbursementKind = kind
+    }, false, mobile)
     expense.items[0]!.description = '表单不可用时仍保留的本页说明'
     await nextTick()
     const confirm = vi.spyOn(ElMessageBox, 'confirm').mockResolvedValueOnce(undefined as never)
@@ -4490,8 +4556,11 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
-  it.each([false, true])('keeps real unsaved input when the administrator cancels opening template settings, mobile=%s', async (mobile) => {
-    const { wrapper, expense, drafts, router } = await mountView(undefined, false, mobile)
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).map(kind => ({ mobile, kind }))))('keeps real unsaved input when the administrator cancels opening template settings, mobile=$mobile kind=$kind', async ({ mobile, kind }) => {
+    serverDraft = makeDraft({ kind, input: canonicalNoSubsidyInput() })
+    const { wrapper, expense, drafts, router } = await mountView(() => {
+      useReimbursementDraftStore().reimbursementKind = kind
+    }, false, mobile)
     expense.items[0]!.description = '需要保留的本页修改'
     drafts.reimbursementOptionsError = 'OA 表单需要确认'
     drafts.reimbursementOptionsErrorCode = 'OA_TEMPLATE_CONFIRMATION_REQUIRED'

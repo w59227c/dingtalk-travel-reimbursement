@@ -1640,7 +1640,10 @@ onBeforeRouteLeave(async (to) => {
     ElMessage.warning('请等待当前操作完成，或先完成部门选择')
     return false
   }
-  if (!sessionScope() || ((!formDirty.value || (formReadOnly.value && !hasUnsavedUserChanges.value)) && !savePromise)) return true
+  // Before a workspace can open, default values have no saved draft baseline.
+  // They are not employee edits; file failures and pending operations stay guarded above.
+  if (!sessionScope() || !drafts.currentDraft
+    || ((!formDirty.value || (formReadOnly.value && !hasUnsavedUserChanges.value)) && !savePromise)) return true
   if (auth.isAdmin && templateNeedsAdmin.value
     && to.path === (props.mobile ? '/m/settings' : '/admin/settings')) {
     if (drafts.busy || saving.value) {
