@@ -713,17 +713,25 @@ describe('ReimburseView single-form OA flow', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each([false, true])('keeps the approval search open when the first batch has no matches, mobile=%s', async (mobile) => {
+  it.each([false, true])('automatically reaches a later approval batch after an empty first batch, mobile=%s', async (mobile) => {
     serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
-    vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [], complete: false, nextCursor: 'next-demo-page' })
+    const later = deferred<Awaited<ReturnType<typeof listGeneralApprovals>>>()
+    vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [], complete: false, nextCursor: 'next-demo-page' })
+      .mockReturnValueOnce(later.promise)
     const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
     try {
       const section = wrapper.get('[data-testid="general-approval-section"]')
       section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
       await flushPromises()
-      expect(section.text()).toContain('本批未找到符合条件的审批')
+      expect(listGeneralApprovals).toHaveBeenCalledTimes(2)
+      expect(section.text()).toContain('正在查询审批')
       expect(section.text()).not.toContain('当前查询范围内没有符合条件的审批')
-      expect(visibleButton(wrapper, '继续查找').isVisible()).toBe(true)
+      expect(section.text()).not.toContain('继续查找')
+      later.resolve({ items: [{ processInstanceId: 'synthetic-later-result', title: '合成后续命中',
+        businessId: 'SYNTHETIC-LATER', status: 'COMPLETED', result: 'agree', createdAt: '2026-11-10T02:00:00Z' }], complete: true })
+      await flushPromises()
+      expect(section.text()).toContain('合成后续命中')
+      expect(section.text()).toContain('当前范围已查完')
     } finally { wrapper.unmount() }
   })
 
@@ -743,8 +751,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(section.text()).toContain('历史采购审批')
       expect(section.text()).toContain('PUR-OLD')
       expect(section.text()).not.toContain(oldId)
-      await visibleButton(wrapper, '继续查找').trigger('click')
-      await flushPromises()
+      expect(listGeneralApprovals).toHaveBeenCalledTimes(2)
       expect(section.text()).toContain('审批目录暂不可用，已保留查询进度')
       expect(section.text()).toContain('历史采购审批')
       await visibleButton(wrapper, '重新加载').trigger('click')
@@ -757,7 +764,10 @@ describe('ReimburseView single-form OA flow', () => {
 
   it.each([false, true])('requires a fresh search after editing the approval filters, mobile=%s', async (mobile) => {
     serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
-    vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [], complete: false, nextCursor: 'old-page' })
+    const oldPage = deferred<Awaited<ReturnType<typeof listGeneralApprovals>>>()
+    vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [], complete: false, nextCursor: 'old-page' })
+      .mockReturnValueOnce(oldPage.promise)
+      .mockResolvedValueOnce({ items: [], complete: true })
     const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
     try {
       const section = wrapper.get('[data-testid="general-approval-section"]')
@@ -766,12 +776,15 @@ describe('ReimburseView single-form OA flow', () => {
       if (mobile) await visibleButton(wrapper, '筛选审批').trigger('click')
       await section.get('input[aria-label="搜索本人审批"]').setValue('差旅申请')
       expect(section.text()).toContain('筛选条件已修改')
-      expect(visibleButton(wrapper, '继续查找').attributes('disabled')).toBeDefined()
-      await visibleButton(wrapper, '继续查找').trigger('click')
-      expect(listGeneralApprovals).toHaveBeenCalledOnce()
+      expect(section.text()).not.toContain('继续查找')
+      expect(listGeneralApprovals).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(listGeneralApprovals).mock.calls[1]![1].aborted).toBe(true)
       await visibleButton(wrapper, '查询审批').trigger('click')
       await flushPromises()
       expect(listGeneralApprovals).toHaveBeenLastCalledWith({ query: '差旅申请' }, expect.any(AbortSignal))
+      oldPage.resolve({ items: [], complete: false, nextCursor: 'stale-page' })
+      await flushPromises()
+      expect(listGeneralApprovals).toHaveBeenCalledTimes(3)
     } finally { wrapper.unmount() }
   })
 

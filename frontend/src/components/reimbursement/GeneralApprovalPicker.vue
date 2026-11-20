@@ -33,6 +33,7 @@ const filtersChanged = computed(() => {
 })
 const dateError = computed(() => approvalQueryDateError(fromDate.value, toDate.value, undefined, 365))
 const loading = ref(false)
+const complete = ref(false)
 const error = ref('')
 const incomplete = ref(false)
 const incompleteReasons = ref<GeneralApprovalIncompleteReason[]>([])
@@ -51,7 +52,8 @@ const items = ref<GeneralApproval[]>([])
 const emptyDescription = computed(() => {
   if (props.readonly) return '未关联审批'
   if (error.value) return '审批查询未完成，请重试'
-  if (nextCursor.value) return '本批未找到符合条件的审批'
+  if (filtersChanged.value) return '筛选条件已修改，请查询审批'
+  if (loading.value || nextCursor.value) return '正在查询符合条件的审批'
   if (incomplete.value) return '审批查询未完成，请重新加载'
   return '当前查询范围内没有符合条件的审批'
 })
@@ -75,43 +77,65 @@ const rows = computed(() => [
 ])
 const limit = 20
 let request: AbortController | undefined
-let started = false
+const queryAvailable = computed(() => expanded.value && props.active && !props.readonly)
+function cancelSearch(): void {
+  const previous = request
+  request = undefined
+  previous?.abort()
+  loading.value = false
+}
 async function search(cursor?: string): Promise<void> {
-  if (props.readonly || props.busy || (cursor && filtersChanged.value)) return
+  if (!queryAvailable.value || props.busy || (cursor && filtersChanged.value)) return
+  if (!cursor && dateError.value) { error.value = dateError.value; return }
+  cancelSearch()
   if (!cursor) {
-    if (dateError.value) { error.value = dateError.value; return }
     activeFilters.value = visibleFilters.value
     nextCursor.value = ''
+    items.value = []
+    incompleteReasons.value = []
   }
   const filters = activeFilters.value
   if (!filters) return
-  request?.abort()
   const controller = new AbortController()
+  const draftId = props.draftId
   request = controller
-  started = true
+  const acceptsResponse = () => request === controller && !controller.signal.aborted
+    && queryAvailable.value && props.draftId === draftId && !filtersChanged.value
   loading.value = true
+  complete.value = false
   error.value = ''
   incomplete.value = false
-  incompleteReasons.value = []
   try {
-    const response = await listGeneralApprovals({
-      ...(filters.from ? { from: filters.from, to: filters.to } : {}),
-      ...(filters.query ? { query: filters.query } : {}),
-      ...(cursor ? { cursor } : {}),
-    }, controller.signal)
-    if (request !== controller) return
-    const approved = response.items.filter(isApproved)
-    for (const entry of approved) known.set(entry.processInstanceId, entry)
-    const byId = new Map((cursor ? [...items.value, ...approved] : approved)
-      .map(entry => [entry.processInstanceId, entry]))
-    items.value = [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)
-      || b.processInstanceId.localeCompare(a.processInstanceId))
-    nextCursor.value = response.nextCursor ?? ''
-    incomplete.value = !response.complete && !response.nextCursor
-    incompleteReasons.value = response.incompleteReasons ?? []
+    let pageCursor = cursor
+    const seenCursors = new Set<string>()
+    while (acceptsResponse()) {
+      if (pageCursor) {
+        if (seenCursors.has(pageCursor)) {
+          nextCursor.value = ''
+          throw new Error('审批查询进度异常，请重新查询')
+        }
+        seenCursors.add(pageCursor)
+      }
+      const response = await listGeneralApprovals({
+        ...(filters.from ? { from: filters.from, to: filters.to } : {}),
+        ...(filters.query ? { query: filters.query } : {}),
+        ...(pageCursor ? { cursor: pageCursor } : {}),
+      }, controller.signal)
+      if (!acceptsResponse()) return
+      const approved = response.items.filter(isApproved)
+      for (const entry of approved) known.set(entry.processInstanceId, entry)
+      const byId = new Map([...items.value, ...approved].map(entry => [entry.processInstanceId, entry]))
+      items.value = [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)
+        || b.processInstanceId.localeCompare(a.processInstanceId))
+      nextCursor.value = response.nextCursor ?? ''
+      incompleteReasons.value = [...new Set([...incompleteReasons.value, ...(response.incompleteReasons ?? [])])]
+      complete.value = response.complete && !nextCursor.value && !incompleteReasons.value.length
+      incomplete.value = !nextCursor.value && !complete.value
+      if (!nextCursor.value) break
+      pageCursor = nextCursor.value
+    }
   } catch (err) {
-    if (request !== controller) return
-    if (!cursor) items.value = []
+    if (!acceptsResponse()) return
     if (apiErrorCode(err) === 'GENERAL_APPROVAL_SEARCH_CURSOR_INVALID') nextCursor.value = ''
     error.value = apiErrorMessage(err, '暂时无法查询审批，请重试')
   } finally {
@@ -142,18 +166,33 @@ function statusLabel(entry: GeneralApproval): string {
 }
 
 watch(() => props.busy, (busy) => { if (!busy) pendingIds.value = null })
-watch(() => expanded.value && props.active && !props.readonly && !props.busy, (ready) => {
-  if (ready && !started) void search()
+watch([queryAvailable, () => props.busy, filtersChanged], ([available, busy, changed]) => {
+  if (!available || changed) { cancelSearch(); return }
+  if (!busy && !request && !complete.value && !error.value && !incomplete.value) {
+    void search(nextCursor.value || undefined)
+  }
 }, { immediate: true })
-watch([expanded, () => props.active, () => props.modelValue, saved], ([open, active, ids], _previous, onCleanup) => {
+watch(() => props.draftId, () => {
+  cancelSearch()
+  activeFilters.value = null
+  fromDate.value = ''; toDate.value = ''; keyword.value = ''
+  complete.value = false
+  error.value = ''; incomplete.value = false; incompleteReasons.value = []
+  nextCursor.value = ''; items.value = []; known.clear(); pendingIds.value = null
+  if (queryAvailable.value && !props.busy) void search()
+})
+watch([expanded, () => props.active, () => props.modelValue, saved, () => props.draftId], ([open, active, ids], _previous, onCleanup) => {
   if (!open || !active || ids.every(id => saved.value.has(id) || known.has(id))) return
   const controller = new AbortController()
+  const draftId = props.draftId
   onCleanup(() => controller.abort())
-  void getSavedGeneralApprovals(props.draftId, controller.signal).then(entries => {
-    if (!controller.signal.aborted) for (const entry of entries) known.set(entry.processInstanceId, entry)
+  void getSavedGeneralApprovals(draftId, controller.signal).then(entries => {
+    if (!controller.signal.aborted && props.draftId === draftId) {
+      for (const entry of entries) known.set(entry.processInstanceId, entry)
+    }
   }).catch(() => { /* Keep unavailable saved rows visible and removable. */ })
 }, { immediate: true })
-onBeforeUnmount(() => { request?.abort(); request = undefined })
+onBeforeUnmount(cancelSearch)
 </script>
 
 <template>
@@ -178,25 +217,31 @@ onBeforeUnmount(() => { request?.abort(); request = undefined })
     @toggle="(row, checked) => toggle(row.processInstanceId, checked)"
   >
     <template #notifications>
+      <p
+        v-if="loading"
+        role="status"
+        class="field-help"
+        data-testid="general-approval-query-progress"
+      >
+        正在查询审批，已找到 {{ items.length }} 张已通过审批，将自动查完当前范围。
+      </p>
+      <p
+        v-else-if="complete && !filtersChanged && !error"
+        role="status"
+        class="field-help"
+        data-testid="general-approval-query-complete"
+      >
+        当前范围已查完，共 {{ items.length }} 张已通过审批。
+      </p>
       <el-alert
-        v-if="nextCursor && !error"
-        :title="filtersChanged ? '筛选条件已修改，请点击「查询审批」。' : '还有审批可查，继续查看当前筛选条件下的结果。'"
+        v-if="filtersChanged"
+        title="筛选条件已修改，请点击「查询审批」。"
         type="info"
         :closable="false"
         class="travel-query-alert"
-      >
-        <el-button
-          link
-          type="primary"
-          :disabled="busy || filtersChanged"
-          :loading="loading"
-          @click="search(nextCursor)"
-        >
-          继续查找
-        </el-button>
-      </el-alert>
+      />
       <el-alert
-        v-if="error || incomplete"
+        v-if="(error || incomplete) && !filtersChanged"
         :title="error || '审批查询未完成，已保留当前结果。'"
         :type="error ? 'error' : 'warning'"
         :closable="false"
@@ -225,16 +270,6 @@ onBeforeUnmount(() => { request?.abort(); request = undefined })
         class="travel-query-alert"
         show-icon
       />
-    </template>
-    <template #empty-actions>
-      <el-button
-        v-if="!readonly && !dateError && !nextCursor"
-        :disabled="busy"
-        :loading="loading"
-        @click="search()"
-      >
-        重新加载
-      </el-button>
     </template>
     <template #details="{ row }">
       <span v-if="row.entry">{{ row.entry.createdAt.slice(0, 10) }} · {{ statusLabel(row.entry) }}</span>
