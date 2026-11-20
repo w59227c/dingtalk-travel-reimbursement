@@ -822,6 +822,8 @@ Workflow 适配代码见 [workflow.py](../backend/app/integrations/dingtalk/work
 | `POST /api/reimbursements/drafts/{draftId}/files/{fileId}/ocr` | 仅 `pending/needs_confirmation` 重新分类；`classified/confirmed` 的费用来源/行程单沿用既定用途识别，普通材料/付款凭证拒绝 OCR |
 | `POST /api/reimbursements/drafts/{draftId}/excel-preview` | 页面保存最新输入后，从对应 revision 生成预览下载 |
 
+PNG/JPG 校验入口为 `app.ocr.image_validation.validate_image_worker`，与 PDF/OCR 入口分开，避免每次 `spawn` 都导入 FastAPI、pypdf 及模型相关模块。资源限额由无 Web 依赖的 `app.ocr.worker_limits` 统一设置；`ApiError` 的轻量定义由原 `app.core.errors` 路径继续兼容导出，错误代码与响应保持原契约。图片检查仍逐任务创建全新进程并在结束、异常或超时后回收，保留 512 MiB 配置和原等待/执行期限；不增加常驻检查进程，不更改 OCR 的复用策略。
+
 OCR 请求体可传严格布尔值 `allowUploadOverlap: true`，仅供本批新上传、未被费用引用且仍为 `pending/NOT_REQUESTED` 的统一分类文件使用，默认 `false`。服务器在识别前后核对企业、报销人、实际经办人、代报授权和可编辑状态、上传时保存的输入指纹及文件状态标记，原子写回对应文件；这一路径不增加整份报销 revision，返回当时最新 revision。旧文件、失败后重试或不符合条件的请求返回 `409 / REIMBURSEMENT_FILE_PIPELINE_NOT_ALLOWED`，由普通严格 revision 路径处理重试。上传接口保持不变；输入指纹仅在服务器保存，不返回文件 API。上传安全检查使用独立的单槽验证进程，重 OCR 保持原单执行槽并共享进程内有界 FIFO 等待队列；两通道都随本次页面请求执行，沿用现有数据结构和接口。
 
 文件返回对象的 `materialClassification` 独立于 `ocrResult`，缺省可为 `null`：

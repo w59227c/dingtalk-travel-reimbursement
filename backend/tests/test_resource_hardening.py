@@ -25,7 +25,7 @@ from pypdf.generic import (
 from starlette.datastructures import UploadFile
 
 from app.core.errors import ApiError
-from app.ocr import workers
+from app.ocr import image_validation, workers
 from app.ocr.pdf_inspection import PdfLimits, inspect_single_page_pdf
 from app.ocr.workers import (
     apply_worker_limits,
@@ -792,7 +792,7 @@ def test_worker_limits_preserve_hard_limits_and_can_raise_soft_limit(monkeypatch
             return SimpleNamespace(ru_utime=2.1, ru_stime=1.1)
 
     fake_resource = FakeResource()
-    monkeypatch.setattr("app.ocr.workers.sys.platform", "linux")
+    monkeypatch.setattr("app.ocr.worker_limits.sys.platform", "linux")
     monkeypatch.setitem(sys.modules, "resource", fake_resource)
     shared = {"file_size_bytes": 1_024, "open_files": 128, "cpu_seconds": 180}
     apply_worker_limits({"memory_bytes": 512, **shared})
@@ -850,6 +850,7 @@ async def test_resource_termination_has_stable_file_and_ocr_errors(
 def stub_worker_limits(monkeypatch):
     # These wrapper tests inject errors in-process without changing pytest's resource limits.
     monkeypatch.setattr(workers, "apply_worker_limits", lambda _limits: None)
+    monkeypatch.setattr(image_validation, "apply_worker_limits", lambda _limits: None)
 
 
 def test_pdf_worker_wrappers_sanitize_memory_error(
@@ -886,7 +887,7 @@ def test_image_worker_wrapper_sanitizes_memory_error(
     def exhaust_memory(*_args, **_kwargs):
         raise MemoryError("secret allocation detail")
 
-    monkeypatch.setattr(workers, "os_open", exhaust_memory)
+    monkeypatch.setattr(image_validation, "os_open", exhaust_memory)
     settings = settings_factory()
     result = validate_image_worker(
         secret_path,

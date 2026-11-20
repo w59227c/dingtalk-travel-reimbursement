@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import re
-import sys
 import tempfile
-import warnings
 from dataclasses import dataclass
 from datetime import date
-from math import ceil
-from os import O_NOFOLLOW, O_RDONLY, fdopen
-from os import open as os_open
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from app.core.errors import ApiError
 from app.ocr.engine import OcrRuntimeError, PaddleLocalOcrEngine
@@ -22,6 +17,7 @@ from app.ocr.extractors import (
     extract_passenger_fields_from_layout,
     extract_passenger_transport_from_layout,
 )
+from app.ocr.image_validation import validate_image_worker as validate_image_worker
 from app.ocr.invoice_parties import (
     SELLER_NAME_PREFIX,
     invoice_seller_from_pdf,
@@ -29,17 +25,13 @@ from app.ocr.invoice_parties import (
 )
 from app.ocr.pdf_inspection import PdfLimits, inspect_single_page_pdf
 from app.ocr.qr import decode_invoice_qr, invoice_qr_to_payload
+from app.ocr.worker_limits import apply_worker_limits
+from app.ocr.worker_limits import worker_resource_failure as _resource_failure
 
 _DATE_SIGNAL = re.compile(r"20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}|\d{1,2}月\d{1,2}日")
 _MONEY_SIGNAL = re.compile(r"[¥￥]\s*\d|价税合计|票价|金额")
 _PASSENGER_ROUTE_HEADERS = ("出发地", "到达地", "交通工具类型")
 _ENGINES: dict[tuple[str, str, str, int], PaddleLocalOcrEngine] = {}
-_WORKER_RESOURCE_FAILURE = {
-    "ok": False,
-    "code": "WORKER_RESOURCE_LIMIT",
-    "message": "本地文件处理超过资源限制",
-    "status": 422,
-}
 
 
 def _passenger_fields(plain_text: str, layout_text: str) -> tuple[date | None, str | None]:
@@ -71,44 +63,6 @@ def _append_passenger_fields(
             lines.insert(0, (f"交通工具类型：{transport}", 1.0))
 
 
-def apply_worker_limits(raw_limits: dict[str, int]) -> None:
-    """Apply process limits before decoding untrusted files on Linux workers."""
-
-    if sys.platform != "linux":
-        return
-    try:
-        import resource
-
-        memory = int(raw_limits["memory_bytes"])
-        file_size = int(raw_limits["file_size_bytes"])
-        open_files = int(raw_limits["open_files"])
-        cpu_seconds = int(raw_limits["cpu_seconds"])
-
-        def bounded_soft(resource_id: int, requested: int) -> tuple[int, int]:
-            _old_soft, hard = resource.getrlimit(resource_id)
-            soft = requested if hard == resource.RLIM_INFINITY else min(requested, hard)
-            return soft, hard
-
-        resource.setrlimit(resource.RLIMIT_AS, bounded_soft(resource.RLIMIT_AS, memory))
-        resource.setrlimit(
-            resource.RLIMIT_FSIZE,
-            bounded_soft(resource.RLIMIT_FSIZE, file_size),
-        )
-        _nofile_soft, nofile_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        nofile_soft = min(open_files, nofile_hard) if nofile_hard >= 0 else open_files
-        resource.setrlimit(resource.RLIMIT_NOFILE, (nofile_soft, nofile_hard))
-        _core_soft, core_hard = resource.getrlimit(resource.RLIMIT_CORE)
-        resource.setrlimit(resource.RLIMIT_CORE, (0, core_hard))
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        cpu_soft = ceil(usage.ru_utime + usage.ru_stime) + cpu_seconds
-        _old_soft, cpu_hard = resource.getrlimit(resource.RLIMIT_CPU)
-        if cpu_hard >= 0:
-            cpu_soft = min(cpu_soft, cpu_hard)
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_soft, cpu_hard))
-    except (KeyError, TypeError, ValueError, OSError) as exc:
-        raise ApiError("WORKER_LIMIT_SETUP_FAILED", "本地文件处理资源限制初始化失败", 500) from exc
-
-
 @dataclass(frozen=True, slots=True)
 class WorkerOcrSettings:
     ocr_detection_model_dir: Path
@@ -137,12 +91,6 @@ def _safe_failure(exc: ApiError | OcrRuntimeError) -> dict[str, Any]:
     return {"ok": False, "code": "OCR_FAILED", "message": "票据识别失败，请手工填写", "status": 422}
 
 
-def _resource_failure() -> dict[str, Any]:
-    """Return a sanitized marker for worker-side allocation failure."""
-
-    return dict(_WORKER_RESOURCE_FAILURE)
-
-
 def inspect_pdf_worker(
     path: str,
     raw_limits: dict[str, int],
@@ -166,49 +114,6 @@ def inspect_pdf_worker(
         }
     except MemoryError:
         return _resource_failure()
-    except ApiError as exc:
-        return _safe_failure(exc)
-
-
-def validate_image_worker(
-    path: str,
-    expected_extension: str,
-    raw_image_limits: dict[str, int],
-    raw_worker_limits: dict[str, int],
-) -> dict[str, Any]:
-    """Validate an untrusted image in the bounded native worker process."""
-
-    def open_image():
-        descriptor = os_open(path, O_RDONLY | O_NOFOLLOW)
-        return fdopen(descriptor, "rb")
-
-    try:
-        apply_worker_limits(raw_worker_limits)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with open_image() as stream, Image.open(stream) as image:
-                image.verify()
-            with open_image() as stream, Image.open(stream) as image:
-                width, height = image.size
-                detected = (image.format or "").upper()
-        if width < 1 or height < 1:
-            raise ApiError("INVALID_IMAGE", "图片尺寸无效", 400)
-        if (
-            width > raw_image_limits["max_dimension"]
-            or height > raw_image_limits["max_dimension"]
-            or width * height > raw_image_limits["max_pixels"]
-        ):
-            raise ApiError("IMAGE_TOO_LARGE", "图片尺寸或像素超过限制", 400)
-        expected_format = "JPEG" if expected_extension == "jpg" else "PNG"
-        if detected != expected_format:
-            raise ApiError("FILE_TYPE_MISMATCH", "文件扩展名与图片内容不一致", 400)
-        return {"ok": True, "width": width, "height": height}
-    except MemoryError:
-        return _resource_failure()
-    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
-        return _safe_failure(ApiError("IMAGE_TOO_LARGE", "图片像素过大", 400))
-    except (UnidentifiedImageError, OSError, ValueError):
-        return _safe_failure(ApiError("INVALID_IMAGE", "图片文件损坏或格式无效", 400))
     except ApiError as exc:
         return _safe_failure(exc)
 

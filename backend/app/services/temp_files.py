@@ -12,7 +12,8 @@ from starlette.datastructures import UploadFile
 
 from app.core.config import Settings
 from app.core.errors import ApiError
-from app.ocr.workers import inspect_pdf_worker, validate_image_worker
+from app.ocr.image_validation import validate_image_worker
+from app.ocr.workers import inspect_pdf_worker
 from app.services.file_coordination import SessionFileCoordinator
 from app.services.process_jobs import (
     KillableProcessRunner,

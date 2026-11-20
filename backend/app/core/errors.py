@@ -1,23 +1,16 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.core.exceptions import ApiError as ApiError
 from app.core.request_id import request_id_for
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class ApiError(Exception):
-    code: str
-    message: str
-    status_code: int = status.HTTP_400_BAD_REQUEST
 
 
 def error_body(code: str, message: str, request_id: str) -> dict[str, object]:
