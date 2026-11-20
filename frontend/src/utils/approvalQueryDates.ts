@@ -1,6 +1,6 @@
 const DAY_MS = 86400000
 export const APPROVAL_QUERY_HINT = '按审批发起日期查询：默认最近 180 天，可查最近 365 个自然日，单次最多 180 天。'
-export const GENERAL_APPROVAL_QUERY_HINT = '按审批发起日期查询：默认近半年，可查最近 365 个自然日。'
+export const GENERAL_APPROVAL_QUERY_HINT = '仅查询本人发起且已通过的审批。按审批发起日期查询：默认近半年，可查最近 365 个自然日。'
 
 export function shanghaiToday(now = new Date()): string {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now)

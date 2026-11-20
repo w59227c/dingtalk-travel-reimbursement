@@ -116,7 +116,7 @@ class GeneralWorkflow(LocalWorkflowBoundary):
             )
         elif process_code == PURCHASE_CODE:
             assert kwargs["user_ids"] == ("mock-user",)
-            assert set(kwargs["statuses"]) == {"COMPLETED", "RUNNING", "TERMINATED"}
+            assert kwargs["statuses"] == ("COMPLETED",)
             page = WorkflowInstanceIdPage((PURCHASE_INSTANCE, "synthetic-other-user"), None)
         else:
             return WorkflowInstanceIdPage((), None)
@@ -136,8 +136,8 @@ class GeneralWorkflow(LocalWorkflowBoundary):
                 instance_id=instance_id,
                 title="合成采购审批",
                 business_id="SYNTHETIC-PURCHASE",
-                status="RUNNING",
-                result=None,
+                status="COMPLETED",
+                result="agree",
                 created_at=self.approval_time.isoformat(),
                 originator_user_id=(
                     "mock-user" if instance_id == PURCHASE_INSTANCE else "synthetic-other-user"
@@ -539,15 +539,236 @@ def test_general_template_rejects_a_restricted_relation_policy(client_factory):
             )
 
 
-def test_general_approval_search_resumes_within_the_same_template_and_day(client_factory):
+def test_general_approval_search_only_returns_approved_owned_instances(client_factory):
+    states = {
+        "synthetic-approved": ("COMPLETED", "agree", "mock-user"),
+        "synthetic-running": ("RUNNING", "agree", "mock-user"),
+        "synthetic-terminated": ("TERMINATED", "agree", "mock-user"),
+        "synthetic-refused": ("COMPLETED", "refuse", "mock-user"),
+        "synthetic-unknown-result": ("COMPLETED", None, "mock-user"),
+        "synthetic-other-owner": ("COMPLETED", "agree", "synthetic-other-user"),
+    }
+
+    class MixedWorkflow(GeneralWorkflow):
+        requested_statuses = []
+
+        async def list_visible_template_codes(self, user_id):
+            return (PURCHASE_CODE,), True
+
+        async def list_process_instance_ids(self, **query):
+            self.requested_statuses.append(query["statuses"])
+            return WorkflowInstanceIdPage(tuple(states), None)
+
+        async def get_process_instance(self, instance_id):
+            source = await super().get_process_instance(PURCHASE_INSTANCE)
+            status, result, owner = states[instance_id]
+            return replace(
+                source,
+                instance_id=instance_id,
+                status=status,
+                result=result,
+                originator_user_id=owner,
+            )
+
+    client = client_factory(auth_mock_enabled=True)
+    mock_login(client)
+    workflow = MixedWorkflow()
+    client.app.state.dingtalk_workflow = workflow
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    response = client.get("/api/oa/general-approvals", params={"from": today, "to": today})
+    assert response.status_code == 200, response.text
+    page = response.json()["data"]
+    assert [item["processInstanceId"] for item in page["items"]] == ["synthetic-approved"]
+    assert page["complete"] is True
+    assert workflow.requested_statuses == [("COMPLETED",)]
+
+
+@pytest.mark.parametrize(
+    "status,result",
+    [("RUNNING", None), ("TERMINATED", "agree"), ("COMPLETED", "refuse"), ("COMPLETED", None)],
+)
+def test_general_approval_selection_rejects_unapproved_instances(client_factory, status, result):
+    class UnapprovedWorkflow(GeneralWorkflow):
+        async def get_process_instance(self, instance_id):
+            source = await super().get_process_instance(instance_id)
+            return (
+                replace(source, status=status, result=result)
+                if instance_id == PURCHASE_INSTANCE
+                else source
+            )
+
+    client = client_factory(auth_mock_enabled=True)
+    login = mock_login(client)
+    headers = {"X-CSRF-Token": login["csrfToken"]}
+    workflow = UnapprovedWorkflow()
+    asyncio.run(configure_profiles(client.app, workflow))
+    created = client.post(
+        "/api/reimbursements/drafts",
+        headers=headers,
+        json={"kind": "general", "expectedRevision": 0, "input": {"items": []}},
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    response = client.put(
+        f"/api/reimbursements/drafts/{draft['id']}/general-approvals",
+        headers=headers,
+        json={"expectedRevision": draft["revision"], "instanceIds": [PURCHASE_INSTANCE]},
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_APPROVED"
+    current = client.get(f"/api/reimbursements/drafts/{draft['id']}").json()["data"]
+    assert current["revision"] == draft["revision"]
+    assert current["input"].get("generalApprovalIds", []) == []
+
+
+def test_general_rechecks_approved_associations_before_preview_and_submit(client_factory):
+    class ChangedWorkflow(GeneralWorkflow):
+        revoked = False
+
+        async def get_process_instance(self, instance_id):
+            source = await super().get_process_instance(instance_id)
+            return (
+                replace(source, status="TERMINATED")
+                if self.revoked and instance_id == PURCHASE_INSTANCE
+                else source
+            )
+
+    client = client_factory(auth_mock_enabled=True)
+    login = mock_login(client)
+    headers = {"X-CSRF-Token": login["csrfToken"]}
+    workflow = ChangedWorkflow()
+    asyncio.run(configure_profiles(client.app, workflow))
+    client.app.state.settings.dingtalk_oa_worker_enabled = True
+    created = client.post(
+        "/api/reimbursements/drafts",
+        headers=headers,
+        json={"kind": "general", "expectedRevision": 0, "input": {"items": []}},
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()["data"]
+    uploaded = _upload(
+        client,
+        login["csrfToken"],
+        draft["id"],
+        revision=draft["revision"],
+        name="synthetic-proof.png",
+        role="ATTACHMENT_ONLY",
+        attachment_kind="other",
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    path = f"/api/reimbursements/drafts/{draft['id']}"
+    saved = client.put(
+        path,
+        headers=headers,
+        json={
+            "expectedRevision": uploaded.json()["data"]["revision"],
+            "input": {
+                "companyValue": "synthetic-company",
+                "budgetCodeValue": "synthetic-budget",
+                "items": [
+                    {
+                        "category": "office",
+                        "subjectValue": "synthetic-subject-0",
+                        "date": "2026-11-10",
+                        "amount": "12.50",
+                        "description": "合成费用",
+                        "displayDate": "11月10日",
+                    }
+                ],
+            },
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    associated = client.put(
+        f"{path}/general-approvals",
+        headers=headers,
+        json={
+            "expectedRevision": saved.json()["data"]["revision"],
+            "instanceIds": [PURCHASE_INSTANCE],
+        },
+    )
+    assert associated.status_code == 200, associated.text
+    draft = associated.json()["data"]
+    revision = {"expectedRevision": draft["revision"]}
+    initial_preview = client.post(f"{path}/excel-preview", headers=headers, json=revision)
+    assert initial_preview.status_code == 200, initial_preview.text
+    reviewed = client.post(f"{path}/review", headers=headers, json=revision)
+    assert reviewed.status_code == 200, reviewed.text
+    draft = reviewed.json()["data"]
+    revision = {"expectedRevision": draft["revision"]}
+    workflow.revoked = True
+    for endpoint in ("excel-preview", "excel-preview-ticket"):
+        rejected = client.post(f"{path}/{endpoint}", headers=headers, json=revision)
+        assert rejected.status_code == 422, rejected.text
+        assert rejected.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_APPROVED"
+    rejected = client.post(
+        f"/api/oa/reimbursements/{draft['id']}/submit",
+        headers={**headers, "Idempotency-Key": "44000000-0000-4000-8000-000000000000"},
+        json=revision,
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_APPROVED"
+    current = client.get(path).json()["data"]
+    assert current["revision"] == draft["revision"]
+    assert current["status"] == "REVIEW_READY"
+    removed = client.put(
+        f"{path}/general-approvals", headers=headers, json={**revision, "instanceIds": []}
+    )
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["data"]["input"].get("generalApprovalIds", []) == []
+    assert client.get(f"{path}/files").json()["data"]["items"]
+
+
+@pytest.mark.parametrize("failure", [None, "directory", "list", "detail"])
+def test_general_approval_search_reports_incomplete_stage(client_factory, failure):
+    class PartialWorkflow(GeneralWorkflow):
+        async def list_visible_template_codes(self, user_id):
+            return (PURCHASE_CODE,), failure != "directory"
+
+        async def list_process_instance_ids(self, **query):
+            if failure == "list":
+                raise DingTalkOpenAPIError(http_status=503)
+            return WorkflowInstanceIdPage(
+                (PURCHASE_INSTANCE, "synthetic-unavailable")
+                if failure == "detail"
+                else (PURCHASE_INSTANCE,),
+                None,
+            )
+
+        async def get_process_instance(self, instance_id):
+            if instance_id == "synthetic-unavailable":
+                raise DingTalkOpenAPIError(http_status=503)
+            source = await super().get_process_instance(instance_id)
+            return replace(source, status="COMPLETED", result="agree")
+
+    client = client_factory(auth_mock_enabled=True)
+    mock_login(client)
+    client.app.state.dingtalk_workflow = PartialWorkflow()
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    response = client.get("/api/oa/general-approvals", params={"from": today, "to": today})
+    assert response.status_code == 200, response.text
+    page = response.json()["data"]
+    assert page.get("incompleteReasons", []) == ([failure] if failure else [])
+    assert page["complete"] is (failure is None)
+    assert [row["processInstanceId"] for row in page["items"]] == (
+        [] if failure == "list" else [PURCHASE_INSTANCE]
+    )
+
+
+@pytest.mark.parametrize("directory_partial", [False, True])
+def test_general_approval_search_resumes_within_the_same_template_and_day(
+    client_factory, directory_partial
+):
     class BusyWorkflow(GeneralWorkflow):
         fail_directory_once = False
+        directory_reads = 0
 
         async def list_visible_template_codes(self, user_id):
             if self.fail_directory_once:
                 self.fail_directory_once = False
                 raise DingTalkOpenAPIError(http_status=429)
-            return (PURCHASE_CODE,), True
+            self.directory_reads += 1
+            return (PURCHASE_CODE,), not (directory_partial and self.directory_reads == 1)
 
         async def list_process_instance_ids(self, *, process_code, next_token, **_query):
             if process_code != PURCHASE_CODE:
@@ -580,10 +801,12 @@ def test_general_approval_search_resumes_within_the_same_template_and_day(client
         page = response.json()["data"]
         if page["items"]:
             assert page["items"][0]["processInstanceId"] == "synthetic-busy-320"
-            assert page["complete"] is True
+            assert page["complete"] is not directory_partial
+            assert page["incompleteReasons"] == (["directory"] if directory_partial else [])
             break
         cursor = page.get("nextCursor")
         assert cursor and cursor not in seen
+        assert len(cursor) <= 256
         if not seen:
             assert (
                 client.get(url, params={**params, "q": "别的标题", "cursor": cursor}).status_code

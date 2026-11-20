@@ -30,6 +30,7 @@ _OPENAPI_RATE_LIMIT_CODES = frozenset(
     }
 )
 _OPENAPI_OPERATIONS = {
+    ("GET", "/v1.0/workflow/processes/userVisibilities/templates"): "workflow_template_list",
     ("GET", "/v1.0/workflow/forms/schemas/processCodes"): "workflow_form_schema_read",
     (
         "POST",

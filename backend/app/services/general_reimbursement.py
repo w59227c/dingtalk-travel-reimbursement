@@ -280,8 +280,18 @@ async def verify_general_approvals(
         instance = await workflow.get_process_instance(instance_id)
         if instance.instance_id != instance_id or instance.originator_user_id != user_id:
             raise ApiError("OA_GENERAL_APPROVAL_NOT_OWNED", "只能关联本人发起的审批", 422)
+        if not _is_approved(instance):
+            raise ApiError(
+                "OA_GENERAL_APPROVAL_NOT_APPROVED",
+                "只能关联已通过的审批，请移除未通过的关联后重试",
+                422,
+            )
         approved.append(instance)
     return tuple(approved)
+
+
+def _is_approved(instance: WorkflowProcessInstance) -> bool:
+    return instance.status == "COMPLETED" and instance.result == "agree"
 
 
 def approval_summary(instance: WorkflowProcessInstance) -> dict[str, str | None]:
@@ -345,9 +355,18 @@ class ApprovalSearchPosition:
     template_index: int = 0
     page_token: int = 0
     partial: bool = False
+    incomplete_reasons: tuple[str, ...] = ()
 
     def encode(self, scope: str, secret: str) -> str:
-        data = json.dumps([self.window_index, self.template_index, self.page_token, self.partial])
+        data = json.dumps(
+            [
+                self.window_index,
+                self.template_index,
+                self.page_token,
+                self.partial,
+                self.incomplete_reasons,
+            ]
+        )
         value = base64.urlsafe_b64encode(data.encode()).decode().rstrip("=")
         return f"{value}.{token_hash(f'{scope}.{value}', secret)}"
 
@@ -358,7 +377,10 @@ class ApprovalSearchPosition:
             if not tokens_match(f"{scope}.{value}", signature, secret):
                 raise ValueError("invalid signature")
             decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-            return cls(*json.loads(decoded))
+            values = json.loads(decoded)
+            if len(values) == 5:
+                values[4] = tuple(values[4])
+            return cls(*values)
         except (TypeError, ValueError):
             raise ApiError(
                 "GENERAL_APPROVAL_SEARCH_CURSOR_INVALID",
@@ -385,7 +407,9 @@ async def find_general_approvals(
     codes = tuple(sorted(set((*visible, *known_codes))))
     windows = approval_windows(*date_range)
     scope = token_hash(
-        json.dumps(["general-approval-search", session_id, user_id, windows, keyword, codes]),
+        json.dumps(
+            ["general-approved-approval-search-v2", session_id, user_id, windows, keyword, codes]
+        ),
         secret,
     )
     position = ApprovalSearchPosition()
@@ -406,6 +430,9 @@ async def find_general_approvals(
         position.page_token,
     )
     partial = position.partial or not directory_complete
+    incomplete_reasons = set(position.incomplete_reasons)
+    if not directory_complete:
+        incomplete_reasons.add("directory")
     ids: dict[str, None] = {}
     requests = 0
     # Bound each request while retaining the exact upstream position for the next batch.
@@ -420,10 +447,11 @@ async def find_general_approvals(
                 next_token=page_token,
                 max_results=20,
                 user_ids=(user_id,),
-                statuses=("RUNNING", "COMPLETED", "TERMINATED"),
+                statuses=("COMPLETED",),
             )
         except ApiError:
             partial = True
+            incomplete_reasons.add("list")
         else:
             ids.update(dict.fromkeys(batch.instance_ids))
             if batch.next_token is not None and batch.next_token > page_token:
@@ -431,6 +459,7 @@ async def find_general_approvals(
                 continue
             if batch.next_token is not None:
                 partial = True
+                incomplete_reasons.add("pagination")
         page_token = 0
         template_index += 1
         if template_index == len(codes):
@@ -449,11 +478,14 @@ async def find_general_approvals(
 
     details = await asyncio.gather(*(read(instance_id) for instance_id in ids))
     partial = partial or any(item is None for item in details)
+    if any(item is None for item in details):
+        incomplete_reasons.add("detail")
     matches = [
         item
         for item in details
         if item is not None
         and item.originator_user_id == user_id
+        and _is_approved(item)
         and (not keyword or keyword.casefold() in (item.title + " " + item.business_id).casefold())
     ]
     matches.sort(key=lambda item: (item.created_at, item.instance_id), reverse=True)
@@ -461,10 +493,15 @@ async def find_general_approvals(
     return {
         "items": [approval_summary(item) for item in matches],
         "complete": not has_more and not partial,
+        "incompleteReasons": sorted(incomplete_reasons),
         **(
             {
                 "nextCursor": ApprovalSearchPosition(
-                    window_index, template_index, page_token, partial
+                    window_index,
+                    template_index,
+                    page_token,
+                    partial,
+                    tuple(sorted(incomplete_reasons)),
                 ).encode(scope, secret)
             }
             if has_more

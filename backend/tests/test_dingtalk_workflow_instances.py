@@ -37,6 +37,77 @@ def token_response() -> httpx.Response:
     )
 
 
+@pytest.mark.asyncio
+async def test_visible_templates_use_openapi_get_and_preserve_pagination(settings_factory):
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return token_response()
+        assert request.method == "GET"
+        assert request.url.path == "/v1.0/workflow/processes/userVisibilities/templates"
+        assert request.headers["x-acs-dingtalk-access-token"] == "private-access-token"
+        assert "access_token" not in request.url.params
+        assert request.url.params["userId"] == "employee-1"
+        assert request.url.params["maxResults"] == "100"
+        cursor = int(request.url.params["nextToken"])
+        pages.append(cursor)
+        return httpx.Response(
+            200,
+            json={
+                "result": {
+                    "processList": [{"processCode": f"PROC-SYNTHETIC-{cursor}"}],
+                    **({"nextToken": 100} if cursor == 0 else {}),
+                }
+            },
+        )
+
+    client, workflow = workflow_client(settings_factory, handler)
+    try:
+        codes, complete = await workflow.list_visible_template_codes("employee-1")
+        assert codes == ("PROC-SYNTHETIC-0", "PROC-SYNTHETIC-100")
+        assert complete is True
+        assert pages == [0, 100]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["request", "result", "row", "cursor"])
+async def test_visible_templates_keep_successful_pages_when_directory_is_incomplete(
+    settings_factory,
+    failure,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return token_response()
+        if request.url.params["nextToken"] == "0":
+            return httpx.Response(
+                200,
+                json={
+                    "result": {
+                        "processList": [{"processCode": "PROC-SYNTHETIC-FIRST"}],
+                        "nextToken": 100,
+                    }
+                },
+            )
+        if failure == "request":
+            return httpx.Response(403, json={"code": "Forbidden.AccessDenied.PermissionDenied"})
+        if failure == "result":
+            return httpx.Response(200, json={"result": {}})
+        if failure == "row":
+            return httpx.Response(200, json={"result": {"processList": [{}]}})
+        return httpx.Response(200, json={"result": {"processList": [], "nextToken": 100}})
+
+    client, workflow = workflow_client(settings_factory, handler)
+    try:
+        codes, complete = await workflow.list_visible_template_codes("employee-1")
+        assert codes == ("PROC-SYNTHETIC-FIRST",)
+        assert complete is False
+    finally:
+        await client.close()
+
+
 def create_command() -> CreateProcessInstanceCommand:
     return CreateProcessInstanceCommand(
         process_code="PROC-REIMBURSEMENT",

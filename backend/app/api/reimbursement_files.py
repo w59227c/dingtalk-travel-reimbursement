@@ -555,6 +555,18 @@ async def create_excel_preview_ticket(
             database, draft_id=draft_id, actor=actor, expected_revision=body.expected_revision
         )
         require_general_draft_options(draft, get_general_catalog(database))
+        general_ids = ReimbursementDraftInput.model_validate_json(
+            draft.input_json
+        ).general_approval_ids
+        if general_ids:
+            database.rollback()
+            await verify_general_approvals(
+                request.app.state.dingtalk_workflow, user_id=actor.user_id, instance_ids=general_ids
+            )
+            draft = require_previewable_draft(
+                database, draft_id=draft_id, actor=actor, expected_revision=body.expected_revision
+            )
+            require_general_draft_options(draft, get_general_catalog(database))
     token = issue_excel_preview_ticket(
         draft_id=draft_id,
         expected_revision=body.expected_revision,

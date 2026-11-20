@@ -236,24 +236,32 @@ class DingTalkWorkflowClient:
         codes: dict[str, None] = {}
         cursor = 0
         while True:
-            # This directory still has a supported OAPI form, unlike the
-            # newer route that can be unavailable for existing internal apps.
-            data = await self._client.request_oapi_json(
-                "POST",
-                "/topapi/process/listbyuserid",
-                json={"userid": user_id, "offset": cursor, "size": 100},
-                retry_transient=True,
-            )
+            try:
+                data = await self._client.request_openapi_json(
+                    "GET",
+                    "/v1.0/workflow/processes/userVisibilities/templates",
+                    params={"userId": user_id, "nextToken": cursor, "maxResults": 100},
+                    retry_transient=True,
+                )
+            except DingTalkOpenAPIError:
+                if codes:
+                    return tuple(codes), False
+                raise
             result = data.get("result")
-            if data.get("errcode") != 0 or not isinstance(result, dict):
+            if not isinstance(result, dict):
                 return tuple(codes), False
-            records = result.get("process_list")
+            records = result.get("processList")
             if not isinstance(records, list):
                 return tuple(codes), False
             for row in records:
-                if isinstance(row, dict) and isinstance(row.get("process_code"), str):
-                    codes[row["process_code"]] = None
-            next_cursor = result.get("next_cursor")
+                if (
+                    not isinstance(row, dict)
+                    or not isinstance(row.get("processCode"), str)
+                    or not row["processCode"].strip()
+                ):
+                    return tuple(codes), False
+                codes[row["processCode"]] = None
+            next_cursor = result.get("nextToken")
             if next_cursor is None or next_cursor == 0 or next_cursor == "0":
                 return tuple(codes), True
             if not str(next_cursor).isdigit() or int(next_cursor) <= cursor:

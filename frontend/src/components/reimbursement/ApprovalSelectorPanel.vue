@@ -90,7 +90,7 @@ function search() {
         v-if="mobile && !readonly"
         class="approval-filter-heading"
       >
-        <span>{{ general ? '近期发起的审批' : '近期已通过的审批' }}</span>
+        <span>近期已通过的审批</span>
         <el-button
           link
           type="primary"

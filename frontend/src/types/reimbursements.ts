@@ -20,6 +20,15 @@ export interface GeneralApproval {
   createdAt: string
 }
 
+export type GeneralApprovalIncompleteReason = 'directory' | 'list' | 'detail' | 'pagination'
+
+export interface GeneralApprovalSearchResult {
+  items: GeneralApproval[]
+  complete: boolean
+  nextCursor?: string
+  incompleteReasons?: GeneralApprovalIncompleteReason[]
+}
+
 export type ReimbursementDraftStatus =
   | 'DRAFT'
   | 'REVIEW_READY'

@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { getSavedGeneralApprovals, listGeneralApprovals } from '@/api/reimbursements'
-import type { GeneralApproval } from '@/types/reimbursements'
+import type { GeneralApproval, GeneralApprovalIncompleteReason } from '@/types/reimbursements'
 import { approvalQueryDateError } from '@/utils/approvalQueryDates'
 import ApprovalSelectorPanel from './ApprovalSelectorPanel.vue'
 
@@ -35,13 +35,24 @@ const dateError = computed(() => approvalQueryDateError(fromDate.value, toDate.v
 const loading = ref(false)
 const error = ref('')
 const incomplete = ref(false)
+const incompleteReasons = ref<GeneralApprovalIncompleteReason[]>([])
+const incompleteDescription = computed(() => {
+  const descriptions: Record<GeneralApprovalIncompleteReason, string> = {
+    directory: '部分审批模板目录未能读取。',
+    list: '部分审批列表未能读取。',
+    detail: '部分审批详情未能读取。',
+    pagination: '部分审批的分页进度异常。',
+  }
+  return incompleteReasons.value.map(reason => descriptions[reason]).join('')
+    + '当前仅展示已查到的已通过审批，可重新加载。'
+})
 const nextCursor = ref('')
 const items = ref<GeneralApproval[]>([])
 const emptyDescription = computed(() => {
   if (props.readonly) return '未关联审批'
   if (error.value) return '审批查询未完成，请重试'
   if (nextCursor.value) return '本批未找到符合条件的审批'
-  if (incomplete.value) return '暂未查到符合条件的审批'
+  if (incomplete.value) return '审批查询未完成，请重新加载'
   return '当前查询范围内没有符合条件的审批'
 })
 const known = reactive(new Map<string, GeneralApproval>())
@@ -81,6 +92,7 @@ async function search(cursor?: string): Promise<void> {
   loading.value = true
   error.value = ''
   incomplete.value = false
+  incompleteReasons.value = []
   try {
     const response = await listGeneralApprovals({
       ...(filters.from ? { from: filters.from, to: filters.to } : {}),
@@ -88,13 +100,15 @@ async function search(cursor?: string): Promise<void> {
       ...(cursor ? { cursor } : {}),
     }, controller.signal)
     if (request !== controller) return
-    for (const entry of response.items) known.set(entry.processInstanceId, entry)
-    const byId = new Map((cursor ? [...items.value, ...response.items] : response.items)
+    const approved = response.items.filter(isApproved)
+    for (const entry of approved) known.set(entry.processInstanceId, entry)
+    const byId = new Map((cursor ? [...items.value, ...approved] : approved)
       .map(entry => [entry.processInstanceId, entry]))
     items.value = [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)
       || b.processInstanceId.localeCompare(a.processInstanceId))
     nextCursor.value = response.nextCursor ?? ''
     incomplete.value = !response.complete && !response.nextCursor
+    incompleteReasons.value = response.incompleteReasons ?? []
   } catch (err) {
     if (request !== controller) return
     if (!cursor) items.value = []
@@ -110,8 +124,13 @@ async function search(cursor?: string): Promise<void> {
 
 function toggle(id: string, checked: boolean): void {
   if (props.readonly || props.busy || pendingIds.value || (checked && props.modelValue.length >= limit)) return
+  if (checked && !isApproved(known.get(id) ?? saved.value.get(id))) return
   pendingIds.value = checked ? [...props.modelValue, id] : props.modelValue.filter(value => value !== id)
   emit('update:modelValue', pendingIds.value)
+}
+
+function isApproved(entry: GeneralApproval | undefined): boolean {
+  return entry?.status === 'COMPLETED' && entry.result === 'agree'
 }
 
 function statusLabel(entry: GeneralApproval): string {
@@ -154,6 +173,7 @@ onBeforeUnmount(() => { request?.abort(); request = undefined })
     :rows="rows"
     :selected-ids="selectedIds"
     :max-selections="limit"
+    selection-help="仅可关联本人发起且已通过的审批，选中或取消后自动保存。"
     @search="search()"
     @toggle="(row, checked) => toggle(row.processInstanceId, checked)"
   >
@@ -177,12 +197,15 @@ onBeforeUnmount(() => { request?.abort(); request = undefined })
       </el-alert>
       <el-alert
         v-if="error || incomplete"
-        :title="error || '部分审批暂未查到，可以重新加载。'"
+        :title="error || '审批查询未完成，已保留当前结果。'"
         :type="error ? 'error' : 'warning'"
         :closable="false"
         class="travel-query-alert"
         show-icon
       >
+        <p v-if="!error">
+          {{ incompleteDescription }}
+        </p>
         <el-button
           v-if="!readonly && !dateError"
           link
@@ -216,6 +239,7 @@ onBeforeUnmount(() => { request?.abort(); request = undefined })
     <template #details="{ row }">
       <span v-if="row.entry">{{ row.entry.createdAt.slice(0, 10) }} · {{ statusLabel(row.entry) }}</span>
       <small v-else>审批详情暂不可用</small>
+      <small v-if="row.entry && !isApproved(row.entry) && !readonly">该关联审批未通过，请取消关联后再办理。</small>
     </template>
   </ApprovalSelectorPanel>
 </template>

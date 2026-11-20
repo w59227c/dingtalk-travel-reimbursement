@@ -328,7 +328,7 @@ function installServerMocks(): void {
   })
   vi.mocked(calculateTotals).mockResolvedValue(serverDraft.totals)
   vi.mocked(getOaReimbursementOptions).mockResolvedValue(options)
-  vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [], complete: true })
+  vi.mocked(listGeneralApprovals).mockReset().mockResolvedValue({ items: [], complete: true })
   vi.mocked(getSavedGeneralApprovals).mockResolvedValue([])
   vi.mocked(listReimbursementDrafts).mockImplementation(async () => ({
     items: [serverDraft],
@@ -633,6 +633,83 @@ describe('ReimburseView single-form OA flow', () => {
       await flushPromises()
       expect(confirm).toHaveBeenCalledOnce()
       expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile => (['directory', 'list', 'detail'] as const).map(reason => ({ mobile, reason }))))(
+    'explains incomplete general approval queries and preserves successful results, mobile=$mobile reason=$reason',
+    async ({ mobile, reason }) => {
+      const approval = { processInstanceId: 'synthetic-approved', title: '合成已通过审批',
+        businessId: 'SYNTHETIC-APPROVED', status: 'COMPLETED', result: 'agree', createdAt: '2026-11-10T01:00:00Z' }
+      serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
+      vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [approval], complete: false,
+        incompleteReasons: [reason] })
+        .mockResolvedValueOnce({ items: [approval], complete: true })
+      const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+      try {
+        const section = wrapper.get('[data-testid="general-approval-section"]')
+        section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+        await flushPromises()
+        expect(section.text()).toContain('审批查询未完成，已保留当前结果')
+        expect(section.text()).toContain({ directory: '部分审批模板目录未能读取', list: '部分审批列表未能读取', detail: '部分审批详情未能读取' }[reason]!)
+        expect(section.text()).toContain(approval.title)
+        expect(section.text()).not.toContain('暂未查到')
+        await visibleButton(wrapper, '重新加载').trigger('click')
+        await flushPromises()
+        expect(section.text()).not.toContain('审批查询未完成')
+        expect(section.text()).toContain(approval.title)
+      } finally { wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true])('only offers passed general approvals even when a stale response contains other statuses, mobile=%s', async (mobile) => {
+    serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
+    const passed = { processInstanceId: 'synthetic-approved', title: '合成已通过审批',
+      businessId: 'SYNTHETIC-APPROVED', status: 'COMPLETED', result: 'agree', createdAt: '2026-11-10T01:00:00Z' }
+    vi.mocked(listGeneralApprovals).mockResolvedValue({ complete: true, items: [passed,
+      { ...passed, processInstanceId: 'synthetic-terminated', title: '合成已终止审批', status: 'TERMINATED' },
+      { ...passed, processInstanceId: 'synthetic-refused', title: '合成已拒绝审批', result: 'refuse' },
+      { ...passed, processInstanceId: 'synthetic-running', title: '合成审批中记录', status: 'RUNNING' },
+    ] })
+    const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+    try {
+      const section = wrapper.get('[data-testid="general-approval-section"]')
+      section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+      await flushPromises()
+      expect(section.text()).toContain(passed.title)
+      expect(section.text()).not.toContain('合成已终止审批')
+      expect(section.text()).not.toContain('合成已拒绝审批')
+      expect(section.text()).not.toContain('合成审批中记录')
+      expect(section.findAll('.travel-approval-row')).toHaveLength(1)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true])('keeps an old unapproved general association visible and removable, mobile=%s', async (mobile) => {
+    const legacy = { processInstanceId: 'synthetic-legacy-terminated', title: '合成旧终止审批',
+      businessId: 'SYNTHETIC-LEGACY', status: 'TERMINATED', result: 'agree', createdAt: '2026-11-10T01:00:00Z' }
+    serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [],
+      generalApprovalIds: [legacy.processInstanceId], generalApprovalSummaries: [legacy] } })
+    vi.mocked(replaceGeneralApprovals).mockImplementation(async (_id, revision, ids) => {
+      serverDraft = { ...serverDraft, revision: revision + 1,
+        input: { ...serverDraft.input, generalApprovalIds: ids, generalApprovalSummaries: [] } }
+      return serverDraft
+    })
+    const { wrapper, drafts } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+    try {
+      const section = wrapper.get('[data-testid="general-approval-section"]')
+      section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
+      await flushPromises()
+      expect(section.text()).toContain(legacy.title)
+      expect(section.text()).toContain('该关联审批未通过，请取消关联后再办理')
+      const checkbox = section.get<HTMLInputElement>('.travel-approval-list input[type="checkbox"]')
+      expect(checkbox.element.checked).toBe(true)
+      expect(checkbox.element.disabled).toBe(false)
+      await checkbox.setValue(false)
+      await flushPromises()
+      expect(replaceGeneralApprovals).toHaveBeenLastCalledWith(serverDraft.id, 1, [], expect.any(AbortSignal))
+      expect(drafts.currentDraft?.input.generalApprovalIds).toEqual([])
+      expect(drafts.files).toEqual([activeFile])
+      expect(section.text()).not.toContain(legacy.title)
     } finally { wrapper.unmount() }
   })
 
@@ -1273,7 +1350,7 @@ describe('ReimburseView single-form OA flow', () => {
     'shows general approvals inline and saves selection changes, mobile=$mobile lost=$lostResponse', async ({ mobile, lostResponse }) => {
     const approval = {
       processInstanceId: 'synthetic-purchase', title: '示例采购审批', businessId: 'PUR-01',
-      status: 'RUNNING', createdAt: '2026-09-01T00:00:00Z',
+      status: 'COMPLETED', result: 'agree', createdAt: '2026-09-01T00:00:00Z',
     }
     serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, trip: null, items: [] } })
     vi.mocked(listGeneralApprovals).mockResolvedValueOnce({
@@ -1303,7 +1380,7 @@ describe('ReimburseView single-form OA flow', () => {
       expect(listGeneralApprovals).not.toHaveBeenCalled()
       toggle.vm.$emit('update:modelValue', true)
       await flushPromises()
-      expect(section.text()).toContain('审批中')
+      expect(section.text()).toContain('已通过')
       expect(listGeneralApprovals).toHaveBeenCalledWith({}, expect.any(AbortSignal))
       const filters = section.get('#general-approval-filters')
       expect(filters.isVisible()).toBe(!mobile)

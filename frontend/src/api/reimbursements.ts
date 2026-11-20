@@ -6,6 +6,7 @@ import type { ApiEnvelope, Department } from '@/types/auth'
 import type {
   OaReimbursementOptions,
   GeneralApproval,
+  GeneralApprovalSearchResult,
   OaTravelApprovalList,
   ReimbursementDraft,
   ReimbursementDraftDepartment,
@@ -204,7 +205,7 @@ export async function listGeneralApprovals(
   filters: { from?: string; to?: string; query?: string; cursor?: string },
   signal: AbortSignal,
 ) {
-  const response = await http.get<ApiEnvelope<{ items: GeneralApproval[]; complete: boolean; nextCursor?: string }>>(
+  const response = await http.get<ApiEnvelope<GeneralApprovalSearchResult>>(
     '/oa/general-approvals',
     { params: { from: filters.from, to: filters.to, q: filters.query, cursor: filters.cursor }, timeout: 120_000, signal },
   )
