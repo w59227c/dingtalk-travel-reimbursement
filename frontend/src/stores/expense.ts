@@ -19,7 +19,7 @@ import type {
   ReimbursementDraftFile,
 } from '@/types/reimbursements'
 import { receiptOcrResult } from '@/types/reimbursements'
-import { evidenceRailType, isActiveProof } from '@/utils/expenseProofs'
+import { evidenceRailType, isActiveProof, isCourierExpense } from '@/utils/expenseProofs'
 import { itineraryConfirmationWarnings, matchItineraries } from '@/utils/itineraryMatching'
 import { centsToMoney, moneyToCents } from '@/utils/money'
 import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
@@ -417,6 +417,35 @@ export const useExpenseStore = defineStore('expense', () => {
     totals.value = null
     calculatedSignature.value = ''
     return id
+  }
+
+  function changeItemCategory(id: string, value: string): boolean {
+    const item = items.value.find(item => item.id === id)
+    if (!item || snapshotLocked.value) return false
+    const category = generalMode.value
+      ? generalSubjects.value.find(option => option.value === value)?.categoryId
+      : manualCategories.value.find(option => option.id === value)?.id
+    if (!category) throw new Error('费用类别不可用，请重新加载后选择')
+    if (item.category === category && (!generalMode.value || item.subjectValue === value)) return false
+
+    // A category correction must also work on unfinished OCR rows. Keep all
+    // other entered fields intact rather than validating the whole editor.
+    item.category = category
+    item.subjectValue = generalMode.value ? value : undefined
+    item.welfareType = !generalMode.value && category === 'employee_welfare'
+      ? item.welfareType ?? 'other' : undefined
+    if (!isCourierExpense(item)) item.waybillFileIds = []
+    item.transportType = category === 'local_transport'
+      ? normalizedTransportType(item.transportType, item.requiresItinerary) ?? 'other' : 'other'
+    item.requiresItinerary = item.transportType === 'ride_hailing'
+    if (category !== 'local_transport') item.itineraryFileIds = []
+    const rail = category === 'rail_fare'
+      || (generalMode.value && category === 'local_transport' && item.transportType === 'rail')
+    item.railType = evidenceRailType(rail ? 'rail_fare' : category, item.railType,
+      receiptOcrResult(drafts.files.find(file => file.id === item.sourceFileId)))
+    totals.value = null
+    calculatedSignature.value = ''
+    return true
   }
 
   function draftOcrExpenseItem(file: ReimbursementDraftFile): ExpenseItem | null {
@@ -926,6 +955,7 @@ export const useExpenseStore = defineStore('expense', () => {
     syncSubsidyApprovals,
     loadCategories,
     upsertManualItem,
+    changeItemCategory,
     upsertDraftOcrItem,
     hasEmployeeEditsForOcrFile,
     hydrateFromDraft,

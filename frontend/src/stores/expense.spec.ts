@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { calculateTotals, getExpenseCategories } from '@/api/expenses'
 import { useExpenseStore } from '@/stores/expense'
+import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { expenseReviewWarnings } from '@/utils/expenseReview'
 import { inputSignature } from '@/utils/reimbursementInput'
 import type { OcrReceiptCandidate } from '@/types/receipts'
@@ -109,6 +110,72 @@ vi.mock('@/api/expenses', () => ({
 }))
 
 describe('expense store', () => {
+  it('rejects unavailable quick categories and leaves locked snapshots unchanged', () => {
+    const store = useExpenseStore()
+    store.categories = [...MANUAL_CATEGORIES,
+      { id: 'system-only', name: '系统生成', order: 3, manualSelectable: false }]
+    const saved = durableDraft([{ category: 'rail_fare', date: null, displayDate: '', description: '待补全', amount: null, receiptCount: 1 }])
+    store.hydrateFromDraft(saved, [])
+    const original = store.buildDraftExpenseItems()
+    for (const unavailable of ['missing', 'system-only', '']) {
+      expect(() => store.changeItemCategory(store.items[0]!.id, unavailable)).toThrow('费用类别不可用')
+      expect(store.buildDraftExpenseItems()).toEqual(original)
+    }
+    expect(store.changeItemCategory(store.items[0]!.id, 'rail_fare')).toBe(false)
+    store.hydrateFromDraft({ ...saved, status: 'LOCKED' }, [])
+    expect(store.changeItemCategory(store.items[0]!.id, 'local_transport')).toBe(false)
+    expect(store.buildDraftExpenseItems()).toEqual(original)
+  })
+
+  it('rechecks category-dependent rail and transport state without deleting the uploaded evidence', () => {
+    const store = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('synthetic-invoice')
+    Object.assign(source.ocrResult, { categoryId: 'local_transport', transportType: 'ride_hailing',
+      requiresItinerary: true, railType: 'unknown', warnings: ['MANUAL_REVIEW_REQUIRED'] })
+    drafts.files = [source]
+    store.upsertDraftOcrItem(source)
+    Object.assign(store.items[0]!, { itineraryFileIds: ['synthetic-trip'], paymentProofFileIds: ['synthetic-payment'], railType: 'high_speed' })
+    const id = store.items[0]!.id
+    expect(store.changeItemCategory(id, 'rail_fare')).toBe(true)
+    expect(store.items[0]).toMatchObject({ id, sourceFileId: source.id, source: 'ocr', category: 'rail_fare',
+      transportType: 'other', requiresItinerary: false, itineraryFileIds: [], railType: 'unknown',
+      paymentProofFileIds: ['synthetic-payment'], amount: '454.00', warnings: ['MANUAL_REVIEW_REQUIRED'] })
+    expect(drafts.files).toEqual([source])
+    expect(store.hasEmployeeEditsForOcrFile(source)).toBe(true)
+  })
+
+  it('retains observed traffic details on first subject selection and clears only inapplicable state when changed again', () => {
+    const store = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = 'general'
+    drafts.reimbursementOptions = {
+      templateConfigVersion: 3, reimbursementProcessCode: 'PROC-EXPENSE',
+      companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+      subjectOptions: [
+        { value: 'synthetic-traffic', label: '交通费', key: null, categoryId: 'local_transport' },
+        { value: 'synthetic-hotel', label: '住宿费', key: null, categoryId: 'lodging' },
+      ],
+    }
+    const source = durableFile('synthetic-invoice')
+    Object.assign(source.ocrResult, { categoryId: 'local_transport', transportType: 'ride_hailing', requiresItinerary: true })
+    drafts.files = [source]
+    store.upsertDraftOcrItem(source)
+    Object.assign(store.items[0]!, { itineraryFileIds: ['synthetic-trip'], paymentProofFileIds: ['synthetic-payment'] })
+    const id = store.items[0]!.id
+    expect(store.changeItemCategory(id, 'synthetic-traffic')).toBe(true)
+    expect(store.items[0]).toMatchObject({ category: 'local_transport', subjectValue: 'synthetic-traffic',
+      transportType: 'ride_hailing', requiresItinerary: true, itineraryFileIds: ['synthetic-trip'] })
+    const before = store.buildDraftExpenseItems()
+    expect(() => store.changeItemCategory(id, 'removed-subject')).toThrow('费用类别不可用')
+    expect(store.buildDraftExpenseItems()).toEqual(before)
+    expect(store.changeItemCategory(id, 'synthetic-hotel')).toBe(true)
+    expect(store.items[0]).toMatchObject({ category: 'lodging', subjectValue: 'synthetic-hotel',
+      transportType: 'other', requiresItinerary: false, itineraryFileIds: [], paymentProofFileIds: ['synthetic-payment'] })
+    expect(drafts.files).toEqual([source])
+  })
+
   it.each(['project', 'internal', 'overseas', 'same_city_project'] as const)('keeps locked %s totals independent of editable policy checks', async (tripType) => {
     const store = useExpenseStore()
     const draft = durableDraft([{ sourceFileId: 'historical-file', category: 'other', date: '2026-09-01',

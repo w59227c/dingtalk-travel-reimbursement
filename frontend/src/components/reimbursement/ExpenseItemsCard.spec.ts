@@ -255,6 +255,217 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each(([false, true] as const).flatMap(mobile =>
+    (['travel', 'general'] as const).map(kind => ({ mobile, kind })),
+  ))('selects and changes a category inline on unfinished rows without opening the editor ($kind, mobile=$mobile)', async ({ mobile, kind }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(), kind }
+    drafts.reimbursementOptions = {
+      templateConfigVersion: 3, reimbursementProcessCode: 'PROC-EXPENSE',
+      companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+      subjectOptions: [
+        { value: 'synthetic-office', label: '办公费', key: null, categoryId: 'office' },
+        { value: 'synthetic-hotel', label: '住宿费', key: null, categoryId: 'lodging' },
+      ],
+    }
+    expense.categories = [
+      { id: 'office', name: '办公费', order: 1, manualSelectable: true },
+      { id: 'lodging', name: '住宿费', order: 2, manualSelectable: true },
+      { id: 'system-only', name: '系统生成', order: 3, manualSelectable: false },
+    ]
+    const refresh = vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    const source = recognizedFile('invoice-1', '合成票据.png')
+    const payment = serverFile('payment-1', '合成付款.png', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
+    const hotel = serverFile('hotel-1', '合成住宿.png', 'ATTACHMENT_ONLY', { attachmentKind: 'hotel_bill' })
+    drafts.files = [source, payment, hotel]
+    expense.upsertDraftOcrItem(source)
+    Object.assign(expense.items[0]!, {
+      date: undefined, displayDate: '', amount: '', description: '尚未补全日期金额的费用',
+      paymentProofFileIds: [payment.id], hotelBillFileIds: [hotel.id],
+      originalCurrency: 'USD', originalAmount: '1234567890.1234',
+      originalDetailsEdited: true, cnyAmountConfirmed: false,
+    })
+    const original = { ...expense.items[0]! }
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const row = () => wrapper.get(mobile ? '.expense-mobile-card' : '.el-table__row')
+      const select = () => row().findComponent({ name: 'ElSelect' })
+      expect(select().props('multiple')).toBe(false)
+      expect(select().props('modelValue')).toBe(kind === 'general' ? '' : 'rail_fare')
+      expect(select().findAllComponents({ name: 'ElOption' }).map(option => option.props('value')))
+        .toEqual(kind === 'general' ? ['synthetic-office', 'synthetic-hotel'] : ['office', 'lodging'])
+      select().vm.$emit('update:modelValue', kind === 'general' ? 'synthetic-office' : 'office')
+      await flushPromises()
+      expect(expense.items[0]).toMatchObject({ category: 'office',
+        ...(kind === 'general' ? { subjectValue: 'synthetic-office' } : {}) })
+      expect(row().text()).toContain('办公费')
+      select().vm.$emit('update:modelValue', kind === 'general' ? 'synthetic-hotel' : 'lodging')
+      await flushPromises()
+      expect(expense.items[0]).toMatchObject({
+        id: original.id, sourceFileId: original.sourceFileId, source: original.source,
+        category: 'lodging', date: undefined, displayDate: '', amount: '', description: original.description,
+        paymentProofFileIds: [payment.id], hotelBillFileIds: [hotel.id],
+        originalCurrency: 'USD', originalAmount: '1234567890.1234', originalDetailsEdited: true,
+      })
+      expect(wrapper.findAllComponents({ name: 'ElDialog' }).some(dialog => dialog.props('modelValue'))).toBe(false)
+      expect(refresh).toHaveBeenCalledTimes(2)
+      expect(expense.hasEmployeeEditsForOcrFile(source)).toBe(true)
+      const savedItems = expense.buildDraftExpenseItems()
+      expense.hydrateFromDraft({ ...drafts.currentDraft!, input: { ...drafts.currentDraft!.input, items: savedItems } }, drafts.files)
+      await flushPromises()
+      expect(expense.buildDraftExpenseItems()).toEqual(savedItems)
+      expect(select().props('modelValue')).toBe(kind === 'general' ? 'synthetic-hotel' : 'lodging')
+      expect(drafts.files).toHaveLength(3)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile =>
+    (['travel', 'general'] as const).map(kind => ({ mobile, kind })),
+  ))('keeps another expense linked to a shared itinerary after an inline category change ($kind, mobile=$mobile)', async ({ mobile, kind }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(), kind }
+    drafts.reimbursementOptions = {
+      templateConfigVersion: 3, reimbursementProcessCode: 'PROC-EXPENSE',
+      companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+      subjectOptions: [
+        { value: 'synthetic-traffic', label: '交通费', key: null, categoryId: 'local_transport' },
+        { value: 'synthetic-office', label: '办公费', key: null, categoryId: 'office' },
+      ],
+    }
+    expense.categories = [
+      { id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true },
+      { id: 'office', name: '办公费', order: 2, manualSelectable: true },
+    ]
+    vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    const itinerary = recognizedItinerary()
+    const payment = serverFile('payment-1', '合成付款.png', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
+    drafts.files = [itinerary, payment]
+    expense.items = ['第一笔合成行程', '第二笔合成行程'].map((description, index) => ({
+      id: `synthetic-row-${index}`, category: 'local_transport', source: 'manual',
+      ...(kind === 'general' ? { subjectValue: 'synthetic-traffic' } : {}),
+      date: '2026-09-01', displayDate: '9月1日', description, amount: '60.00', receiptCount: 1,
+      transportType: 'ride_hailing', requiresItinerary: true, itineraryFileIds: [itinerary.id],
+      itineraryAutoMatchDisabled: true, paymentProofFileIds: [payment.id],
+    }))
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const rows = () => wrapper.findAll(mobile ? '.expense-mobile-card' : '.el-table__row')
+      rows()[0]!.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', kind === 'general' ? 'synthetic-office' : 'office')
+      await flushPromises()
+      expect(expense.items[0]).toMatchObject({ category: 'office', itineraryFileIds: [], itineraryAutoMatchDisabled: true,
+        paymentProofFileIds: [payment.id], transportType: 'other', requiresItinerary: false })
+      expect(expense.items[1]).toMatchObject({ category: 'local_transport', itineraryFileIds: [itinerary.id],
+        itineraryAutoMatchDisabled: true, paymentProofFileIds: [payment.id], transportType: 'ride_hailing' })
+      expect(rows()[1]!.text()).toContain(itinerary.name)
+      expect(wrapper.find('[data-testid="material-workbench"]').exists()).toBe(false)
+      expect(drafts.files.map(file => file.id)).toEqual([itinerary.id, payment.id])
+      expect(deleteReimbursementDraftFile).not.toHaveBeenCalled()
+      const savedItems = expense.buildDraftExpenseItems()
+      expense.hydrateFromDraft({ ...drafts.currentDraft!, input: { ...drafts.currentDraft!.input, items: savedItems } }, drafts.files)
+      await flushPromises()
+      expect(expense.buildDraftExpenseItems()).toEqual(savedItems)
+      expect(rows()[1]!.text()).toContain(itinerary.name)
+      rows()[1]!.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', kind === 'general' ? 'synthetic-office' : 'office')
+      await flushPromises()
+      const pending = wrapper.get('[data-testid="material-workbench"]')
+      expect(pending.text()).toContain('待关联材料')
+      expect(wrapper.get(`[data-material-file-id="${itinerary.id}"]`).text()).toContain(itinerary.name)
+      expect(drafts.files.map(file => file.id)).toEqual([itinerary.id, payment.id])
+      expect(deleteReimbursementDraftFile).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile =>
+    (['travel', 'general'] as const).map(kind => ({ mobile, kind })),
+  ))('requires hotel and payment proofs immediately after changing a high-speed rail expense to lodging ($kind, mobile=$mobile)', async ({ mobile, kind }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(), kind }
+    drafts.reimbursementOptions = {
+      templateConfigVersion: 3, reimbursementProcessCode: 'PROC-EXPENSE',
+      companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+      subjectOptions: [
+        { value: 'synthetic-traffic', label: '交通费', key: null, categoryId: 'local_transport' },
+        { value: 'synthetic-hotel', label: '住宿费', key: null, categoryId: 'lodging' },
+      ],
+    }
+    expense.categories = [
+      { id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true },
+      { id: 'lodging', name: '住宿费', order: 2, manualSelectable: true },
+    ]
+    vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    const source = recognizedFile('invoice-1', '合成高铁.png', '600.00')
+    Object.assign(source.ocrResult, { railType: 'high_speed', transportType: 'rail' })
+    const hotel = serverFile('hotel-1', '合成住宿.png', 'ATTACHMENT_ONLY', { attachmentKind: 'hotel_bill' })
+    const payment = serverFile('payment-1', '合成付款.png', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
+    drafts.files = [source, hotel, payment]
+    expense.upsertDraftOcrItem(source)
+    if (kind === 'general') expense.changeItemCategory(expense.items[0]!.id, 'synthetic-traffic')
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const row = () => wrapper.get(mobile ? '.expense-mobile-card' : '.el-table__row')
+      expect(row().find('[data-testid="payment-proof-needed"]').exists()).toBe(false)
+      row().findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', kind === 'general' ? 'synthetic-hotel' : 'lodging')
+      await flushPromises()
+      expect(row().get('[data-testid="hotel-bill-needed"]').text()).toContain('待补住宿明细')
+      expect(row().get('[data-testid="payment-proof-needed"]').text()).toContain('待补付款凭证')
+      expect(expense.items[0]).toMatchObject({ category: 'lodging', railType: 'unknown', amount: '600.00', sourceFileId: source.id })
+      await openProofPicker(wrapper, '住宿明细')
+      await confirmProofSelection(wrapper, [hotel.id], '住宿明细')
+      await openProofPicker(wrapper)
+      await confirmProofSelection(wrapper, [payment.id])
+      expect(row().find('[data-testid="hotel-bill-needed"]').exists()).toBe(false)
+      expect(row().find('[data-testid="payment-proof-needed"]').exists()).toBe(false)
+      expect(row().text()).toContain(hotel.name)
+      expect(row().text()).toContain(payment.name)
+      expect(expense.items[0]).toMatchObject({ hotelBillFileIds: [hotel.id], paymentProofFileIds: [payment.id] })
+      expect(drafts.files).toHaveLength(3)
+    } finally { wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile =>
+    ['readonly', 'expired', 'busy', 'loading', 'unavailable', 'editor'].map(state => ({ mobile, state })),
+  ))('blocks inline category changes while $state, mobile=$mobile', async ({ mobile, state }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    expense.categories = [
+      { id: 'other', name: '其他', order: 1, manualSelectable: true },
+      { id: 'lodging', name: '住宿费', order: 2, manualSelectable: true },
+    ]
+    expense.items = [{ id: 'synthetic-row', source: 'manual', category: 'other', date: undefined,
+      displayDate: '', description: '合成待补费用', amount: '', receiptCount: 1 }]
+    const readonly = ref(false)
+    const wrapper = mount({ setup: () => () => h(ExpenseItemsCard, { mobile, readonly: readonly.value }) },
+      { global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const select = wrapper.get(mobile ? '.expense-mobile-card' : '.el-table__row').findComponent({ name: 'ElSelect' })
+      if (state === 'readonly') readonly.value = true
+      if (state === 'expired') drafts.currentDraft.status = 'EXPIRED'
+      if (state === 'busy') drafts.processingFiles = true
+      if (state === 'loading') expense.categoriesLoading = true
+      if (state === 'unavailable') expense.categoryLoadError = '类别加载失败'
+      if (state === 'editor') await wrapper.findAll('button').find(button => button.text() === '编辑')!.trigger('click')
+      await flushPromises()
+      if (state === 'readonly') expect(wrapper.find('.expense-category-select').exists()).toBe(false)
+      else {
+        expect(select.props('disabled')).toBe(true)
+        select.vm.$emit('update:modelValue', 'lodging')
+        await flushPromises()
+      }
+      expect(expense.items[0]!.category).toBe('other')
+    } finally { wrapper.unmount() }
+  })
+
   it.each([false, true])('uploads a manual aggregate photo without OCR and restores count and attachment (mobile=%s)', async (mobile) => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通费', order: 1, manualSelectable: true }]
@@ -3827,7 +4038,7 @@ describe('ExpenseItemsCard durable files', () => {
       try {
         await flushPromises()
         const row = wrapper.get(mobile ? '.expense-mobile-card' : '.el-table__row')
-        expect(row.get(mobile ? '.mobile-expense-title > strong' : '.expense-category-cell > span').text()).toBe('福利费')
+        expect(row.get('.expense-category-select .el-select__placeholder').text()).toBe('福利费')
         expect(row.text()).not.toContain('福利费 · 快递')
         expect(expense.items[0]?.welfareType).toBe(welfareType)
         expect(row.find('[aria-label="运单明细"]').exists()).toBe(welfareType === 'express')
@@ -4021,7 +4232,7 @@ describe('ExpenseItemsCard durable files', () => {
     expect(operationColumn?.props('fixed')).toBe(false)
     expect(operationColumn?.props('width')).toBe(145)
     const columns = wrapper.findAllComponents({ name: 'ElTableColumn' })
-    expect(columns.find((column) => column.props('label') === '类型')?.props('width')).toBe(120)
+    expect(columns.find((column) => column.props('label') === '类型')?.props('width')).toBe(180)
     expect(columns.find((column) => column.props('label') === '日期')?.props('width')).toBe(120)
     expect(columns.find((column) => column.props('label') === '说明')?.props('minWidth')).toBe(200)
     expect(columns.find((column) => column.props('label') === '金额 / 张数')?.props('width')).toBe(120)

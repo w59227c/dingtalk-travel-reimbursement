@@ -368,6 +368,19 @@ const durableMutationDisabledReason = computed(() => {
 })
 const durableActionDisabledReason = computed(() => durableMutationDisabledReason.value
   || (durableBusy.value ? receiptOperationStatus.value : ''))
+const inlineCategoryDisabled = computed(() => !isDurableDraftEditable()
+  || durableBusy.value || batchActive.value || hasOpenMaterialEditor.value
+  || categoryOptionsLoading.value || Boolean(categoryOptionsError.value)
+  || !expenseCategoryOptions.value.length)
+
+function changeItemCategory(itemId: string, value: unknown): void {
+  if (inlineCategoryDisabled.value || typeof value !== 'string') return
+  try {
+    if (expense.changeItemCategory(itemId, value)) void expense.refreshCalculations()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : `${expenseCategoryLabel.value}修改失败`)
+  }
+}
 const canAddExpenseItem = computed(
   () =>
     !props.readonly
@@ -2405,11 +2418,31 @@ async function retryItemRecognition(id: string): Promise<void> {
     >
       <el-table-column
         label="类型"
-        :width="120"
+        :width="180"
       >
         <template #default="scope">
           <div class="expense-category-cell">
-            <span>{{ expenseCategoryName(scope.row) }}</span>
+            <el-select
+              v-if="!props.readonly && !props.mobile"
+              :model-value="expense.generalMode ? scope.row.subjectValue ?? '' : scope.row.category"
+              :aria-label="`${expenseCategoryLabel}：${scope.row.description || '本笔费用'}`"
+              :placeholder="`选择${expenseCategoryLabel}`"
+              :disabled="inlineCategoryDisabled"
+              :loading="categoryOptionsLoading"
+              class="expense-category-select"
+              @update:model-value="changeItemCategory(scope.row.id, $event)"
+            >
+              <template #label>
+                {{ expenseCategoryName(scope.row) }}
+              </template>
+              <el-option
+                v-for="option in expenseCategoryOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+            <span v-else>{{ expenseCategoryName(scope.row) }}</span>
             <el-tag
               v-if="scope.row.source === 'ocr'
                 || isDurableRecognitionRunning(durableFileByItemId(scope.row.id))"
@@ -2662,7 +2695,27 @@ async function retryItemRecognition(id: string): Promise<void> {
       >
         <header class="mobile-expense-heading expense-item-card__header">
           <div class="mobile-expense-title">
-            <strong>{{ expenseCategoryName(item) }}</strong>
+            <el-select
+              v-if="!props.readonly && props.mobile"
+              :model-value="expense.generalMode ? item.subjectValue ?? '' : item.category"
+              :aria-label="`${expenseCategoryLabel}：${item.description || '本笔费用'}`"
+              :placeholder="`选择${expenseCategoryLabel}`"
+              :disabled="inlineCategoryDisabled"
+              :loading="categoryOptionsLoading"
+              class="expense-category-select"
+              @update:model-value="changeItemCategory(item.id, $event)"
+            >
+              <template #label>
+                {{ expenseCategoryName(item) }}
+              </template>
+              <el-option
+                v-for="option in expenseCategoryOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
+            <strong v-else>{{ expenseCategoryName(item) }}</strong>
             <el-tag
               v-if="item.source === 'ocr'
                 || isDurableRecognitionRunning(durableFileByItemId(item.id))"
@@ -4069,6 +4122,9 @@ async function retryItemRecognition(id: string): Promise<void> {
 .upload-guidance--mobile :deep(.el-alert__title) { font-size: 14px; }
 .upload-guidance--mobile :deep(.el-alert__description) { margin-top: 2px; line-height: 1.5; }
 .mobile-expense-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.expense-category-select { width: 100%; min-width: 0; }
+.expense-category-cell { width: 100%; }
+.mobile-expense-title > .expense-category-select { flex: 1 1 100%; }
 .batch-progress { margin-top: 16px; padding: 16px; border: 1px solid var(--el-border-color-light); border-radius: 8px; }
 .batch-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 12px; padding-top: 12px; }
 .batch-file > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
