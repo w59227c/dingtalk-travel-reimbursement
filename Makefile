@@ -2,7 +2,7 @@
 	backend-install backend-test backend-lint backend-format \
 	frontend-install frontend-test frontend-typecheck frontend-lint frontend-build \
 	compose-config compose-config-development nginx-policy-check \
-	ocr-models-check ocr-runtime-check verify deploy-check clean \
+	ocr-models-check ocr-runtime-check ocr-memory-check verify deploy-check clean \
 	dev dev-backend dev-frontend \
 	dev-dingtalk dev-dingtalk-backend dev-dingtalk-frontend \
 	dev-dingtalk-prod dev-dingtalk-prod-backend dev-dingtalk-prod-frontend \
@@ -49,9 +49,18 @@ ocr-models-check:
 		--detection backend/models/onnx/PP-OCRv6_small_det \
 		--recognition backend/models/onnx/PP-OCRv6_small_rec
 
+OCR_MEMORY_PROFILE ?= standard
+
 ocr-runtime-check:
 	cd backend && PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1 \
 		uv run --frozen --extra dev --extra ocr python ../scripts/check-ocr-runtime.py \
+			--detection models/onnx/PP-OCRv6_small_det \
+			--recognition models/onnx/PP-OCRv6_small_rec --fixtures tests/fixtures/ocr \
+			--memory-profile $(OCR_MEMORY_PROFILE)
+
+ocr-memory-check:
+	cd backend && PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=1 \
+		uv run --frozen --extra dev --extra ocr python ../scripts/check-ocr-memory.py \
 			--detection models/onnx/PP-OCRv6_small_det \
 			--recognition models/onnx/PP-OCRv6_small_rec --fixtures tests/fixtures/ocr
 

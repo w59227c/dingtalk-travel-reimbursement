@@ -102,6 +102,7 @@ def recognize_itinerary_worker(
                         Path(recognition),
                         str(raw_ocr_settings["ocr_engine"]),
                         int(raw_ocr_settings["ocr_cpu_threads"]),
+                        str(raw_ocr_settings.get("ocr_memory_profile", "standard")),
                     )
                 )
             if engine.is_fake:

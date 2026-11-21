@@ -77,7 +77,7 @@ make compose-config-development
 make nginx-policy-check
 ```
 
-跨层、数据库结构、状态机、安全、OCR、Excel 或 OA 提交相关改动，应运行上面所有适用检查。仅在具备生产必需配置时运行 `make compose-config`。修改 OCR 制品、运行时、Docker 镜像或部署行为时，还要运行 `make ocr-models-check` 及相关 OCR/镜像 smoke 检查。
+跨层、数据库结构、状态机、安全、OCR、Excel 或 OA 提交相关改动，应运行上面所有适用检查。仅在具备生产必需配置时运行 `make compose-config`。修改 OCR 制品、运行时、Docker 镜像或部署行为时，还要运行 `make ocr-models-check`、标准/低内存模式的 `make ocr-runtime-check`、`make ocr-memory-check` 及相关镜像 smoke 检查。
 
 - 前端行为变更需要有意义的 Vitest 覆盖；桌面端与移动端共享行为必须测试两种模式。
 - 保存回读的 mock/fixture 应覆盖真实后端序列化，不能只原样返回请求；至少检查正常回读、成功但响应丢失、自有删除和真实并发差异，防止格式变化误报冲突或掩盖内容变化。

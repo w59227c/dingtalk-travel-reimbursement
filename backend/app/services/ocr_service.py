@@ -151,6 +151,17 @@ class OcrService:
         self._engine = engine
         self._process_runner = process_runner
 
+    def _worker_settings(self) -> dict[str, object]:
+        detection = self._settings.ocr_detection_model_dir
+        recognition = self._settings.ocr_recognition_model_dir
+        return {
+            "ocr_detection_model_dir": str(detection) if detection else None,
+            "ocr_recognition_model_dir": str(recognition) if recognition else None,
+            "ocr_engine": self._settings.ocr_engine,
+            "ocr_cpu_threads": self._settings.ocr_cpu_threads,
+            "ocr_memory_profile": self._settings.ocr_memory_profile,
+        }
+
     async def ensure_ready(self) -> None:
         if not self._settings.ocr_enabled:
             return
@@ -166,12 +177,7 @@ class OcrService:
         try:
             result = await self._process_runner.run(
                 verify_ocr_runtime_worker,
-                {
-                    "ocr_detection_model_dir": str(detection),
-                    "ocr_recognition_model_dir": str(recognition),
-                    "ocr_engine": self._settings.ocr_engine,
-                    "ocr_cpu_threads": self._settings.ocr_cpu_threads,
-                },
+                self._worker_settings(),
                 self._settings.ocr_worker_limits,
                 timeout_seconds=self._settings.ocr_timeout_seconds,
             )
@@ -194,19 +200,12 @@ class OcrService:
         """Classify and parse from the same bounded extraction, never from a filename."""
         if not self._settings.ocr_enabled:
             raise ApiError("OCR_DISABLED", "自动识别尚未配置，请确认材料用途", 503)
-        detection = self._settings.ocr_detection_model_dir
-        recognition = self._settings.ocr_recognition_model_dir
         try:
             result = await self._process_runner.run(
                 recognize_itinerary_worker,
                 str(stored.path),
                 stored.extension,
-                {
-                    "ocr_detection_model_dir": str(detection) if detection else None,
-                    "ocr_recognition_model_dir": str(recognition) if recognition else None,
-                    "ocr_engine": self._settings.ocr_engine,
-                    "ocr_cpu_threads": self._settings.ocr_cpu_threads,
-                },
+                self._worker_settings(),
                 self._settings.pdf_limits,
                 self._settings.ocr_worker_limits,
                 reference_year,
@@ -254,19 +253,12 @@ class OcrService:
     ) -> dict[str, object]:
         if not self._settings.ocr_enabled:
             raise ApiError("OCR_DISABLED", "自动识别尚未配置，请人工关联行程单", 503)
-        detection = self._settings.ocr_detection_model_dir
-        recognition = self._settings.ocr_recognition_model_dir
         try:
             result = await self._process_runner.run(
                 recognize_itinerary_worker,
                 str(stored.path),
                 stored.extension,
-                {
-                    "ocr_detection_model_dir": str(detection) if detection else None,
-                    "ocr_recognition_model_dir": str(recognition) if recognition else None,
-                    "ocr_engine": self._settings.ocr_engine,
-                    "ocr_cpu_threads": self._settings.ocr_cpu_threads,
-                },
+                self._worker_settings(),
                 self._settings.pdf_limits,
                 self._settings.ocr_worker_limits,
                 reference_year,
@@ -340,12 +332,7 @@ class OcrService:
                 recognize_document_worker,
                 str(stored.path),
                 stored.extension,
-                {
-                    "ocr_detection_model_dir": str(detection),
-                    "ocr_recognition_model_dir": str(recognition),
-                    "ocr_engine": self._settings.ocr_engine,
-                    "ocr_cpu_threads": self._settings.ocr_cpu_threads,
-                },
+                self._worker_settings(),
                 self._settings.pdf_limits,
                 self._settings.ocr_worker_limits,
                 prefer_pdf_text,

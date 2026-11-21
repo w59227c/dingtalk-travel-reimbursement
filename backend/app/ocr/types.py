@@ -109,6 +109,7 @@ class OcrEngineConfig(Protocol):
     ocr_recognition_model_dir: Path | None
     ocr_engine: str
     ocr_cpu_threads: int
+    ocr_memory_profile: str
 
 
 class BaseReceiptParser(Protocol):

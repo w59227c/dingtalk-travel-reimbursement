@@ -137,10 +137,25 @@ backend_options=(
 echo 'Checking real OCR initialization and inference with networking disabled'
 # Mount the checker as a real script so its OCR worker can spawn. Only the
 # checker and synthetic inputs are mounted; the runtime and models are bundled.
+for memory_profile in standard low; do
+  docker run --rm --name "$offline_container" --network none "${backend_options[@]}" \
+    --mount "type=bind,src=$repository_root/scripts/check-ocr-runtime.py,dst=/ocr-check.py,readonly" \
+    --mount "type=bind,src=$repository_root/backend/tests/fixtures/ocr,dst=/ocr-fixtures,readonly" \
+    --env PYTHONPATH=/app --env TMPDIR=/tmp/expense --entrypoint python "$backend_image" /ocr-check.py \
+    --detection /opt/expense/models/PP-OCRv6_small_det \
+    --recognition /opt/expense/models/PP-OCRv6_small_rec --fixtures /ocr-fixtures \
+    --memory-profile "$memory_profile"
+done
+
+# Exercise alternating image sizes in one real engine under a hard container
+# limit; constructor mocks cannot catch native allocator or tensor regressions.
 docker run --rm --name "$offline_container" --network none "${backend_options[@]}" \
-  --mount "type=bind,src=$repository_root/scripts/check-ocr-runtime.py,dst=/ocr-check.py,readonly" \
+  --memory 700m --memory-swap 700m \
+  --mount "type=bind,src=$repository_root/scripts/check-ocr-memory.py,dst=/ocr-memory.py,readonly" \
   --mount "type=bind,src=$repository_root/backend/tests/fixtures/ocr,dst=/ocr-fixtures,readonly" \
-  --env PYTHONPATH=/app --env TMPDIR=/tmp/expense --entrypoint python "$backend_image" /ocr-check.py \
+  --env PYTHONPATH=/app --env TMPDIR=/tmp/expense --env OCR_CPU_THREADS=2 \
+  --env OPENBLAS_NUM_THREADS=1 --env OMP_NUM_THREADS=2 \
+  --entrypoint python "$backend_image" /ocr-memory.py \
   --detection /opt/expense/models/PP-OCRv6_small_det \
   --recognition /opt/expense/models/PP-OCRv6_small_rec --fixtures /ocr-fixtures
 

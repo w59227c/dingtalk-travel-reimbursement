@@ -31,7 +31,7 @@ from app.ocr.worker_limits import worker_resource_failure as _resource_failure
 _DATE_SIGNAL = re.compile(r"20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}|\d{1,2}月\d{1,2}日")
 _MONEY_SIGNAL = re.compile(r"[¥￥]\s*\d|价税合计|票价|金额")
 _PASSENGER_ROUTE_HEADERS = ("出发地", "到达地", "交通工具类型")
-_ENGINES: dict[tuple[str, str, str, int], PaddleLocalOcrEngine] = {}
+_ENGINES: dict[tuple[str, str, str, int, str], PaddleLocalOcrEngine] = {}
 
 
 def _passenger_fields(plain_text: str, layout_text: str) -> tuple[date | None, str | None]:
@@ -69,6 +69,7 @@ class WorkerOcrSettings:
     ocr_recognition_model_dir: Path
     ocr_engine: str
     ocr_cpu_threads: int
+    ocr_memory_profile: str = "standard"
 
 
 def _pdf_text_is_sufficient(text: str) -> bool:
@@ -150,6 +151,7 @@ def cached_ocr_engine(settings: WorkerOcrSettings) -> PaddleLocalOcrEngine:
         str(settings.ocr_recognition_model_dir),
         settings.ocr_engine,
         settings.ocr_cpu_threads,
+        settings.ocr_memory_profile,
     )
     engine = _ENGINES.get(key)
     if engine is None:
@@ -202,6 +204,7 @@ def recognize_document_worker(
             ocr_recognition_model_dir=Path(raw_ocr_settings["ocr_recognition_model_dir"]),
             ocr_engine=str(raw_ocr_settings["ocr_engine"]),
             ocr_cpu_threads=int(raw_ocr_settings["ocr_cpu_threads"]),
+            ocr_memory_profile=str(raw_ocr_settings.get("ocr_memory_profile", "standard")),
         )
         engine = cached_ocr_engine(settings)
         lines = engine.recognize(path)
@@ -231,6 +234,7 @@ def verify_ocr_runtime_worker(
             ocr_recognition_model_dir=Path(raw_ocr_settings["ocr_recognition_model_dir"]),
             ocr_engine=str(raw_ocr_settings["ocr_engine"]),
             ocr_cpu_threads=int(raw_ocr_settings["ocr_cpu_threads"]),
+            ocr_memory_profile=str(raw_ocr_settings.get("ocr_memory_profile", "standard")),
         )
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temporary:
             path = Path(temporary.name)

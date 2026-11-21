@@ -1,0 +1,11 @@
+# Optional overlay for a small Linux test host, after deploying a version that
+# supports OCR_MEMORY_PROFILE. Keep the normal deployment defaults unchanged.
+services:
+  backend:
+    environment:
+      OCR_MEMORY_PROFILE: low
+      OCR_CPU_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "2"
+    cpus: "1.5"
+    mem_limit: 1g

@@ -6,11 +6,14 @@ from types import ModuleType
 
 import pytest
 
+from app.core.errors import ApiError
 from app.ocr import engine as engine_module
+from app.ocr import workers
 from app.ocr.engine import FakeOcrEngine, OcrRuntimeError, PaddleLocalOcrEngine
 from app.ocr.types import OcrLine
 from app.ocr.workers import verify_ocr_runtime_worker
 from app.services.ocr_service import OcrService
+from app.services.process_jobs import ProcessJobBusy
 from app.services.temp_files import StoredFile
 
 
@@ -20,15 +23,18 @@ async def test_production_startup_runs_real_ocr_runtime_smoke(
 ) -> None:
     class RecordingRunner:
         function = None
+        settings = None
 
-        async def run(self, function, *_args, **_kwargs):
+        async def run(self, function, *args, **_kwargs):
             self.function = function
+            self.settings = args[0]
             return {"ok": True}
 
     settings = settings_factory(
         ocr_enabled=True,
         ocr_detection_model_dir=tmp_path / "det",
         ocr_recognition_model_dir=tmp_path / "rec",
+        ocr_memory_profile="low",
     )
     settings.app_env = "production"
     runner = RecordingRunner()
@@ -36,6 +42,64 @@ async def test_production_startup_runs_real_ocr_runtime_smoke(
     await OcrService(settings, None, runner).ensure_ready()  # type: ignore[arg-type]
 
     assert runner.function is verify_ocr_runtime_worker
+    assert runner.settings["ocr_memory_profile"] == "low"
+
+
+@pytest.mark.parametrize("memory_profile", ["standard", "low"])
+@pytest.mark.parametrize(
+    "operation",
+    ["recognize_file", "recognize_material_file", "recognize_itinerary_file"],
+)
+async def test_every_ocr_service_entry_forwards_profile_and_preserves_limits(
+    settings_factory, tmp_path, operation, memory_profile
+):
+    settings = settings_factory(
+        ocr_enabled=True,
+        ocr_detection_model_dir=tmp_path / "det",
+        ocr_recognition_model_dir=tmp_path / "rec",
+        ocr_memory_profile=memory_profile,
+    )
+
+    class BusyRunner:
+        calls = 0
+
+        async def run(self, _function, *args, timeout_seconds):
+            self.calls += 1
+            assert args[2]["ocr_memory_profile"] == memory_profile
+            assert args[3] == settings.pdf_limits
+            assert args[4] == settings.ocr_worker_limits
+            assert timeout_seconds == settings.ocr_timeout_seconds
+            raise ProcessJobBusy()
+
+    runner = BusyRunner()
+    service = OcrService(settings, None, runner)
+    stored = StoredFile("sample", tmp_path / "sample.png", "png", "image/png", 1, "sample.png")
+    with pytest.raises(ApiError) as error:
+        await getattr(service, operation)(stored, reference_year=2026)
+    assert error.value.code == "OCR_BUSY"
+    assert error.value.status_code == 429
+    assert runner.calls == 1
+
+
+def test_cached_ocr_engine_is_rebuilt_when_memory_profile_changes(monkeypatch, tmp_path):
+    created = []
+
+    class Engine:
+        def __init__(self, settings):
+            created.append(settings.ocr_memory_profile)
+
+    monkeypatch.setattr(workers, "PaddleLocalOcrEngine", Engine)
+    workers._ENGINES.clear()
+    try:
+        standard = workers.WorkerOcrSettings(tmp_path / "det", tmp_path / "rec", "onnxruntime", 2)
+        low = workers.WorkerOcrSettings(tmp_path / "det", tmp_path / "rec", "onnxruntime", 2, "low")
+        first = workers.cached_ocr_engine(standard)
+        assert workers.cached_ocr_engine(standard) is first
+        assert workers.cached_ocr_engine(low) is not first
+        assert created == ["standard", "low"]
+        assert len(workers._ENGINES) == 1
+    finally:
+        workers._ENGINES.clear()
 
 
 async def test_pdf_text_missing_amount_falls_back_once_to_paddle(
@@ -301,10 +365,12 @@ def test_production_rejects_fake_and_missing_models(
         PaddleLocalOcrEngine(settings).ensure_ready()
 
 
-def test_default_onnx_runtime_selects_cpu_and_honors_thread_limit(
+@pytest.mark.parametrize("memory_profile", ["standard", "low"])
+def test_onnx_runtime_selects_cpu_and_honors_memory_profile(
     monkeypatch,
     settings_factory,
     tmp_path: Path,
+    memory_profile: str,
 ) -> None:
     received: dict[str, object] = {}
 
@@ -327,15 +393,25 @@ def test_default_onnx_runtime_selects_cpu_and_honors_thread_limit(
             ocr_detection_model_dir=tmp_path / "det",
             ocr_recognition_model_dir=tmp_path / "rec",
             ocr_cpu_threads=3,
+            ocr_memory_profile=memory_profile,
         )
     ).ensure_ready()
 
     assert received["engine"] == "onnxruntime"
-    assert received["engine_config"] == {
+    expected = {
         "providers": ["CPUExecutionProvider"],
         "intra_op_num_threads": 3,
         "execution_mode": "sequential",
     }
+    if memory_profile == "low":
+        expected.update(enable_cpu_mem_arena=False, enable_mem_pattern=False)
+        assert received["text_recognition_batch_size"] == 1
+        assert received["text_det_limit_side_len"] == 1280
+        assert received["text_det_limit_type"] == "max"
+    else:
+        assert "text_recognition_batch_size" not in received
+        assert "text_det_limit_side_len" not in received
+    assert received["engine_config"] == expected
 
 
 def test_paddle_result_contract_rejects_mismatch_without_runtime(

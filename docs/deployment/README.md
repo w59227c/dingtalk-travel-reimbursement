@@ -62,6 +62,21 @@ docker compose up -d --wait --wait-timeout 300
 
 OCR 镜像内置经过校验的 PP-OCRv6 small ONNX 模型，默认使用 ONNX Runtime CPU。旧 `.env` 的 `OCR_ENGINE=paddle_static` 由新版映射到默认引擎，镜像内模型路径保持兼容。`OCR_CPU_THREADS` 控制每个模型的算子线程数，使用目标服务器的批量样本决定线程配置。
 
+## 低内存测试机
+
+默认 `OCR_MEMORY_PROFILE=standard` 适用于正常资源配置。约 2 核、1.6 GiB 的测试主机可使用本目录的 `compose.low-memory.yaml` 作为覆盖配置：后端限制为 1 GiB / 1.5 核、OCR 算子 2 线程、BLAS 1 线程，并启用 `OCR_MEMORY_PROFILE=low`。该模式减少检测工作图及模型临时缓存内存，保留原始材料与相同模型，密集小字可能漏检，须核对业务样本；这不是对任意允许上传文件的内存保证。
+
+必须先确认目标镜像已支持 `OCR_MEMORY_PROFILE`，再按上方更新流程备份并启用覆盖。仅把旧镜像限制到 1 GiB 不会获得该优化。将该文件放到服务器 `compose.yaml` 同目录并命名为 `compose.override.yaml`，Docker Compose 会自动合并，无需改 `.env` 或日常命令：
+
+```bash
+# 若已有 compose.override.yaml，先保留并合并原配置，不要直接覆盖。
+cp compose.low-memory.yaml compose.override.yaml
+docker compose config --quiet
+docker compose up -d --wait --wait-timeout 300
+```
+
+移除该覆盖文件并重建容器即可恢复基础配置。宿主仍须为操作系统、Web、文件校验进程和页缓存保留内存；以批量业务材料实测宿主 MemAvailable、PSI 和 cgroup OOM 计数，不仅看容器是否健康。正式服务器继续使用标准模式，低内存配置仅供测试机按需启用。
+
 ## 回滚
 
 先停止接单及 worker，记录当前数据库 revision，并核对目标后端镜像的 `alembic heads`、数据库约束和快照格式兼容性。**不能仅改镜像标签就跨数据库版本回滚**：旧镜像无法识别新 revision，启动时的 `alembic upgrade head` 会失败；部分降级还会因业务记录或审计证据而被明确拒绝。

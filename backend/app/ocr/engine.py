@@ -53,6 +53,8 @@ class PaddleLocalOcrEngine:
             if self._pipeline is not None:
                 return
             started = time.perf_counter()
+            if self._settings.ocr_memory_profile not in {"standard", "low"}:
+                raise OcrRuntimeError("本地 OCR 内存配置无效")
             detection, recognition = self._validate_models()
             try:
                 if metadata.version("paddleocr") != "3.7.0":
@@ -65,14 +67,25 @@ class PaddleLocalOcrEngine:
             except ImportError as exc:
                 raise OcrRuntimeError("本地 OCR 运行依赖无法加载") from exc
             try:
+                engine_config: dict[str, Any] = {
+                    "providers": ["CPUExecutionProvider"],
+                    "intra_op_num_threads": self._settings.ocr_cpu_threads,
+                    "execution_mode": "sequential",
+                }
+                pipeline_options: dict[str, Any] = {}
+                if self._settings.ocr_memory_profile == "low":
+                    # Bound detection feature maps while recognition crops
+                    # still use the original image and the same locked models.
+                    engine_config.update(enable_cpu_mem_arena=False, enable_mem_pattern=False)
+                    pipeline_options.update(
+                        text_det_limit_side_len=1280,
+                        text_det_limit_type="max",
+                        text_recognition_batch_size=1,
+                    )
                 self._pipeline = PaddleOCR(
                     device="cpu",
                     engine=self._settings.ocr_engine,
-                    engine_config={
-                        "providers": ["CPUExecutionProvider"],
-                        "intra_op_num_threads": self._settings.ocr_cpu_threads,
-                        "execution_mode": "sequential",
-                    },
+                    engine_config=engine_config,
                     text_detection_model_name="PP-OCRv6_small_det",
                     text_detection_model_dir=str(detection),
                     text_recognition_model_name="PP-OCRv6_small_rec",
@@ -80,6 +93,7 @@ class PaddleLocalOcrEngine:
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False,
                     use_textline_orientation=False,
+                    **pipeline_options,
                 )
             except Exception as exc:
                 raise OcrRuntimeError("本地 OCR 初始化失败") from exc

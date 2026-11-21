@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--detection", type=Path, required=True)
     parser.add_argument("--recognition", type=Path, required=True)
     parser.add_argument("--fixtures", type=Path, required=True)
+    parser.add_argument("--memory-profile", choices=("standard", "low"), default="standard")
     arguments = parser.parse_args(argv)
 
     current_platform = (platform.system(), platform.machine())
@@ -136,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
                     app_env="test",
                     ocr_enabled=True,
                     ocr_fake_enabled=False,
+                    ocr_memory_profile=arguments.memory_profile,
                     ocr_detection_model_dir=arguments.detection,
                     ocr_recognition_model_dir=arguments.recognition,
                 ),
@@ -146,7 +148,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ONNX Runtime 本地 OCR 检查失败：{type(exc).__name__}", file=sys.stderr)
         return 1
 
-    print("ONNX Runtime CPU 已通过合成出租车票据与扫描行程单的字段检查")
+    print(
+        f"ONNX Runtime CPU ({arguments.memory_profile}) "
+        "已通过合成出租车票据与扫描行程单的字段检查"
+    )
     return 0
 
 

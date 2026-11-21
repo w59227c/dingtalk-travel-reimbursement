@@ -74,6 +74,7 @@ make deploy
 
 ## 运维与隐私
 
+- `OCR_MEMORY_PROFILE` 默认 `standard`。小内存测试机可以使用 `low`，限制检测工作图尺寸、逐个识别裁片并关闭 ONNX Runtime CPU 内存缓存；原件、模型、文件安全校验和 OCR 单槽保持原契约。该模式可能漏检密集小字，需核对实际业务样本。Docker 配套资源覆盖见[低内存测试机](deployment/README.md#低内存测试机)，不要只提高容器上限来掩盖宿主内存不足。
 - 小内存主机排查上传或 OCR 超时时，优先在一个长连接中读取 `/proc`、PSI 和对应 cgroup 的资源计数；避免每几秒重新启动 SSH、Docker CLI 或 Docker Compose 来采集状态，监测进程本身可能加剧内存回收与磁盘争用。累计 I/O、缺页和缓存回收计数须取同一时间段的差值，不得直接比较不同生命周期的累计总数来归因。
 - 评估资源余量时同时检查宿主可用内存、内存/IO 压力、磁盘等待和 CPU 使用率；没有 OOM 或 CPU 平均值不高，不代表没有资源停顿。容器内存上限不是宿主物理内存预算，还须为操作系统、页缓存及其他服务保留余量。
 - 后端结构化日志记录 request ID、方法、URL path、状态、耗时和安全错误类型；钉钉
@@ -102,6 +103,8 @@ make deploy
 4. 先运行 `make ocr-models-check` 和 `make ocr-runtime-check`，再确认 `/api/ready` 为 200；最后
    用公司提供的脱敏独立票据样本执行真实 smoke test。模型目录/依赖不完整时部署保持未就绪，
    修复制品后再上线。
+
+修改 OCR 推理或资源配置时，另外运行 `make ocr-runtime-check OCR_MEMORY_PROFILE=low` 和 `make ocr-memory-check`。前者通过正式子进程服务校验低内存模式的合成票据/扫描 PDF 字段；后者在一个真实模型实例中交替处理 1000×610、1800×2800 合成图片各两次，检查重复识别一致性及进程峰值 RSS 不超过 700 MiB，不输出识别文字。`scripts/smoke-images.sh` 同时检查两种模式，并为内存回归容器设置 700 MiB 硬上限、禁用 swap。这里的预算只覆盖固定合成回归，不能代替完整服务及业务材料的资源验收。
 
 ## 正式验收仍依赖的外部输入
 

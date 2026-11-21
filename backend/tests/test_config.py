@@ -8,6 +8,17 @@ from app.core.config import Settings
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def test_ocr_memory_profile_is_explicit_and_does_not_relax_resource_limits() -> None:
+    assert Settings(_env_file=None).ocr_memory_profile == "standard"
+    low = Settings(_env_file=None, ocr_memory_profile="low")
+    assert low.ocr_worker_memory_limit_bytes == 5 * 1024**3
+    assert low.file_worker_memory_limit_bytes == 512 * 1024**2
+    assert low.ocr_concurrency == 1
+    assert low.image_max_pixels == 50_000_000
+    with pytest.raises(ValidationError, match="ocr_memory_profile"):
+        Settings(_env_file=None, ocr_memory_profile="unknown")
+
+
 def test_settings_use_local_ocr_and_sqlite(tmp_path: Path) -> None:
     settings = Settings(
         app_env="test",

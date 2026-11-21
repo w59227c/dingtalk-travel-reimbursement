@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     ocr_queue_wait_seconds: int = 150
     ocr_timeout_seconds: int = 120
     ocr_cpu_threads: int = 4
+    ocr_memory_profile: Literal["standard", "low"] = "standard"
     ocr_engine: Literal["onnxruntime"] = "onnxruntime"
     ocr_detection_model_dir: Path | None = None
     ocr_recognition_model_dir: Path | None = None
