@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ElMessage } from 'element-plus'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -24,6 +24,8 @@ const expense = useExpenseStore()
 const drafts = useReimbursementDraftStore()
 const auth = useAuthStore()
 const preparingPreview = ref(false)
+const calculationErrorId = useId()
+const previewErrorId = useId()
 let previewGeneration = 0
 let disposed = false
 watch([() => drafts.currentDraft?.id, () => auth.status, () => auth.session?.user.userId,
@@ -31,8 +33,9 @@ watch([() => drafts.currentDraft?.id, () => auth.status, () => auth.session?.use
   () => auth.session?.csrfToken], () => { previewGeneration++; preparingPreview.value = false }, { flush: 'sync' })
 onBeforeUnmount(() => { disposed = true; previewGeneration++ })
 const summaryCalculationError = computed(() => {
-  if (props.readonly || expense.calculationError === expense.policyInputError) return ''
-  return expense.calculationError
+  if (props.readonly) return ''
+  const error = expense.itemReadinessError || expense.calculationError
+  return error === expense.policyInputError ? '' : error
 })
 
 const disabledReason = computed(() => {
@@ -41,6 +44,11 @@ const disabledReason = computed(() => {
   if (!props.readonly && expense.subsidyCalculationReason) return expense.subsidyCalculationReason
   if (drafts.pendingMutations > 0 && !props.beforePreview) return '请等待内容保存完成'
   return ''
+})
+const previewError = computed(() => {
+  const reason = disabledReason.value
+  if (!reason || (!props.previewOnly && reason === summaryCalculationError.value)) return ''
+  return reason
 })
 async function downloadExcel(): Promise<void> {
   if (preparingPreview.value) return
@@ -96,10 +104,13 @@ async function downloadExcel(): Promise<void> {
     </div>
     <el-alert
       v-if="!props.previewOnly && summaryCalculationError"
-      :title="summaryCalculationError"
+      class="summary-calculation-error"
       type="error"
       :closable="false"
     >
+      <template #title>
+        <span :id="calculationErrorId">{{ summaryCalculationError }}</span>
+      </template>
       <el-button
         v-if="!props.readonly && !expense.itemReadinessError"
         :loading="expense.calculating"
@@ -112,19 +123,21 @@ async function downloadExcel(): Promise<void> {
       <el-button
         :loading="preparingPreview || drafts.downloadingPreview"
         :disabled="Boolean(disabledReason)"
+        :aria-describedby="disabledReason ? (previewError ? previewErrorId : calculationErrorId) : undefined"
         :data-testid="props.mobile ? 'mobile-excel-preview-button' : undefined"
         @click="downloadExcel"
       >
         {{ props.mobile ? '打开 Excel' : '预览 Excel' }}
       </el-button>
       <p
-        v-if="disabledReason"
+        v-if="previewError"
+        :id="previewErrorId"
         class="field-error"
       >
-        {{ disabledReason }}
+        {{ previewError }}
       </p>
       <p
-        v-else-if="!props.previewOnly"
+        v-else-if="!disabledReason && !props.previewOnly"
         class="field-help excel-preview-help"
       >
         {{ props.mobile
@@ -137,6 +150,7 @@ async function downloadExcel(): Promise<void> {
 </template>
 
 <style scoped>
+.summary-calculation-error { margin-top: 16px; border-radius: 10px; }
 .totals-grid.totals-grid--general { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .totals-grid--general.totals-grid--mobile { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .totals-grid--general.totals-grid--mobile .grand-total { grid-column: 1 / -1; }

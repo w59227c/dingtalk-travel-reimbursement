@@ -4117,7 +4117,6 @@ async function retryItemRecognition(id: string): Promise<void> {
   font-size: 12px;
   line-height: 1.45;
 }
-.upload-guidance--mobile { margin-bottom: 14px; }
 .upload-guidance--mobile :deep(.el-alert__content) { min-width: 0; }
 .upload-guidance--mobile :deep(.el-alert__title) { font-size: 14px; }
 .upload-guidance--mobile :deep(.el-alert__description) { margin-top: 2px; line-height: 1.5; }

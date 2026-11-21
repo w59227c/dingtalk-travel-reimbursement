@@ -702,6 +702,8 @@ function subsidyFor(group: SubsidyTripGroup, index: number): SubsidyResult | nul
   color: var(--el-color-danger);
 }
 
+.subsidy-calculation-error { margin-top: 16px; }
+
 @media (min-width: 900px) {
   .subsidy-item--attendance:not(.subsidy-item--mobile) {
     display: grid;

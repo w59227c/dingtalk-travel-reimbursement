@@ -2,6 +2,7 @@ import ElementPlus, { ElMessage } from 'element-plus'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { h, nextTick, reactive } from 'vue'
 
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -191,6 +192,128 @@ describe('ExpenseSummaryCard', () => {
     expect(beforePreview).not.toHaveBeenCalled()
     expect(download).not.toHaveBeenCalled()
     expect(open).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([
+    { kind: 'travel', mobile: false },
+    { kind: 'travel', mobile: true },
+    { kind: 'general', mobile: false },
+    { kind: 'general', mobile: true },
+  ] as const)('deduplicates matching preview errors for $kind, mobile=$mobile', async ({ kind, mobile }) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = draft()
+    const expense = useExpenseStore()
+    const error = kind === 'general' ? '请逐项选择费用科目' : '请补全每条费用明细的发生日期'
+    expense.calculationError = error
+    const beforePreview = vi.fn()
+    const download = vi.spyOn(drafts, 'downloadExcelPreview').mockResolvedValue(undefined)
+    const open = vi.spyOn(drafts, 'openExcelPreviewInDingTalk').mockResolvedValue(undefined)
+    const previewState = reactive({ mobile, beforePreview, previewDisabledReason: error })
+    const wrapper = mount({ setup: () => () => h(ExpenseSummaryCard, previewState) }, {
+      global: { plugins: [ElementPlus] },
+    })
+    const button = wrapper.get('.excel-download-action button')
+    expect(wrapper.text().split(error)).toHaveLength(2)
+    expect(wrapper.find('.excel-download-action .field-error').exists()).toBe(false)
+    expect(wrapper.find('.excel-preview-help').exists()).toBe(false)
+    expect(button.attributes()).toHaveProperty('disabled')
+    expect(wrapper.get(`[id="${button.attributes('aria-describedby')}"]`).text()).toBe(error)
+    await button.trigger('click')
+    expect(beforePreview).not.toHaveBeenCalled()
+    expect(download).not.toHaveBeenCalled()
+    expect(open).not.toHaveBeenCalled()
+
+    previewState.previewDisabledReason = '请先处理全部待确认的材料'
+    await nextTick()
+    const previewError = wrapper.get('.excel-download-action .field-error')
+    expect(previewError.text()).toBe('请先处理全部待确认的材料')
+    expect(wrapper.get('.el-alert').text()).toContain(error)
+    expect(button.attributes('aria-describedby')).toBe(previewError.attributes('id'))
+    expect(button.attributes()).toHaveProperty('disabled')
+
+    expense.calculationError = ''
+    previewState.previewDisabledReason = ''
+    await nextTick()
+    expect(wrapper.find('.el-alert').exists()).toBe(false)
+    expect(wrapper.find('.field-error').exists()).toBe(false)
+    expect(wrapper.find('.excel-preview-help').exists()).toBe(true)
+    expect(button.attributes('aria-describedby')).toBeUndefined()
+    expect(button.attributes('disabled')).toBeUndefined()
+    await button.trigger('click')
+    await flushPromises()
+    expect(beforePreview).toHaveBeenCalledOnce()
+    expect(mobile ? open : download).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('keeps the reason when the summary alert is not rendered, mobile=%s', async (mobile) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    const expense = useExpenseStore()
+    const error = '出差补助金额计算失败，请重试'
+    expense.calculationError = error
+    const previewState = reactive({ mobile, previewOnly: true, readonly: false, previewDisabledReason: error })
+    const wrapper = mount({ setup: () => () => h(ExpenseSummaryCard, previewState) }, {
+      global: { plugins: [ElementPlus] },
+    })
+    const button = wrapper.get('.excel-download-action button')
+    expect(wrapper.find('.el-alert').exists()).toBe(false)
+    expect(wrapper.get('.field-error').text()).toBe(error)
+    expect(button.attributes()).toHaveProperty('disabled')
+    expect(button.attributes('aria-describedby')).toBe(wrapper.get('.field-error').attributes('id'))
+
+    previewState.previewOnly = false
+    previewState.readonly = true
+    await nextTick()
+    expect(wrapper.find('.el-alert').exists()).toBe(false)
+    expect(wrapper.get('.field-error').text()).toBe(error)
+    expect(button.attributes()).toHaveProperty('disabled')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { kind: 'general', mobile: false },
+    { kind: 'general', mobile: true },
+    { kind: 'travel', mobile: false },
+    { kind: 'travel', mobile: true },
+  ] as const)('shows restored incomplete items consistently for $kind, mobile=$mobile', ({ kind, mobile }) => {
+    const drafts = useReimbursementDraftStore()
+    drafts.currentDraft = draft()
+    drafts.reimbursementKind = kind
+    const expense = useExpenseStore()
+    expense.items = [{
+      id: 'incomplete-item', source: 'manual', category: 'other',
+      displayDate: '', description: '合成待补费用', amount: '10.00',
+      receiptCount: 1, warnings: [],
+    }]
+    const reason = expense.itemReadinessError
+    expect(expense.calculationError).toBe('')
+    const wrapper = mount(ExpenseSummaryCard, {
+      props: { mobile, previewDisabledReason: reason },
+      global: { plugins: [ElementPlus] },
+    })
+    expect(wrapper.get('.el-alert').text()).toContain(reason)
+    expect(wrapper.find('.excel-download-action .field-error').exists()).toBe(false)
+    expect(wrapper.get('.excel-download-action button').attributes()).toHaveProperty('disabled')
+    wrapper.unmount()
+  })
+
+  it.each([false, true])('keeps recalculation available for a deduplicated calculation failure, mobile=%s', async (mobile) => {
+    useReimbursementDraftStore().currentDraft = draft()
+    const expense = useExpenseStore()
+    const error = '出差补助金额计算失败，请重试'
+    expense.calculationError = error
+    const recalculate = vi.spyOn(expense, 'refreshCalculations').mockResolvedValue(undefined)
+    const wrapper = mount(ExpenseSummaryCard, {
+      props: { mobile, previewDisabledReason: error },
+      global: { plugins: [ElementPlus] },
+    })
+    expect(wrapper.text().split(error)).toHaveLength(2)
+    await wrapper.get('.el-alert button').trigger('click')
+    expect(recalculate).toHaveBeenCalledOnce()
+    expect(wrapper.get('.excel-download-action button').attributes()).toHaveProperty('disabled')
     wrapper.unmount()
   })
 

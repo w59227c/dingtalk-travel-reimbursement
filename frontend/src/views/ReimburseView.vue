@@ -4275,6 +4275,7 @@ p.reimbursement-switch-note { margin: 8px 0 0; }
 }
 .reimbursement-page > .hero,
 .reimbursement-page :is(.reimbursement-card, .summary-card) { margin-block: 0; }
+.reimbursement-page :deep(.el-alert) { border-radius: 10px; }
 .save-recovery-detail { margin: 4px 0; }
 .record-mainline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
 .record-budget { overflow-wrap: anywhere; }
@@ -4426,7 +4427,7 @@ p.reimbursement-switch-note { margin: 8px 0 0; }
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
-.related-approval-verification-error { margin-bottom: 12px; }
+.related-approval-verification-error { margin-top: 16px; margin-bottom: 12px; }
 .travel-periods { display: grid; justify-items: start; gap: 5px; }
 .travel-periods__count { color: var(--el-text-color-secondary); font-size: 12px; }
 .travel-periods__item {
