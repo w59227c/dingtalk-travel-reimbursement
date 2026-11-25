@@ -754,6 +754,9 @@ async function saveMaterialKind(): Promise<void> {
   const scope = beginDurableOperation()
   if (!scope) return
   const kind = materialEditorKind.value
+  const changesPurpose = file.role === 'EXPENSE_SOURCE' ? kind !== 'expense'
+    : kind !== file.attachmentKind
+  const convertsExpenseSource = file.role === 'EXPENSE_SOURCE' && kind !== 'expense'
   const expenseBeforeChange = expenseItemSnapshot(expense.items.find((item) => item.sourceFileId === file.id))
   const dismissedBeforeChange = expense.dismissedOcrFileIds.includes(file.id)
   const preservesExistingExpense = kind === 'expense'
@@ -765,11 +768,12 @@ async function saveMaterialKind(): Promise<void> {
     if (!acceptsDurableOperation(scope)) return
     delete durableErrors[file.id]
     expense.reconcileDraftProofs(drafts.files)
-    if (kind !== 'expense') {
-      const existing = expense.items.find((item) => item.sourceFileId === file.id)
-      if (existing) expense.removeItem(existing.id)
+    if (convertsExpenseSource) {
+      // The file has left the receipt-source set. Unlike dismissing a receipt,
+      // this must clear its disposition as well as the old expense association.
+      expense.removeDraftFileAssociation(file.id)
     }
-    if (kind === 'itinerary' || (kind === 'expense' && !preservesExistingExpense)) {
+    if (changesPurpose && (kind === 'itinerary' || (kind === 'expense' && !preservesExistingExpense))) {
       const recognized = await recognizeDurableFile(result.file, scope, false)
       if (kind === 'expense' && recognized) {
         if (expenseItemSnapshot(expense.items.find((item) => item.sourceFileId === file.id)) !== expenseBeforeChange
@@ -1675,14 +1679,20 @@ async function removeDurableFile(file: ReimbursementDraftFile): Promise<void> {
     void expense.refreshCalculations()
   } catch (error) {
     if (!acceptsDurableOperation(scope)) return
-    const stillExists = drafts.files.some((current) => current.id === file.id)
-    if (!stillExists) {
+    const remaining = drafts.files.find((current) => current.id === file.id)
+    if (!remaining) {
       expense.removeDraftFileAssociation(file.id)
       delete durableErrors[file.id]
       drafts.mutationError = ''
       ElMessage.success('文件已删除，相关费用明细已更新')
       void expense.refreshCalculations()
       return
+    }
+    if (remaining.status === 'DELETING') {
+      // The deletion intent already detached the file on the server. Keep its
+      // cleanup retry visible without sending obsolete expense references.
+      expense.removeDraftFileAssociation(file.id)
+      void expense.refreshCalculations()
     }
     durableErrors[file.id] = readableOperationError(error, '文件删除失败，请重试')
   } finally {

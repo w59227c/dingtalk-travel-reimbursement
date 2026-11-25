@@ -2488,6 +2488,168 @@ describe('ExpenseItemsCard durable files', () => {
     wrapper.unmount()
   })
 
+  it.each(([false, true] as const).flatMap(mobile =>
+    (['travel', 'general'] as const).flatMap(kind =>
+      (['waybill', 'hotel_bill', 'payment_proof', 'other', 'itinerary'] as const).flatMap(proofKind =>
+        [false, true].map(alreadyDismissed => ({ mobile, kind, proofKind, alreadyDismissed })),
+      ),
+    ),
+  ))('removes obsolete source disposition when converting a receipt to $proofKind ($kind, mobile=$mobile, ignored=$alreadyDismissed)', async ({ mobile, kind, proofKind, alreadyDismissed }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(), kind }
+    expense.categories = [{ id: 'rail_fare', name: '火车票', order: 1, manualSelectable: true }]
+    vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    const source = recognizedFile('converted-source', '合成来源票据.pdf')
+    const otherSource = recognizedFile('other-source', '合成保留票据.pdf')
+    const payment = serverFile('existing-payment', '合成既有付款.png', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
+    drafts.files = [source, otherSource, payment]
+    expense.upsertDraftOcrItem(source)
+    if (alreadyDismissed) expense.removeItem(expense.items[0]!.id)
+    expense.dismissDraftOcrFile(otherSource.id)
+    expense.items.push({ id: 'control-row', category: 'office', source: 'manual',
+      date: '2026-09-02', displayDate: '9月2日', description: '合成保留费用', amount: '60.00',
+      receiptCount: 1, paymentProofFileIds: [payment.id] })
+    const converted = serverFile(source.id, source.name, 'ATTACHMENT_ONLY', { attachmentKind: proofKind })
+    vi.mocked(updateReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: converted })
+    vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 3,
+      file: { ...recognizedItinerary(source.id), name: source.name } })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const material = wrapper.find(`[data-material-file-id="${source.id}"]`)
+      const sourceRow = wrapper.findAll(mobile ? '.expense-mobile-card' : '.el-table__row')
+        .find(row => row.text().includes(source.name))
+      const container = material.exists() ? material : sourceRow!
+      await container.findAll('button').find(button => button.text() === '修改用途')!.trigger('click')
+      const editor = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('title') === '修改材料用途')!
+      editor.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', proofKind)
+      await editor.findAll('button').find(button => button.text() === '保存用途')!.trigger('click')
+      await flushPromises()
+      expect(expense.items.map(item => item.id)).toEqual(['control-row'])
+      expect(expense.items[0]!.paymentProofFileIds).toEqual([payment.id])
+      expect(expense.dismissedOcrFileIds).toEqual([otherSource.id])
+      expect(drafts.files.find(file => file.id === source.id)).toMatchObject({ role: 'ATTACHMENT_ONLY', attachmentKind: proofKind })
+      expect(drafts.files).toHaveLength(3)
+      expect(deleteReimbursementDraftFile).not.toHaveBeenCalled()
+      expect(uploadReimbursementDraftFile).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each(([false, true] as const).flatMap(mobile =>
+    (['travel', 'general'] as const).flatMap(kind =>
+      (['payment_proof', 'hotel_bill', 'waybill', 'itinerary'] as const).map(proofKind => ({ mobile, kind, proofKind }))),
+  ))('preserves shared proof links when confirming the same material purpose ($proofKind, $kind, mobile=$mobile)', async ({ mobile, kind, proofKind }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(), kind }
+    vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    const payment = proofKind === 'itinerary' ? recognizedItinerary('shared-proof')
+      : serverFile('shared-proof', '合成共享材料.png', 'ATTACHMENT_ONLY', { attachmentKind: proofKind })
+    const field = { payment_proof: 'paymentProofFileIds', hotel_bill: 'hotelBillFileIds',
+      waybill: 'waybillFileIds', itinerary: 'itineraryFileIds' }[proofKind]
+    drafts.files = [payment]
+    expense.items = ['first-row', 'second-row'].map(id => ({ id, category: 'office', source: 'manual',
+      date: '2026-09-02', displayDate: '9月2日', description: '合成保留费用', amount: '60.00',
+      receiptCount: 1, [field]: [payment.id] }))
+    const before = JSON.parse(JSON.stringify(expense.items))
+    vi.mocked(updateReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: payment })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const container = wrapper.findAll(mobile ? '.expense-mobile-card' : '.el-table__row')[0]!
+      await container.findAll('button').find(button => button.text() === '修改用途')!.trigger('click')
+      const editor = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('title') === '修改材料用途')!
+      await editor.findAll('button').find(button => button.text() === '保存用途')!.trigger('click')
+      await flushPromises()
+      expect(expense.items).toEqual(before)
+      expect(drafts.files).toEqual([payment])
+      expect(recognizeReimbursementDraftFile).not.toHaveBeenCalled()
+      expect(deleteReimbursementDraftFile).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
+  it.each(([false, true] as const).flatMap(mobile =>
+    (['travel', 'general'] as const).map(kind => ({ mobile, kind })),
+  ))('keeps an ignored receipt ignored when confirming its existing purpose ($kind, mobile=$mobile)', async ({ mobile, kind }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(), kind }
+    const source = recognizedFile('ignored-source', '合成忽略票据.pdf')
+    drafts.files = [source]
+    expense.dismissDraftOcrFile(source.id)
+    vi.mocked(updateReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 2, file: source })
+    vi.mocked(recognizeReimbursementDraftFile).mockResolvedValue({ draftId: 'draft-1', revision: 3, file: source })
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const container = wrapper.get(`[data-material-file-id="${source.id}"]`)
+      await container.findAll('button').find(button => button.text() === '修改用途')!.trigger('click')
+      const editor = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('title') === '修改材料用途')!
+      await editor.findAll('button').find(button => button.text() === '保存用途')!.trigger('click')
+      await flushPromises()
+      expect(recognizeReimbursementDraftFile).not.toHaveBeenCalled()
+      expect(expense.items).toEqual([])
+      expect(expense.dismissedOcrFileIds).toEqual([source.id])
+    } finally { wrapper.unmount() }
+  })
+
+  it.each(([false, true] as const).flatMap(mobile =>
+    (['travel', 'general'] as const).flatMap(kind =>
+      (['linked', 'ignored'] as const).flatMap(disposition =>
+        (['ACTIVE', 'DELETING'] as const).map(status => ({ mobile, kind, disposition, status })))),
+  ))('reconciles receipt references after interrupted deletion ($kind, mobile=$mobile, $disposition, $status)', async ({ mobile, kind, disposition, status }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(8), kind }
+    const source = recognizedFile('interrupted-source', '合成删除票据.pdf', '10.00')
+    const payment = serverFile('control-proof', '合成保留付款.pdf', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
+    drafts.files = [source, payment]
+    expense.upsertDraftOcrItem(source)
+    if (disposition === 'ignored') expense.removeItem(expense.items[0]!.id)
+    expense.items.push({ id: 'control-row', category: 'office', source: 'manual',
+      date: '2026-09-02', displayDate: '9月2日', description: '合成保留费用', amount: '60.00',
+      receiptCount: 1, paymentProofFileIds: [payment.id] })
+    drafts.currentDraft.input.items = expense.buildDraftExpenseItems()
+    drafts.currentDraft.input.dismissedOcrFileIds = [...expense.dismissedOcrFileIds]
+    const readback = JSON.parse(JSON.stringify(drafts.currentDraft)) as ReimbursementDraft
+    if (status === 'DELETING') {
+      readback.revision = 9
+      readback.input.items = readback.input.items.filter(item => item.sourceFileId !== source.id)
+      readback.input.dismissedOcrFileIds = []
+    }
+    vi.mocked(deleteReimbursementDraftFile).mockRejectedValueOnce(new Error('合成清理中断'))
+    vi.mocked(getReimbursementDraft).mockResolvedValue(readback)
+    vi.mocked(listReimbursementDraftFiles).mockResolvedValue({ draftId: 'draft-1', revision: readback.revision,
+      items: [{ ...source, status }, payment] })
+    vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    vi.spyOn(ElMessageBox, 'confirm').mockResolvedValue({} as never)
+    const success = vi.spyOn(ElMessage, 'success')
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const container = disposition === 'ignored' ? wrapper.get(`[data-material-file-id="${source.id}"]`)
+        : wrapper.findAll(mobile ? '.expense-mobile-card' : '.el-table__row').find(row => row.text().includes(source.name))!
+      await container.findAll('button').find(button => ['删除', '删除文件'].includes(button.text()))!.trigger('click')
+      await flushPromises()
+      expect(deleteReimbursementDraftFile).toHaveBeenCalledOnce()
+      expect(getReimbursementDraft).toHaveBeenCalledOnce()
+      expect(drafts.files.find(file => file.id === source.id)?.status).toBe(status)
+      expect(expense.items.some(item => item.sourceFileId === source.id)).toBe(status === 'ACTIVE' && disposition === 'linked')
+      expect(expense.dismissedOcrFileIds.includes(source.id)).toBe(status === 'ACTIVE' && disposition === 'ignored')
+      expect(expense.items.find(item => item.id === 'control-row')?.paymentProofFileIds).toEqual([payment.id])
+      if (status === 'DELETING') {
+        expect(wrapper.text()).toContain('重试删除')
+        expect(wrapper.text()).toContain('已同步报销内容最新状态')
+        expect(success).not.toHaveBeenCalled()
+      }
+    } finally { wrapper.unmount() }
+  })
+
   it('changes an existing material purpose, clears incompatible proof links and recognizes without reupload', async () => {
     const expense = useExpenseStore()
     expense.categories = [{ id: 'local_transport', name: '市内交通', order: 1, manualSelectable: true }]
