@@ -1,0 +1,69 @@
+{
+  "before": {
+    "ocrDispositionVersion": 1,
+    "companyValue": "北京",
+    "accountingSourceVerified": false,
+    "budgetCodeValue": "DEMO-001",
+    "project": {
+      "mode": "manual",
+      "text": "示例项目"
+    },
+    "trip": null,
+    "items": [
+      {
+        "category": "other",
+        "date": "2026-09-01",
+        "displayDate": "2026-09-01",
+        "description": "打车费",
+        "amount": "44.89",
+        "receiptCount": 1,
+        "itineraryFileIds": [],
+        "itineraryAutoMatchDisabled": false,
+        "paymentProofFileIds": [],
+        "hotelBillFileIds": [],
+        "receiptAttachmentFileIds": [
+          "file-1",
+          "file-2"
+        ],
+        "railType": "unknown",
+        "requiresItinerary": false,
+        "cnyAmountConfirmed": false,
+        "requiresCnyConfirmation": false
+      }
+    ],
+    "dismissedOcrFileIds": []
+  },
+  "readback": {
+    "ocrDispositionVersion": 1,
+    "companyValue": "北京",
+    "accountingSourceVerified": false,
+    "budgetCodeValue": "DEMO-001",
+    "project": {
+      "mode": "manual",
+      "text": "示例项目"
+    },
+    "trip": null,
+    "items": [
+      {
+        "category": "other",
+        "date": "2026-09-01",
+        "displayDate": "2026-09-01",
+        "description": "打车费",
+        "amount": "44.89",
+        "receiptCount": 1,
+        "itineraryFileIds": [],
+        "itineraryAutoMatchDisabled": false,
+        "paymentProofFileIds": [],
+        "hotelBillFileIds": [],
+        "receiptAttachmentFileIds": [
+          "file-2"
+        ],
+        "railType": "unknown",
+        "requiresItinerary": false,
+        "cnyAmountConfirmed": false,
+        "requiresCnyConfirmation": false
+      }
+    ],
+    "dismissedOcrFileIds": []
+  }
+}

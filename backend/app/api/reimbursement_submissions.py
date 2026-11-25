@@ -14,7 +14,8 @@ from app.database.session import get_db
 from app.models.reimbursement import ReimbursementSubmission, ReimbursementSubmissionStatus
 from app.schemas.common import success
 from app.schemas.reimbursement_submissions import SubmitReimbursementRequest
-from app.services.general_reimbursement import refresh_general_catalog, verify_general_approvals
+from app.services.general_approvals import verify_general_approvals
+from app.services.general_reimbursement import refresh_general_catalog
 from app.services.oa_reimbursement_payload import (
     SnapshotOaInitiator,
     build_snapshot,

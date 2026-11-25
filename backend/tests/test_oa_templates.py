@@ -15,7 +15,7 @@ from app.integrations.dingtalk.client import DingTalkOpenAPIClient
 from app.integrations.dingtalk.workflow import DingTalkWorkflowClient, normalize_form_schema
 from app.models.oa_template_profile import OaTemplateProfile
 from app.services import oa_template_profiles
-from app.services.oa_template_profiles import load_fresh_submission_template
+from app.services.oa_template_profiles import load_fresh_submission_catalog
 
 PROCESS_CODE = "PROC-TEST-REIMBURSEMENT"
 TRAVEL_PROCESS_CODES = ["PROC-TRAVEL-DOMESTIC", "PROC-TRAVEL-INTERNATIONAL"]
@@ -593,7 +593,7 @@ def test_travel_dates_can_share_one_top_level_table_through_confirm_and_reload(
     )
 
     async def reload_contract():
-        return await load_fresh_submission_template(
+        return await load_fresh_submission_catalog(
             client.app.state.database_session_factory,
             client.app.state.dingtalk_workflow,
         )
@@ -1634,7 +1634,7 @@ def test_fresh_submission_contract_allows_only_configured_travel_templates(
     assert confirm(client, headers, fingerprint).status_code == 200
 
     async def load_contract():
-        return await load_fresh_submission_template(
+        return await load_fresh_submission_catalog(
             client.app.state.database_session_factory,
             client.app.state.dingtalk_workflow,
         )
@@ -1664,7 +1664,7 @@ def test_fresh_submission_contract_auto_syncs_modified_timestamp(client_factory)
     assert confirm(client, headers, fingerprint).status_code == 200
 
     async def load_contract():
-        return await load_fresh_submission_template(
+        return await load_fresh_submission_catalog(
             client.app.state.database_session_factory,
             client.app.state.dingtalk_workflow,
         )
@@ -1715,7 +1715,7 @@ def test_fresh_submission_contract_retries_after_concurrent_admin_reconfirmation
         try:
 
             async def load_contract():
-                return await load_fresh_submission_template(
+                return await load_fresh_submission_catalog(
                     client.app.state.database_session_factory,
                     DingTalkWorkflowClient(slow_client),
                 )
@@ -2154,7 +2154,7 @@ def test_travel_modified_timestamp_auto_syncs_without_blocking_catalog(client_fa
     )
 
     async def load_contract():
-        return await load_fresh_submission_template(
+        return await load_fresh_submission_catalog(
             client.app.state.database_session_factory,
             client.app.state.dingtalk_workflow,
         )

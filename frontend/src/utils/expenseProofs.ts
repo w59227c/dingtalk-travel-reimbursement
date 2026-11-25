@@ -3,11 +3,28 @@ import type { OcrReceiptCandidate } from '@/types/receipts'
 import type { ReimbursementAttachmentKind, ReimbursementDraftFile } from '@/types/reimbursements'
 import { moneyToCents } from '@/utils/money'
 
+export const expenseProofFields = {
+  itinerary: 'itineraryFileIds',
+  payment_proof: 'paymentProofFileIds',
+  hotel_bill: 'hotelBillFileIds',
+  waybill: 'waybillFileIds',
+  other: 'receiptAttachmentFileIds',
+} as const satisfies Record<ReimbursementAttachmentKind, keyof ExpenseItem>
+
+type ExpenseProofReferences = Pick<ExpenseItem, typeof expenseProofFields[ReimbursementAttachmentKind]>
+
+export function isRailExpense(
+  item: Pick<ExpenseItem, 'category'> & Partial<Pick<ExpenseItem, 'transportType'>>,
+  generalMode = false,
+): boolean {
+  return item.category === 'rail_fare'
+    || (generalMode && item.category === 'local_transport' && item.transportType === 'rail')
+}
+
 export function requiresPaymentProof(item: Pick<ExpenseItem, 'amount' | 'category' | 'railType'>
   & Partial<Pick<ExpenseItem, 'receiptCount' | 'sourceFileId' | 'source' | 'subjectValue' | 'transportType'>>): boolean {
   const count = item.sourceFileId || item.source === 'ocr' ? 1 : item.receiptCount ?? 1
-  const rail = item.category === 'rail_fare'
-    || (item.subjectValue && item.category === 'local_transport' && item.transportType === 'rail')
+  const rail = isRailExpense(item, Boolean(item.subjectValue))
   return count === 1 && (moneyToCents(item.amount) ?? 0) > 50_000
     && !(rail && item.railType === 'high_speed')
 }
@@ -24,6 +41,18 @@ export function isRecordedProof(
 ): boolean {
   return (isActiveProof(file, kind) || (allowPurged && file.status === 'PURGED'
     && file.role === 'ATTACHMENT_ONLY' && file.attachmentKind === kind))
+}
+
+/** Keep file-list display order; callers reconciling references retain their own ID order. */
+export function linkedExpenseProofs(
+  item: ExpenseProofReferences,
+  files: readonly ReimbursementDraftFile[],
+  kind: ReimbursementAttachmentKind,
+  options: { allowPurged?: boolean } = {},
+): ReimbursementDraftFile[] {
+  const ids = new Set(item[expenseProofFields[kind]] ?? [])
+  if (!ids.size) return []
+  return files.filter(file => ids.has(file.id) && isRecordedProof(file, kind, options.allowPurged))
 }
 
 export function needsMaterialConfirmation(file: ReimbursementDraftFile): boolean {
@@ -68,11 +97,12 @@ export function unlinkedProofLabel(
 ): string {
   if (file.status !== 'ACTIVE' || file.role !== 'ATTACHMENT_ONLY'
     || file.ocrStatus === 'RUNNING' || needsMaterialConfirmation(file)) return ''
-  for (const [kind, field, label] of [
-    ['itinerary', 'itineraryFileIds', '行程单'],
-    ['payment_proof', 'paymentProofFileIds', '付款凭证'],
-    ['hotel_bill', 'hotelBillFileIds', '住宿明细'],
+  for (const [kind, label] of [
+    ['itinerary', '行程单'],
+    ['payment_proof', '付款凭证'],
+    ['hotel_bill', '住宿明细'],
   ] as const) {
+    const field = expenseProofFields[kind]
     if (file.attachmentKind === kind && !items.some(item => item[field]?.includes(file.id))) return label
   }
   return ''
@@ -80,16 +110,14 @@ export function unlinkedProofLabel(
 
 export function missingExpenseMaterials(
   item: ExpenseItem,
-  files: ReimbursementDraftFile[],
+  files: readonly ReimbursementDraftFile[],
   options: { allowPurged?: boolean } = {},
 ): string[] {
   const missing: string[] = []
-  if (item.transportType !== 'taxi' && (item.requiresItinerary || item.transportType === 'ride_hailing') && !item.itineraryFileIds?.some((id) =>
-    files.some((file) => file.id === id && isRecordedProof(file, 'itinerary', options.allowPurged)))) missing.push('行程单')
-  if (requiresPaymentProof(item) && !item.paymentProofFileIds?.some((id) =>
-    files.some((file) => file.id === id && isRecordedProof(file, 'payment_proof', options.allowPurged)))) missing.push('付款凭证')
-  if (item.category === 'lodging' && !item.hotelBillFileIds?.some((id) =>
-    files.some((file) => file.id === id && isRecordedProof(file, 'hotel_bill', options.allowPurged)))) missing.push('住宿明细')
+  if (item.transportType !== 'taxi' && (item.requiresItinerary || item.transportType === 'ride_hailing')
+    && !linkedExpenseProofs(item, files, 'itinerary', options).length) missing.push('行程单')
+  if (requiresPaymentProof(item) && !linkedExpenseProofs(item, files, 'payment_proof', options).length) missing.push('付款凭证')
+  if (item.category === 'lodging' && !linkedExpenseProofs(item, files, 'hotel_bill', options).length) missing.push('住宿明细')
   return missing
 }
 

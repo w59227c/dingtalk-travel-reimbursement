@@ -12,9 +12,8 @@ from app.integrations.dingtalk.workflow import DingTalkWorkflowClient
 from app.models.reimbursement import ReimbursementKind
 from app.schemas.common import success
 from app.services.attendance_calendar import attendance_calendar
+from app.services.general_approvals import find_general_approvals, general_approval_date_range
 from app.services.general_reimbursement import (
-    find_general_approvals,
-    general_approval_date_range,
     general_options,
     refresh_general_catalog,
     subject_category,

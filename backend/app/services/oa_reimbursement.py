@@ -48,11 +48,8 @@ from app.models.reimbursement import (
     ReimbursementUploadStatus,
 )
 from app.services.excel_generator import generate_expense_workbook
-from app.services.general_reimbursement import (
-    require_current_subject_categories,
-    schema_bindings,
-    verify_general_approvals,
-)
+from app.services.general_approvals import verify_general_approvals
+from app.services.general_reimbursement import require_current_subject_categories, schema_bindings
 from app.services.oa_reimbursement_payload import (
     ReimbursementSnapshot,
     SnapshotOaInitiator,

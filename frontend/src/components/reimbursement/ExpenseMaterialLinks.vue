@@ -4,7 +4,7 @@ import ExpenseMaterialGroup from './ExpenseMaterialGroup.vue'
 import ExpenseMaterialFile from './ExpenseMaterialFile.vue'
 import type { ExpenseItem } from '@/types/expenses'
 import type { ReimbursementDraftFile } from '@/types/reimbursements'
-import { isCourierExpense, isRecordedProof, missingExpenseMaterials } from '@/utils/expenseProofs'
+import { isCourierExpense, linkedExpenseProofs, missingExpenseMaterials } from '@/utils/expenseProofs'
 
 const props = withDefaults(defineProps<{
   item: ExpenseItem
@@ -22,14 +22,10 @@ const emit = defineEmits<{
   itinerary: []
 }>()
 const missing = computed(() => missingExpenseMaterials(props.item, props.files, { allowPurged: props.allowPurged }))
-const paymentFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'payment_proof', props.allowPurged)
-  && props.item.paymentProofFileIds?.includes(file.id)))
-const hotelFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'hotel_bill', props.allowPurged)
-  && props.item.hotelBillFileIds?.includes(file.id)))
-const receiptFiles = computed(() => props.files.filter((file) => isRecordedProof(file, 'other', props.allowPurged)
-  && props.item.receiptAttachmentFileIds?.includes(file.id)))
-const waybills = computed(() => props.files.filter((file) => isRecordedProof(file, 'waybill', props.allowPurged)
-  && props.item.waybillFileIds?.includes(file.id)))
+const paymentFiles = computed(() => linkedExpenseProofs(props.item, props.files, 'payment_proof', { allowPurged: props.allowPurged }))
+const hotelFiles = computed(() => linkedExpenseProofs(props.item, props.files, 'hotel_bill', { allowPurged: props.allowPurged }))
+const receiptFiles = computed(() => linkedExpenseProofs(props.item, props.files, 'other', { allowPurged: props.allowPurged }))
+const waybills = computed(() => linkedExpenseProofs(props.item, props.files, 'waybill', { allowPurged: props.allowPurged }))
 const canLinkWaybill = computed(() => props.allowPreview && (isCourierExpense(props.item) || waybills.value.length > 0))
 function hotelSummary(file: ReimbursementDraftFile): string {
   const details = file.hotelBillDetails

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { Clock, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onBeforeUnmount, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import ClientPdfPreview from './ClientPdfPreview.vue'
+import { useMaterialPreview } from './useMaterialPreview'
+import { useExpenseMaterialPicker, type ProofKind, type ProofUploadTarget } from './useExpenseMaterialPicker'
 import ExpenseMaterialLinks from './ExpenseMaterialLinks.vue'
 import ExpenseMaterialGroup from './ExpenseMaterialGroup.vue'
 import ExpenseMaterialFile from './ExpenseMaterialFile.vue'
@@ -10,10 +12,6 @@ import ExpenseReviewHints from './ExpenseReviewHints.vue'
 import { expenseRequiresCnyConfirmation, expenseReviewHints, type ExpenseReviewField } from '@/utils/expenseReview'
 import ExpenseItinerarySuggestion from './ExpenseItinerarySuggestion.vue'
 
-import {
-  getReimbursementFileContent,
-  getReimbursementPdfPreviewPage,
-} from '@/api/reimbursements'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
@@ -32,6 +30,7 @@ import {
   hasKnownNonRailEvidence,
   isActiveProof,
   isCourierExpense,
+  isRailExpense,
   isUnresolvedExpenseSourceFile,
   materialSubmissionBlockReason,
   missingExpenseMaterials,
@@ -67,24 +66,6 @@ const durableWaybillInput = ref<HTMLInputElement | null>(null)
 const manualReceiptInput = ref<HTMLInputElement | null>(null)
 interface ManualReceiptTarget { draftId: string; editorRevision: number }
 const manualReceiptTarget = ref<ManualReceiptTarget | null>(null)
-const proofFields = {
-  payment_proof: 'paymentProofFileIds',
-  hotel_bill: 'hotelBillFileIds',
-  waybill: 'waybillFileIds',
-} as const
-type ProofKind = keyof typeof proofFields
-type ProofTarget = { itemId: string; draftId: string; pickerGeneration: number; kind: ProofKind }
-const proofUploadTarget = ref<ProofTarget | null>(null)
-const proofPickerVisible = ref(false)
-const proofPickerItemId = ref('')
-const proofPickerSelection = ref<string[]>([])
-const proofPickerKind = ref<ProofKind>('payment_proof')
-const proofPickerGeneration = ref(0)
-const proofPickerScope = ref<{ draftId: string } | null>(null)
-const proofPickerBaseline = ref<string[]>([])
-const proofPickerError = ref('')
-const itinerarySelectionMode = ref<'single' | 'multiple' | 'keep-one'>('single')
-const itineraryQuery = ref('')
 const materialEditorVisible = ref(false)
 const materialEditorFile = ref<ReimbursementDraftFile | null>(null)
 const materialEditorKind = ref<ReimbursementAttachmentKind | 'expense'>('other')
@@ -104,7 +85,7 @@ interface BatchFile {
   attachmentKind: ReimbursementAttachmentKind
   autoClassify: boolean
   manualItineraryAssociation?: boolean
-  target?: ProofTarget
+  target?: ProofUploadTarget
   manualReceiptTarget?: ManualReceiptTarget
   status: BatchFileStatus
   uploaded?: ReimbursementDraftFile
@@ -146,28 +127,11 @@ const batchStatusLabels: Record<BatchFileStatus, string> = {
 let durableOperationGeneration = 0
 let durableUnmounted = false
 let activeDurableOperation: DurableOperationScope | null = null
-const receiptPreviewVisible = ref(false)
-const receiptPreviewUrl = ref('')
-const receiptPreviewBlob = shallowRef<Blob | null>(null)
-const receiptPreviewName = ref('')
-const receiptPreviewKind = ref<'image' | 'pdf'>('image')
-const receiptPreviewMode = ref<'direct' | 'compatible'>('direct')
-const receiptPreviewFileId = ref('')
-const receiptPreviewPage = ref(1)
-const receiptPreviewPageCount = ref(1)
-const receiptPreviewError = ref('')
-const failedPreviewPage = ref(1)
-const previewLoading = ref(false)
-let previewController: AbortController | null = null
-let receiptPreviewObjectUrl = ''
 let durableOcrPollTimer: number | null = null
 const editorVisible = ref(false)
 const hasOpenMaterialEditor = computed(() => editorVisible.value || proofPickerVisible.value || materialEditorVisible.value)
 const editorRevision = ref(0)
 const itineraryPickerOnly = ref(false)
-const itineraryPickerChanged = ref(false)
-const itineraryPickerUploadError = ref('')
-const itineraryUploadRevision = ref<number | null>(null)
 const paymentExpenseContext = ref<{ fileId: string; draftId: string } | null>(null)
 const editor = reactive({
   id: '',
@@ -203,6 +167,24 @@ const attachmentKindLabels: Record<ReimbursementAttachmentKind, string> = {
 const categoryNames = computed<Record<string, string>>(() =>
   Object.fromEntries(expense.categories.map((item) => [item.id, item.name])),
 )
+const materialPicker = useExpenseMaterialPicker({
+  draft: () => drafts.currentDraft,
+  editable: isDurableDraftEditable,
+  blocked: () => Boolean(durableActionDisabledReason.value),
+  items: () => expense.items,
+  files: () => durableFiles.value,
+  editor: { state: editor, visible: editorVisible, pickerOnly: itineraryPickerOnly, revision: editorRevision },
+})
+const { visible: proofPickerVisible, kind: proofPickerKind, selection: proofPickerSelection,
+  error: proofPickerError, item: proofPickerItem, candidates: currentProofOptions,
+  selected: selectedProofFiles, changed: proofPickerChanged } = materialPicker.proof
+const { mode: itinerarySelectionMode, query: itineraryQuery, changed: itineraryPickerChanged,
+  uploadError: itineraryPickerUploadError, item: itineraryPickerItem, candidates: itineraryOptions } = materialPicker.itinerary
+const openProofPicker = materialPicker.proof.open
+const saveProofSelection = materialPicker.proof.confirm
+const toggleItinerarySelectionMode = materialPicker.itinerary.toggleMode
+const chooseEditorItineraries = materialPicker.itinerary.choose
+
 const expenseCategoryOptions = computed(() => expense.generalMode
   ? expense.generalSubjects.map(({ value, label, categoryId }) => ({ value, label, categoryId }))
   : expense.manualCategories.map(({ id, name }) => ({ value: id, label: name, categoryId: id })))
@@ -237,6 +219,15 @@ function expenseCategoryName(item: ExpenseItem): string {
 const showLockedFileMetadata = computed(() => props.readonly && drafts.currentDraft?.status === 'LOCKED')
 const durableFiles = computed(() => drafts.files.filter((file) =>
   file.status !== 'PURGED' || showLockedFileMetadata.value))
+const materialPreview = useMaterialPreview({
+  draftId: () => drafts.currentDraft?.id,
+  files: () => durableFiles.value,
+  mobile: () => props.mobile,
+  submitted: () => props.submitted,
+  onError: (message) => ElMessage.error(message),
+})
+const preview = materialPreview.state
+const previewLoading = computed(() => preview.loading)
 const reviewHintsById = computed(() => new Map(expense.items.map(item => [item.id, expenseReviewHints(item, durableFiles.value)])))
 function reviewHintsFor(item: ExpenseItem, field: ExpenseReviewField) {
   return (reviewHintsById.value.get(item.id) ?? []).filter(hint => hint.field === field)
@@ -285,13 +276,8 @@ const unlinkedMaterialGroups = computed(() => (props.submitted
       { key: 'association', blocking: true, files: awaitingAssociationFiles.value },
       { key: 'other', blocking: false, files: optionalUnlinkedDurableFiles.value },
     ]).filter((group) => group.files.length > 0))
-const itineraryOptions = computed(() => durableFiles.value.filter((file) =>
-  isActiveProof(file, 'itinerary'),
-))
 const itinerarySuggestions = computed(() => !batchActive.value
   ? suggestItineraries(expense.items, durableFiles.value) : [])
-const itineraryPickerItem = computed(() => itineraryPickerOnly.value && editorVisible.value
-  ? expense.items.find((item) => item.id === editor.id) : undefined)
 const editorItineraryOptions = computed(() => {
   const item = expense.items.find((entry) => entry.id === editor.id)
   const suggestion = itinerarySuggestions.value.find((entry) => entry.sourceFileId === item?.sourceFileId)
@@ -313,16 +299,8 @@ const manualReceiptOptions = computed(() => durableFiles.value.filter((file) => 
 const editorReceiptFiles = computed(() => manualReceiptOptions.value.filter((file) => editor.receiptAttachmentFileIds.includes(file.id)))
 const manualReceiptBatchEntries = computed(() => batchFiles.value.filter((entry) => entry.manualReceiptTarget
   && acceptsManualReceiptTarget(entry.manualReceiptTarget)))
-const currentProofOptions = computed(() => durableFiles.value.filter(file => isActiveProof(file, proofPickerKind.value)))
-const proofPickerItem = computed(() => expense.items.find(item => item.id === proofPickerItemId.value))
-const selectedProofFiles = computed(() => proofPickerSelection.value.flatMap(id => {
-  const file = currentProofOptions.value.find(file => file.id === id)
-  return file ? [file] : []
-}))
-const proofPickerChanged = computed(() => JSON.stringify(proofPickerSelection.value) !== JSON.stringify(proofPickerBaseline.value))
 const proofPickerBatchEntries = computed(() => batchFiles.value.filter(entry =>
-  entry.target?.pickerGeneration === proofPickerGeneration.value
-  && entry.target.kind === proofPickerKind.value))
+  entry.target && materialPicker.proof.isCurrentTarget(entry.target)))
 
 const foreignEditor = computed(() => expenseRequiresCnyConfirmation({
   originalCurrency: editor.originalCurrency,
@@ -339,8 +317,9 @@ const editorSourceInvoice = computed(() => {
 const choosingItineraryToKeep = computed(() => itinerarySelectionMode.value === 'keep-one'
   && editorCategory.value === 'local_transport' && editorTransportType.value === 'ride_hailing')
 const editorIsTaxi = computed(() => isTaxiExpense({ transportType: editorTransportType.value }))
-const editorRailCategory = computed(() => editorCategory.value === 'rail_fare'
-  || (expense.generalMode && editorCategory.value === 'local_transport' && editorTransportType.value === 'rail'))
+const editorRailCategory = computed(() => isRailExpense({
+  category: editorCategory.value, transportType: editorTransportType.value,
+}, expense.generalMode))
 const editorCanSelectRailType = computed(() => editorRailCategory.value
   && !hasKnownNonRailEvidence(editorEvidence.value))
 const sourceRailType = computed(() => editorEvidence.value?.railType)
@@ -434,8 +413,6 @@ onBeforeUnmount(() => {
   activeDurableOperation = null
   retryingRecognition.value = null
   if (batchScope?.generation === durableOperationGeneration - 1) drafts.processingFiles = false
-  releaseReceiptPreview()
-  previewController?.abort()
   if (durableOcrPollTimer !== null) window.clearTimeout(durableOcrPollTimer)
 })
 
@@ -460,27 +437,15 @@ function scheduleDurableOcrPoll(): void {
 
 watch(shouldPollDurableOcr, scheduleDurableOcrPoll, { immediate: true })
 
-watch(() => props.submitted, (submitted) => {
-  if (!submitted) return
-  receiptPreviewVisible.value = false
-  releaseReceiptPreview()
-}, { flush: 'sync' })
-
 watch(
   () => [
     drafts.currentDraft?.id,
     drafts.currentDraft?.status,
     props.readonly,
   ] as const,
-  ([draftId, status], [previousDraftId]) => {
+  () => {
     materialEditorVisible.value = false
     materialEditorFile.value = null
-    if (draftId !== previousDraftId || props.readonly
-      || !isDurableDraftEditable()) proofPickerVisible.value = false
-    if (itineraryPickerOnly.value && (draftId !== previousDraftId
-      || status === 'LOCKED' || status === 'EXPIRED')) {
-      editorVisible.value = false
-    }
     if (paymentExpenseContext.value) {
       editorVisible.value = false
       paymentExpenseContext.value = null
@@ -514,12 +479,6 @@ watch(
   },
   { flush: 'sync' },
 )
-
-watch(() => itineraryPickerItem.value?.itineraryFileIds, (ids) => {
-  if (!itineraryPickerItem.value || itineraryPickerChanged.value) return
-  editor.itineraryFileIds = [...(ids ?? [])]
-  if (editor.itineraryFileIds.length > 1 && itinerarySelectionMode.value === 'single') itinerarySelectionMode.value = 'multiple'
-})
 
 const itineraryEvidenceSignature = computed(() => JSON.stringify([
   drafts.currentDraft?.id,
@@ -608,8 +567,7 @@ function openNewItem(): void {
     cnyAmountConfirmed: false,
   })
   editorRevision.value += 1
-  itinerarySelectionMode.value = 'single'
-  itineraryQuery.value = ''
+  materialPicker.itinerary.reset()
   editorVisible.value = true
 }
 
@@ -617,8 +575,6 @@ function openEditItem(item: ExpenseItem, itineraryOnly = false): void {
   if (props.readonly || batchActive.value) return
   paymentExpenseContext.value = null
   itineraryPickerOnly.value = itineraryOnly
-  itineraryPickerChanged.value = false
-  itineraryPickerUploadError.value = ''
   Object.assign(editor, {
     id: item.id,
     category: expense.generalMode ? '' : item.category,
@@ -642,8 +598,7 @@ function openEditItem(item: ExpenseItem, itineraryOnly = false): void {
     cnyAmountConfirmed: item.cnyAmountConfirmed ?? false,
   })
   editorRevision.value += 1
-  itinerarySelectionMode.value = editor.itineraryFileIds.length > 1 ? 'multiple' : 'single'
-  itineraryQuery.value = ''
+  materialPicker.itinerary.reset()
   editorVisible.value = true
 }
 
@@ -937,24 +892,19 @@ function chooseReceiptFiles(): void {
 function chooseItineraryFiles(): void {
   if (durableActionDisabledReason.value || receiptUploadDisabledReason.value
     || editor.transportType !== 'ride_hailing') return
-  itineraryUploadRevision.value = editorRevision.value
+  materialPicker.itinerary.armUpload()
   durableItineraryInput.value?.click()
 }
 
 async function onItinerarySelection(event: Event): Promise<void> {
-  const revision = itineraryUploadRevision.value
-  itineraryUploadRevision.value = null
-  if (revision !== null && (!editorVisible.value || editorRevision.value !== revision)) {
+  const target = materialPicker.itinerary.consumeUpload()
+  if (!target) {
     (event.target as HTMLInputElement).value = ''
     return
   }
-  const fromPicker = itineraryPickerOnly.value && revision === editorRevision.value
-  if (fromPicker) itineraryPickerUploadError.value = ''
-  await onDurableSelection(event, 'ATTACHMENT_ONLY', 'itinerary', false, { manualItineraryAssociation: fromPicker })
-  if (fromPicker && editorVisible.value && editorRevision.value === revision) {
-    itineraryPickerUploadError.value = batchFiles.value.find((file) =>
-      file.attachmentKind === 'itinerary' && file.status === 'failed')?.error ?? ''
-  }
+  await onDurableSelection(event, 'ATTACHMENT_ONLY', 'itinerary', false, { manualItineraryAssociation: target.fromPicker })
+  if (target.fromPicker) materialPicker.itinerary.finishUpload(target.revision,
+    batchFiles.value.find(file => file.attachmentKind === 'itinerary' && file.status === 'failed')?.error ?? '')
 }
 
 function acceptsManualReceiptTarget(target: ManualReceiptTarget): boolean {
@@ -1001,56 +951,19 @@ function attachManualReceiptFiles(target: ManualReceiptTarget, files: Reimbursem
 }
 
 function chooseProofFiles(): void {
-  const item = proofPickerItem.value
-  if (!proofPickerVisible.value || !item || durableActionDisabledReason.value
-    || receiptUploadDisabledReason.value || !drafts.currentDraft) return
-  proofUploadTarget.value = { itemId: item.id, draftId: drafts.currentDraft.id,
-    kind: proofPickerKind.value,
-    pickerGeneration: proofPickerGeneration.value }
+  if (receiptUploadDisabledReason.value || !materialPicker.proof.armUpload()) return
   if (proofPickerKind.value === 'hotel_bill') durableHotelBillInput.value?.click()
   else if (proofPickerKind.value === 'waybill') durableWaybillInput.value?.click()
   else durablePaymentProofInput.value?.click()
 }
 
 async function onProofSelection(event: Event, kind: ProofKind): Promise<void> {
-  const target = proofUploadTarget.value
-  if (!target || !proofPickerVisible.value || target.kind !== kind
-    || target.pickerGeneration !== proofPickerGeneration.value) {
+  const target = materialPicker.proof.consumeUpload(kind)
+  if (!target) {
     (event.target as HTMLInputElement).value = ''
-    proofUploadTarget.value = null
     return
   }
-  await onDurableSelection(event, 'ATTACHMENT_ONLY', kind)
-}
-
-function openProofPicker(item: ExpenseItem, kind: ProofKind = 'payment_proof'): void {
-  if (durableActionDisabledReason.value || !drafts.currentDraft || !isDurableDraftEditable()) return
-  proofPickerGeneration.value++
-  proofPickerItemId.value = item.id
-  proofPickerKind.value = kind
-  proofPickerBaseline.value = [...(item[proofFields[kind]] ?? [])]
-  proofPickerSelection.value = [...proofPickerBaseline.value]
-  proofPickerScope.value = { draftId: drafts.currentDraft.id }
-  proofPickerError.value = ''
-  proofPickerVisible.value = true
-}
-
-function saveProofSelection(): void {
-  if (durableActionDisabledReason.value || !isDurableDraftEditable()) return
-  const scope = proofPickerScope.value
-  const item = proofPickerItem.value
-  if (!scope || !item || scope.draftId !== drafts.currentDraft?.id) return
-  const field = proofFields[proofPickerKind.value]
-  if (JSON.stringify(item[field] ?? []) !== JSON.stringify(proofPickerBaseline.value)) {
-    proofPickerError.value = '本笔费用的材料关联已变化，请关闭后重新打开核对'
-    return
-  }
-  if (proofPickerSelection.value.some(id => !currentProofOptions.value.some(file => file.id === id))) {
-    proofPickerError.value = '所选材料已删除或用途已变化，请重新选择'
-    return
-  }
-  item[field] = [...new Set(proofPickerSelection.value)]
-  proofPickerVisible.value = false
+  await onDurableSelection(event, 'ATTACHMENT_ONLY', kind, false, { proofTarget: target })
 }
 
 function suggestionFor(item: ExpenseItem) {
@@ -1073,7 +986,7 @@ function confirmItinerarySuggestion(item: ExpenseItem): void {
 
 function previewSuggestedItinerary(item: ExpenseItem): void {
   const file = durableFiles.value.find((entry) => entry.id === suggestionFor(item)?.itineraryFileId)
-  if (file) void previewDurableFile(file)
+  if (file) void materialPreview.open(file)
 }
 
 function focusMaterial(itemId?: string, fileId?: string): void {
@@ -1092,166 +1005,8 @@ const hasUnpersistedFailedUploads = computed(() => batchFiles.value.some(
 ))
 defineExpose({ focusMaterial, hasOpenMaterialEditor, hasUnpersistedFailedUploads })
 
-function releaseReceiptPreview(): void {
-  previewController?.abort()
-  previewController = null
-  if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl)
-  receiptPreviewObjectUrl = ''
-  receiptPreviewUrl.value = ''
-  receiptPreviewBlob.value = null
-  receiptPreviewMode.value = 'direct'
-  receiptPreviewFileId.value = ''
-  receiptPreviewPage.value = 1
-  receiptPreviewPageCount.value = 1
-  receiptPreviewError.value = ''
-  failedPreviewPage.value = 1
-  previewLoading.value = false
-}
-
-function replaceReceiptPreviewUrl(blob: Blob): void {
-  const previousUrl = receiptPreviewObjectUrl
-  receiptPreviewObjectUrl = URL.createObjectURL(blob)
-  receiptPreviewUrl.value = receiptPreviewObjectUrl
-  if (previousUrl) URL.revokeObjectURL(previousUrl)
-}
-
-async function previewDurableFile(file: ReimbursementDraftFile | undefined): Promise<void> {
-  const draft = drafts.currentDraft
-  if (props.submitted || !draft || !file || file.status !== 'ACTIVE') return
-  releaseReceiptPreview()
-  const isPdf = file.mediaType === 'application/pdf'
-  receiptPreviewName.value = file.name
-  receiptPreviewKind.value = isPdf ? 'pdf' : 'image'
-  receiptPreviewFileId.value = file.id
-  receiptPreviewPage.value = 1
-  receiptPreviewPageCount.value = 1
-  receiptPreviewMode.value = 'direct'
-  receiptPreviewVisible.value = true
-
-  const controller = new AbortController()
-  previewController = controller
-  previewLoading.value = true
-  try {
-    const preview = {
-      blob: await getReimbursementFileContent(draft.id, file.id, { signal: controller.signal }),
-      pageNumber: 1,
-      pageCount: 1,
-    }
-    if (
-      controller.signal.aborted
-      || props.submitted
-      || drafts.currentDraft?.id !== draft.id
-      || receiptPreviewFileId.value !== file.id
-      || receiptPreviewMode.value !== 'direct'
-      || !receiptPreviewVisible.value
-      || durableUnmounted
-    ) return
-    receiptPreviewPage.value = preview.pageNumber
-    receiptPreviewPageCount.value = preview.pageCount
-    if (isPdf && props.mobile) receiptPreviewBlob.value = preview.blob
-    else replaceReceiptPreviewUrl(preview.blob)
-    receiptPreviewVisible.value = true
-  } catch (error) {
-    if (!controller.signal.aborted) {
-      receiptPreviewError.value = apiErrorMessage(error, '材料预览失败，请重试')
-      ElMessage.error(receiptPreviewError.value)
-    }
-  } finally {
-    if (previewController === controller) {
-      previewController = null
-      previewLoading.value = false
-    }
-  }
-}
-
-async function loadCompatiblePdfPage(pageNumber: number): Promise<void> {
-  const draft = drafts.currentDraft
-  const fileId = receiptPreviewFileId.value
-  if (
-    props.submitted || !draft
-    || receiptPreviewKind.value !== 'pdf'
-    || !fileId
-    || previewLoading.value
-    || pageNumber < 1
-    || pageNumber > receiptPreviewPageCount.value
-    || (pageNumber === receiptPreviewPage.value && Boolean(receiptPreviewObjectUrl))
-  ) return
-
-  previewLoading.value = true
-  receiptPreviewError.value = ''
-  let finalError: unknown = null
-  try {
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const controller = new AbortController()
-      previewController = controller
-      try {
-        const preview = await getReimbursementPdfPreviewPage(
-          draft.id,
-          fileId,
-          pageNumber,
-          { signal: controller.signal },
-        )
-        if (
-          controller.signal.aborted
-          || props.submitted
-          || drafts.currentDraft?.id !== draft.id
-          || receiptPreviewFileId.value !== fileId
-          || receiptPreviewMode.value !== 'compatible'
-          || !receiptPreviewVisible.value
-          || durableUnmounted
-        ) return
-        receiptPreviewPage.value = preview.pageNumber
-        receiptPreviewPageCount.value = preview.pageCount
-        replaceReceiptPreviewUrl(preview.blob)
-        return
-      } catch (error) {
-        if (controller.signal.aborted) return
-        finalError = error
-        if (apiErrorCode(error) !== 'PDF_PREVIEW_RESOURCE_LIMIT' || attempt > 0) break
-      } finally {
-        if (previewController === controller) previewController = null
-      }
-    }
-  } finally {
-    previewLoading.value = false
-  }
-  if (finalError) {
-    failedPreviewPage.value = pageNumber
-    receiptPreviewError.value = apiErrorMessage(finalError, 'PDF 页面加载失败，请重试')
-    ElMessage.error(receiptPreviewError.value)
-  }
-}
-
-async function useCompatiblePdfPreview(): Promise<void> {
-  if (receiptPreviewKind.value !== 'pdf' || receiptPreviewMode.value === 'compatible') return
-  previewController?.abort()
-  previewController = null
-  previewLoading.value = false
-  if (receiptPreviewObjectUrl) URL.revokeObjectURL(receiptPreviewObjectUrl)
-  receiptPreviewObjectUrl = ''
-  receiptPreviewBlob.value = null
-  receiptPreviewMode.value = 'compatible'
-  receiptPreviewUrl.value = ''
-  await loadCompatiblePdfPage(1)
-}
-
-async function useDirectPdfPreview(): Promise<void> {
-  const fileId = receiptPreviewFileId.value
-  if (!fileId) return
-  await previewDurableFile(durableFiles.value.find((file) => file.id === fileId))
-}
-
-async function retryReceiptPreview(): Promise<void> {
-  if (receiptPreviewMode.value === 'compatible') await loadCompatiblePdfPage(failedPreviewPage.value)
-  else await useDirectPdfPreview()
-}
-
-async function changeReceiptPreviewPage(pageNumber: number): Promise<void> {
-  await loadCompatiblePdfPage(pageNumber)
-}
-
 async function previewItemReceipt(itemId: string): Promise<void> {
-  await previewDurableFile(durableFileByItemId(itemId))
+  await materialPreview.open(durableFileByItemId(itemId))
 }
 
 function durableTripYear(): number | undefined {
@@ -1312,17 +1067,15 @@ async function onDurableSelection(
   role: ReimbursementDraftFileRole,
   attachmentKind: ReimbursementAttachmentKind = 'other',
   autoClassify = false,
-  options: { manualReceiptTarget?: ManualReceiptTarget; manualItineraryAssociation?: boolean } = {},
+  options: { manualReceiptTarget?: ManualReceiptTarget; manualItineraryAssociation?: boolean; proofTarget?: ProofUploadTarget } = {},
 ): Promise<void> {
   const { manualReceiptTarget: manualTarget, manualItineraryAssociation } = options
   const input = event.target as HTMLInputElement
   const files = [...(input.files ?? [])]
   input.value = ''
-  const target = proofUploadTarget.value?.kind === attachmentKind ? proofUploadTarget.value : null
-  proofUploadTarget.value = null
+  const target = options.proofTarget
   if (props.readonly || !files.length || durableBusy.value) return
-  if (target && (target.draftId !== drafts.currentDraft?.id
-    || !expense.items.some((item) => item.id === target.itemId))) {
+  if (target && !materialPicker.proof.acceptsUploadTarget(target)) {
     ElMessage.warning('费用或报销表单已变化，请在当前费用下重新选择证明材料')
     return
   }
@@ -1461,8 +1214,7 @@ async function retryFailedBatchUpload(entry: BatchFile): Promise<void> {
     entry.error = '报销表单已变化，请在当前手工费用中重新选择文件'
     return
   }
-  if (target && (target.draftId !== drafts.currentDraft?.id
-    || !expense.items.some((item) => item.id === target.itemId))) {
+  if (target && !materialPicker.proof.acceptsUploadTarget(target)) {
     entry.error = '费用或报销表单已变化，请在当前费用下重新选择证明材料'
     return
   }
@@ -1749,39 +1501,9 @@ async function ignoreDurableRecognition(file: ReimbursementDraftFile): Promise<v
   }
 }
 
-function toggleItinerarySelectionMode(): void {
-  itineraryQuery.value = ''
-  if (itinerarySelectionMode.value === 'multiple') {
-    itinerarySelectionMode.value = editor.itineraryFileIds.length > 1 ? 'keep-one' : 'single'
-  } else itinerarySelectionMode.value = 'multiple'
-}
-
-function chooseEditorItineraries(value: string[] | string | null | undefined): void {
-  if (editor.transportType !== 'ride_hailing') return
-  if (itinerarySelectionMode.value === 'keep-one') {
-    if (typeof value !== 'string' || !editor.itineraryFileIds.includes(value)) return
-    itineraryQuery.value = ''
-    itinerarySelectionMode.value = 'single'
-  }
-  editor.itineraryFileIds = Array.isArray(value) ? [...value] : value ? [value] : []
-  editor.itineraryAutoMatchDisabled = true
-  if (itineraryPickerOnly.value) itineraryPickerChanged.value = true
-}
-
 function saveItineraryPicker(automatic = false): void {
-  if (durableActionDisabledReason.value || choosingItineraryToKeep.value) return
-  const item = itineraryPickerItem.value
-  if (!item || item.category !== 'local_transport'
-    || (item.transportType ?? (item.requiresItinerary ? 'ride_hailing' : 'other')) !== 'ride_hailing') return
-  if (editor.itineraryFileIds.some((id) => !itineraryOptions.value.some((file) => file.id === id))) {
-    ElMessage.warning('所选行程单已删除或用途已变化，请重新选择')
-    return
-  }
-  if (automatic || itineraryPickerChanged.value) {
-    item.itineraryFileIds = [...editor.itineraryFileIds]
-    item.itineraryAutoMatchDisabled = !automatic
-  }
-  editorVisible.value = false
+  const message = materialPicker.itinerary.confirm(automatic)
+  if (message) ElMessage.warning(message)
 }
 
 function retryEditorItineraryMatching(): void {
@@ -2211,7 +1933,7 @@ async function retryItemRecognition(id: string): Promise<void> {
                 :disabled="file.status !== 'ACTIVE' || previewLoading"
                 :title="file.name"
                 :aria-label="file.status === 'ACTIVE' ? `预览材料 ${file.name}` : file.name"
-                @click="previewDurableFile(file)"
+                @click="materialPreview.open(file)"
               >
                 <span class="receipt-file-preview-name">{{ file.name }}</span>
                 <span
@@ -2566,7 +2288,7 @@ async function retryItemRecognition(id: string): Promise<void> {
                 :preview-available="!props.submitted && file.status !== 'PURGED'"
                 :preview-loading="previewLoading"
                 :summary="durableOcrSummary(file)"
-                @preview="previewDurableFile(file)"
+                @preview="materialPreview.open(file)"
               >
                 <template
                   v-if="!props.submitted"
@@ -2602,7 +2324,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               :has-itinerary-suggestion="Boolean(suggestionFor(scope.row))"
               :disabled="Boolean(durableActionDisabledReason)"
               :preview-loading="previewLoading"
-              @preview="previewDurableFile"
+              @preview="materialPreview.open"
               @purpose="openMaterialEditor"
               @manage="openProofPicker(scope.row, $event)"
               @itinerary="openItineraryPicker(scope.row)"
@@ -2852,7 +2574,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               :preview-available="!props.submitted && file.status !== 'PURGED'"
               :preview-loading="previewLoading"
               :summary="durableOcrSummary(file)"
-              @preview="previewDurableFile(file)"
+              @preview="materialPreview.open(file)"
             >
               <template
                 v-if="!props.submitted"
@@ -2888,7 +2610,7 @@ async function retryItemRecognition(id: string): Promise<void> {
             :has-itinerary-suggestion="Boolean(suggestionFor(item))"
             :disabled="Boolean(durableActionDisabledReason)"
             :preview-loading="previewLoading"
-            @preview="previewDurableFile"
+            @preview="materialPreview.open"
             @purpose="openMaterialEditor"
             @manage="openProofPicker(item, $event)"
             @itinerary="openItineraryPicker(item)"
@@ -2947,74 +2669,74 @@ async function retryItemRecognition(id: string): Promise<void> {
   </el-card>
 
   <el-dialog
-    v-model="receiptPreviewVisible"
-    :title="`票据预览：${receiptPreviewName}`"
+    :model-value="preview.visible"
+    :title="`票据预览：${preview.name}`"
     width="min(960px, calc(100% - 24px))"
     top="4vh"
     destroy-on-close
-    @closed="releaseReceiptPreview"
+    @close="materialPreview.close"
   >
     <div
       v-loading="previewLoading"
       class="receipt-preview-surface"
     >
       <el-alert
-        v-if="receiptPreviewError"
-        :title="receiptPreviewError"
+        v-if="preview.error"
+        :title="preview.error"
         type="error"
         :closable="false"
       >
         <el-button
           :loading="previewLoading"
-          @click="retryReceiptPreview"
+          @click="materialPreview.retry"
         >
           重试预览
         </el-button>
       </el-alert>
       <img
-        v-if="(receiptPreviewKind === 'image' && receiptPreviewUrl)
-          || (receiptPreviewMode === 'compatible' && receiptPreviewUrl)"
+        v-if="(preview.kind === 'image' && preview.url)
+          || (preview.mode === 'compatible' && preview.url)"
         data-testid="receipt-preview-page"
-        :src="receiptPreviewUrl"
-        :alt="`${receiptPreviewName} 预览`"
+        :src="preview.url"
+        :alt="`${preview.name} 预览`"
       >
       <iframe
-        v-else-if="receiptPreviewKind === 'pdf'
-          && receiptPreviewMode === 'direct'
+        v-else-if="preview.kind === 'pdf'
+          && preview.mode === 'direct'
           && !props.mobile
-          && receiptPreviewUrl"
-        :src="receiptPreviewUrl"
-        :title="`${receiptPreviewName} 快速预览`"
-        @error="useCompatiblePdfPreview"
+          && preview.url"
+        :src="preview.url"
+        :title="`${preview.name} 快速预览`"
+        @error="materialPreview.setMode('compatible')"
       />
       <ClientPdfPreview
-        v-else-if="receiptPreviewKind === 'pdf'
-          && receiptPreviewMode === 'direct'
+        v-else-if="preview.kind === 'pdf'
+          && preview.mode === 'direct'
           && props.mobile
-          && receiptPreviewBlob"
-        :source="receiptPreviewBlob"
-        @failed="useCompatiblePdfPreview"
+          && preview.blob"
+        :source="preview.blob"
+        @failed="materialPreview.setMode('compatible')"
       />
     </div>
     <nav
-      v-if="receiptPreviewKind === 'pdf' && receiptPreviewMode === 'compatible'"
+      v-if="preview.kind === 'pdf' && preview.mode === 'compatible'"
       class="receipt-preview-pagination"
       aria-label="PDF 预览翻页"
     >
       <el-button
         aria-label="上一页"
-        :disabled="previewLoading || receiptPreviewPage <= 1"
-        @click="changeReceiptPreviewPage(receiptPreviewPage - 1)"
+        :disabled="previewLoading || preview.page <= 1"
+        @click="materialPreview.goToPage(preview.page - 1)"
       >
         上一页
       </el-button>
       <span data-testid="pdf-preview-page-status">
-        第 {{ receiptPreviewPage }} / {{ receiptPreviewPageCount }} 页
+        第 {{ preview.page }} / {{ preview.pageCount }} 页
       </span>
       <el-button
         aria-label="下一页"
-        :disabled="previewLoading || receiptPreviewPage >= receiptPreviewPageCount"
-        @click="changeReceiptPreviewPage(receiptPreviewPage + 1)"
+        :disabled="previewLoading || preview.page >= preview.pageCount"
+        @click="materialPreview.goToPage(preview.page + 1)"
       >
         下一页
       </el-button>
@@ -3022,27 +2744,27 @@ async function retryItemRecognition(id: string): Promise<void> {
     <p class="field-help receipt-preview-help">
       <span>预览本次报销的原始材料，请核对金额、日期和票面内容。</span>
       <el-button
-        v-if="receiptPreviewKind === 'pdf' && receiptPreviewMode === 'direct'"
+        v-if="preview.kind === 'pdf' && preview.mode === 'direct'"
         data-testid="use-compatible-pdf-preview"
         type="primary"
         plain
         size="small"
-        @click="useCompatiblePdfPreview"
+        @click="materialPreview.setMode('compatible')"
       >
         无法显示？使用兼容预览
       </el-button>
       <el-button
-        v-else-if="receiptPreviewKind === 'pdf'"
+        v-else-if="preview.kind === 'pdf'"
         type="primary"
         plain
         size="small"
-        @click="useDirectPdfPreview"
+        @click="materialPreview.setMode('direct')"
       >
         返回快速预览
       </el-button>
     </p>
     <template #footer>
-      <el-button @click="receiptPreviewVisible = false">
+      <el-button @click="materialPreview.close">
         关闭
       </el-button>
     </template>
@@ -3127,7 +2849,7 @@ async function retryItemRecognition(id: string): Promise<void> {
         :name="file.name"
         :preview-loading="previewLoading"
         :preview-available="true"
-        @preview="previewDurableFile(file)"
+        @preview="materialPreview.open(file)"
       >
         <template #actions>
           <el-button
@@ -3451,7 +3173,7 @@ async function retryItemRecognition(id: string): Promise<void> {
               link
               type="primary"
               :disabled="previewLoading"
-              @click="previewDurableFile(file)"
+              @click="materialPreview.open(file)"
             >
               {{ file.name }} · 预览
             </el-button>

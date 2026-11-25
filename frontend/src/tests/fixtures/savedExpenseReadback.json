@@ -1,0 +1,46 @@
+{
+  "ocrDispositionVersion": 1,
+  "companyValue": "北京",
+  "accountingSourceVerified": true,
+  "budgetCodeValue": "DEMO-001",
+  "project": {
+    "mode": "manual",
+    "text": "服务端预算完整标签"
+  },
+  "trip": null,
+  "items": [
+    {
+      "category": "local_transport",
+      "date": "2026-09-01",
+      "displayDate": "2026-09-01",
+      "description": "合成员工已保存的修改",
+      "amount": "44.80",
+      "receiptCount": 1,
+      "itineraryFileIds": [],
+      "itineraryAutoMatchDisabled": false,
+      "paymentProofFileIds": [],
+      "hotelBillFileIds": [],
+      "railType": "unknown",
+      "requiresItinerary": false,
+      "cnyAmountConfirmed": false,
+      "requiresCnyConfirmation": false,
+      "sourceFileId": "file-1"
+    }
+  ],
+  "dismissedOcrFileIds": [],
+  "editingState": {
+    "includeSubsidy": false,
+    "trip": {
+      "tripType": "business",
+      "relatedApprovalId": null,
+      "startDate": "",
+      "startTime": "09:00",
+      "endDate": "",
+      "endTime": "18:00",
+      "policyConfirmed": false,
+      "confirmedEffectiveDays": "",
+      "noSubsidyException": false
+    },
+    "trips": []
+  }
+}

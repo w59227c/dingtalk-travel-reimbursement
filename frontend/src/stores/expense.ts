@@ -19,7 +19,7 @@ import type {
   ReimbursementDraftFile,
 } from '@/types/reimbursements'
 import { receiptOcrResult } from '@/types/reimbursements'
-import { evidenceRailType, isActiveProof, isCourierExpense } from '@/utils/expenseProofs'
+import { evidenceRailType, expenseProofFields, isCourierExpense, isRailExpense, linkedExpenseProofs } from '@/utils/expenseProofs'
 import { itineraryConfirmationWarnings, matchItineraries } from '@/utils/itineraryMatching'
 import { centsToMoney, moneyToCents } from '@/utils/money'
 import { DEFAULT_RECEIPT_LIMITS } from '@/utils/receiptFiles'
@@ -230,6 +230,11 @@ export const useExpenseStore = defineStore('expense', () => {
       && Boolean(item.subjectValue) && !generalSubjects.value.some(option => option.value === item.subjectValue)
   }
 
+  function invalidateCalculations(): void {
+    totals.value = null
+    calculatedSignature.value = ''
+  }
+
   function calculationSignature(payload: TripInput | readonly TripInput[] | null): string {
     return JSON.stringify({
       trips: Array.isArray(payload) ? payload : payload ? [payload] : [],
@@ -336,8 +341,7 @@ export const useExpenseStore = defineStore('expense', () => {
     if (changed) subsidyTrips.value = nextTrips
     if (!nextTrips.length) {
       if (!changed) return
-      totals.value = null
-      calculatedSignature.value = ''
+      invalidateCalculations()
       return
     }
     const first = nextTrips[0]
@@ -347,8 +351,7 @@ export const useExpenseStore = defineStore('expense', () => {
     trip.endDate = last?.endDate ?? ''
     trip.endTime = last?.endTime ?? '18:00'
     if (!changed) return
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
   }
 
   async function loadCategories(force = false): Promise<boolean> {
@@ -414,8 +417,7 @@ export const useExpenseStore = defineStore('expense', () => {
     const index = items.value.findIndex((existing) => existing.id === id)
     if (index >= 0) items.value[index] = item
     else items.value.push(item)
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
     return id
   }
 
@@ -439,12 +441,10 @@ export const useExpenseStore = defineStore('expense', () => {
       ? normalizedTransportType(item.transportType, item.requiresItinerary) ?? 'other' : 'other'
     item.requiresItinerary = item.transportType === 'ride_hailing'
     if (category !== 'local_transport') item.itineraryFileIds = []
-    const rail = category === 'rail_fare'
-      || (generalMode.value && category === 'local_transport' && item.transportType === 'rail')
+    const rail = isRailExpense(item, generalMode.value)
     item.railType = evidenceRailType(rail ? 'rail_fare' : category, item.railType,
       receiptOcrResult(drafts.files.find(file => file.id === item.sourceFileId)))
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
     return true
   }
 
@@ -535,8 +535,7 @@ export const useExpenseStore = defineStore('expense', () => {
     else items.value.push(item)
     dismissedOcrFileIds.value = dismissedOcrFileIds.value.filter((id) => id !== file.id)
     if (file.ocrResult?.error?.code === 'OCR_DISABLED') ocrUnavailable.value = true
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
     return true
   }
 
@@ -708,8 +707,7 @@ export const useExpenseStore = defineStore('expense', () => {
       ]
     }
     items.value = items.value.filter((item) => item.id !== id)
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
   }
 
   function removeDraftFileAssociation(fileId: string): void {
@@ -724,8 +722,7 @@ export const useExpenseStore = defineStore('expense', () => {
     }
     dismissedOcrFileIds.value = dismissedOcrFileIds.value.filter((id) => id !== fileId)
     if (items.value.length !== previousLength) {
-      totals.value = null
-      calculatedSignature.value = ''
+      invalidateCalculations()
     }
   }
 
@@ -740,16 +737,14 @@ export const useExpenseStore = defineStore('expense', () => {
 
   function reconcileDraftProofs(draftFiles: readonly ReimbursementDraftFile[]): void {
     for (const item of items.value) {
-      const itineraryIds = (item.itineraryFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'itinerary')))
-      const paymentIds = (item.paymentProofFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'payment_proof')))
-      const receiptIds = (item.receiptAttachmentFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'other')))
-      if (receiptIds.length !== (item.receiptAttachmentFileIds?.length ?? 0)) item.receiptAttachmentFileIds = receiptIds
-      const hotelIds = (item.hotelBillFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'hotel_bill')))
-      const waybillIds = (item.waybillFileIds ?? []).filter((id) => draftFiles.some((file) => file.id === id && isActiveProof(file, 'waybill')))
-      if (itineraryIds.length !== (item.itineraryFileIds?.length ?? 0)) item.itineraryFileIds = itineraryIds
-      if (paymentIds.length !== (item.paymentProofFileIds?.length ?? 0)) item.paymentProofFileIds = paymentIds
-      if (hotelIds.length !== (item.hotelBillFileIds?.length ?? 0)) item.hotelBillFileIds = hotelIds
-      if (waybillIds.length !== (item.waybillFileIds?.length ?? 0)) item.waybillFileIds = waybillIds
+      for (const kind of Object.keys(expenseProofFields) as ReimbursementDraftFile['attachmentKind'][]) {
+        const field = expenseProofFields[kind]
+        const ids = item[field]
+        if (!ids?.length) continue
+        const validIds = new Set(linkedExpenseProofs(item, draftFiles, kind).map(file => file.id))
+        const remaining = ids.filter(id => validIds.has(id))
+        if (remaining.length !== ids.length) item[field] = remaining
+      }
     }
   }
 
@@ -861,14 +856,12 @@ export const useExpenseStore = defineStore('expense', () => {
       if (value !== 'same_city_project') delete next.attendanceDates
       return next
     })
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
   }
 
   function setSubsidyIncluded(value: boolean): void {
     includeSubsidy.value = value
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
     calculationError.value = ''
   }
 
@@ -908,8 +901,7 @@ export const useExpenseStore = defineStore('expense', () => {
     dismissedOcrFileIds.value = []
     includeSubsidy.value = false
     ocrUnavailable.value = false
-    totals.value = null
-    calculatedSignature.value = ''
+    invalidateCalculations()
     calculating.value = false
     calculationError.value = ''
     calculationVersion += 1

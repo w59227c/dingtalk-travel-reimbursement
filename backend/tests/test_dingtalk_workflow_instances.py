@@ -17,7 +17,7 @@ from app.integrations.dingtalk.workflow import (
     normalize_process_instance,
     normalize_process_instance_summary,
 )
-from app.services.general_reimbursement import find_general_approvals, verify_general_approvals
+from app.services.general_approvals import find_general_approvals, verify_general_approvals
 
 LIST_PATH = "/v1.0/workflow/processes/instanceIds/query"
 INSTANCE_PATH = "/v1.0/workflow/processInstances"
@@ -38,82 +38,6 @@ def token_response() -> httpx.Response:
         200,
         json={"access_token": "private-access-token", "expires_in": 7200},
     )
-
-
-@pytest.mark.asyncio
-async def test_visible_templates_use_openapi_get_and_preserve_pagination(settings_factory):
-    pages = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/token"):
-            return token_response()
-        assert request.method == "GET"
-        assert request.url.path == "/v1.0/workflow/processes/userVisibilities/templates"
-        assert request.headers["x-acs-dingtalk-access-token"] == "private-access-token"
-        assert "access_token" not in request.url.params
-        assert request.url.params["userId"] == "employee-1"
-        assert request.url.params["maxResults"] == "100"
-        cursor = int(request.url.params["nextToken"])
-        pages.append(cursor)
-        return httpx.Response(
-            200,
-            json={
-                "result": {
-                    "processList": [
-                        {"processCode": f"PROC-SYNTHETIC-{cursor}", "name": f"合成审批-{cursor}"}
-                    ],
-                    **({"nextToken": 100} if cursor == 0 else {}),
-                }
-            },
-        )
-
-    client, workflow = workflow_client(settings_factory, handler)
-    try:
-        templates, complete = await workflow.list_visible_templates("employee-1")
-        assert [(item.process_code, item.name) for item in templates] == [
-            ("PROC-SYNTHETIC-0", "合成审批-0"),
-            ("PROC-SYNTHETIC-100", "合成审批-100"),
-        ]
-        assert complete is True
-        assert pages == [0, 100]
-    finally:
-        await client.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["request", "result", "row", "cursor"])
-async def test_visible_templates_keep_successful_pages_when_directory_is_incomplete(
-    settings_factory,
-    failure,
-):
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/token"):
-            return token_response()
-        if request.url.params["nextToken"] == "0":
-            return httpx.Response(
-                200,
-                json={
-                    "result": {
-                        "processList": [{"processCode": "PROC-SYNTHETIC-FIRST"}],
-                        "nextToken": 100,
-                    }
-                },
-            )
-        if failure == "request":
-            return httpx.Response(403, json={"code": "Forbidden.AccessDenied.PermissionDenied"})
-        if failure == "result":
-            return httpx.Response(200, json={"result": {}})
-        if failure == "row":
-            return httpx.Response(200, json={"result": {"processList": [{}]}})
-        return httpx.Response(200, json={"result": {"processList": [], "nextToken": 100}})
-
-    client, workflow = workflow_client(settings_factory, handler)
-    try:
-        codes, complete = await workflow.list_visible_template_codes("employee-1")
-        assert codes == ("PROC-SYNTHETIC-FIRST",)
-        assert complete is False
-    finally:
-        await client.close()
 
 
 @pytest.mark.asyncio
@@ -144,8 +68,8 @@ async def test_enterprise_templates_use_modern_directory_without_employee_visibi
     try:
         templates, complete = await workflow.list_enterprise_templates()
         assert pages == [0, 100]
-        assert [entry.process_code for entry in templates] == [
-            "PROC-SYNTHETIC-0", "PROC-SYNTHETIC-100",
+        assert [(entry.process_code, entry.name) for entry in templates] == [
+            ("PROC-SYNTHETIC-0", "合成类型0"), ("PROC-SYNTHETIC-100", "合成类型100"),
         ]
         assert complete is True
     finally:
@@ -153,7 +77,9 @@ async def test_enterprise_templates_use_modern_directory_without_employee_visibi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["request", "result", "row", "name", "cursor", "boolean"])
+@pytest.mark.parametrize(
+    "failure", ["request", "result", "row", "missingCode", "rowType", "name", "cursor", "boolean"],
+)
 async def test_enterprise_templates_keep_successful_pages_when_incomplete(
     settings_factory, failure,
 ):
@@ -169,10 +95,17 @@ async def test_enterprise_templates_keep_successful_pages_when_incomplete(
             return httpx.Response(403, json={"code": "Forbidden.AccessDenied.PermissionDenied"})
         if failure == "result":
             return httpx.Response(200, json={"result": {}})
-        row = {"processCode": []} if failure == "row" else {
-            "processCode": "PROC-SYNTHETIC-SECOND",
-            "name": {} if failure == "name" else "合成第二类型",
-        }
+        if failure == "row":
+            row = {"processCode": []}
+        elif failure == "missingCode":
+            row = {}
+        elif failure == "rowType":
+            row = []
+        else:
+            row = {
+                "processCode": "PROC-SYNTHETIC-SECOND",
+                "name": {} if failure == "name" else "合成第二类型",
+            }
         return httpx.Response(200, json={"result": {
             "processList": [row], "nextToken": True if failure == "boolean" else 100,
         }})

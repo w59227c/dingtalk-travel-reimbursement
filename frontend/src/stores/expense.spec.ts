@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { calculateTotals, getExpenseCategories } from '@/api/expenses'
 import { useExpenseStore } from '@/stores/expense'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
+import { reimbursementDraftFixture, reimbursementFileFixture } from '@/tests/fixtures/reimbursements'
 import { expenseReviewWarnings } from '@/utils/expenseReview'
 import { inputSignature } from '@/utils/reimbursementInput'
 import type { OcrReceiptCandidate } from '@/types/receipts'
@@ -110,6 +111,127 @@ vi.mock('@/api/expenses', () => ({
 }))
 
 describe('expense store', () => {
+  it.each([
+    ['itinerary', 'itineraryFileIds'], ['payment_proof', 'paymentProofFileIds'],
+    ['hotel_bill', 'hotelBillFileIds'], ['waybill', 'waybillFileIds'], ['other', 'receiptAttachmentFileIds'],
+  ] as const)('reconciles %s without reordering or deduplicating saved references', (kind, field) => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const id = store.upsertManualItem({ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01',
+      description: '合成费用', amount: '44.89', receiptCount: 2 })
+    const item = store.items.find(item => item.id === id)!
+    item[field] = ['second', 'first', 'second', 'purged', 'pending', 'wrong-role', 'wrong-kind', 'missing']
+    const proof = (id: string, overrides: Partial<ReimbursementDraftFile> = {}) => reimbursementFileFixture({
+      id, role: 'ATTACHMENT_ONLY', attachmentKind: kind, ...overrides,
+    })
+    const files = [proof('first'), proof('second'), proof('purged', { status: 'PURGED' }),
+      proof('pending', { materialClassification: { status: 'pending', kind: 'unknown', reason: null, pageCount: 1 } }),
+      proof('wrong-role', { role: 'EXPENSE_SOURCE' }),
+      proof('wrong-kind', { attachmentKind: kind === 'other' ? 'payment_proof' : 'other' })]
+    store.reconcileDraftProofs(files)
+    expect(item[field]).toEqual(['second', 'first', 'second'])
+    const validReferences = item[field]
+    store.reconcileDraftProofs(files)
+    expect(item[field]).toBe(validReferences)
+    expect(store.buildDraftExpenseItems()[0]).toMatchObject({ amount: '44.89', receiptCount: 2, [field]: ['second', 'first', 'second'] })
+    expect(files).toHaveLength(6)
+  })
+
+  it('does not initialize absent proof fields or replace empty references while reconciling', () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const id = store.upsertManualItem({ category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01',
+      description: '合成费用', amount: '44.89', receiptCount: 1 })
+    const item = store.items.find(item => item.id === id)!
+    delete item.paymentProofFileIds
+    item.receiptAttachmentFileIds = []
+    const emptyReferences = item.receiptAttachmentFileIds
+    store.reconcileDraftProofs([])
+    expect(item.paymentProofFileIds).toBeUndefined()
+    expect(item.receiptAttachmentFileIds).toBe(emptyReferences)
+  })
+
+  it.each(['edit', 'category', 'remove', 'trip-type', 'subsidy', 'reset'] as const)(
+    'invalidates previously calculated totals after %s without starting a request', async change => {
+      const store = useExpenseStore()
+      store.categories = MANUAL_CATEGORIES
+      const input = { category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01',
+        description: '合成市内交通', amount: '44.89', receiptCount: 1 }
+      const id = store.upsertManualItem(input)
+      vi.mocked(calculateTotals).mockResolvedValue(reimbursementDraftFixture().totals)
+      await store.refreshCalculations()
+      expect(store.calculationsCurrent).toBe(true)
+      expect(store.totals?.totalAmount).toBe('44.89')
+      const requests = vi.mocked(calculateTotals).mock.calls.length
+
+      if (change === 'edit') store.upsertManualItem({ ...input, id, amount: '50.00' })
+      if (change === 'category') store.changeItemCategory(id, 'rail_fare')
+      if (change === 'remove') store.removeItem(id)
+      if (change === 'trip-type') store.setTripType('same_city_project')
+      if (change === 'subsidy') store.setSubsidyIncluded(true)
+      if (change === 'reset') store.reset()
+
+      expect(store.totals).toBeNull()
+      expect(store.calculationsCurrent).toBe(false)
+      expect(calculateTotals).toHaveBeenCalledTimes(requests)
+    },
+  )
+
+  it.each(['resolve', 'reject'] as const)(
+    'keeps a newer calculation active when a superseded result later %s', async settlement => {
+      const store = useExpenseStore()
+      store.categories = MANUAL_CATEGORIES
+      const input = { category: 'local_transport', date: '2026-09-01', displayDate: '2026-09-01',
+        description: '合成市内交通', amount: '44.89', receiptCount: 1 }
+      const id = store.upsertManualItem(input)
+      const totals = reimbursementDraftFixture().totals
+      let resolveOld!: (value: typeof totals) => void
+      let rejectOld!: (reason: unknown) => void
+      let resolveCurrent!: (value: typeof totals) => void
+      const oldResult = new Promise<typeof totals>((resolve, reject) => { resolveOld = resolve; rejectOld = reject })
+      const currentResult = new Promise<typeof totals>(resolve => { resolveCurrent = resolve })
+      vi.mocked(calculateTotals).mockReturnValueOnce(oldResult).mockReturnValueOnce(currentResult)
+      const old = store.refreshCalculations()
+      store.upsertManualItem({ ...input, id, amount: '50.00' })
+      const current = store.refreshCalculations()
+      if (settlement === 'resolve') resolveOld(totals)
+      else rejectOld(new Error('合成旧计算失败'))
+      await old
+      expect(store.totals).toBeNull()
+      expect(store.calculating).toBe(true)
+      expect(store.calculationError).toBe('')
+      const updated = { ...totals, expenseTotal: '50.00', totalAmount: '50.00', uppercaseAmount: '伍拾元整' }
+      resolveCurrent(updated)
+      await current
+      expect(store.totals).toEqual(updated)
+      expect(store.calculationsCurrent).toBe(true)
+      expect(store.calculating).toBe(false)
+    },
+  )
+
+  it('retains valid totals when removing only a proof reference but invalidates source removal', async () => {
+    const store = useExpenseStore()
+    store.categories = MANUAL_CATEGORIES
+    const source = durableFile('synthetic-source')
+    source.ocrResult.amount = '44.89'
+    store.upsertDraftOcrItem(source)
+    store.items[0]!.paymentProofFileIds = ['synthetic-proof']
+    const totals = reimbursementDraftFixture().totals
+    vi.mocked(calculateTotals).mockResolvedValue(totals)
+    await store.refreshCalculations()
+    expect(store.calculationsCurrent).toBe(true)
+
+    store.removeDraftFileAssociation('synthetic-proof')
+    expect(store.items[0]!.paymentProofFileIds).toEqual([])
+    expect(store.totals).toEqual(totals)
+    expect(store.calculationsCurrent).toBe(true)
+
+    store.removeDraftFileAssociation(source.id)
+    expect(store.items).toEqual([])
+    expect(store.totals).toBeNull()
+    expect(store.calculationsCurrent).toBe(false)
+  })
+
   it('rejects unavailable quick categories and leaves locked snapshots unchanged', () => {
     const store = useExpenseStore()
     store.categories = [...MANUAL_CATEGORIES,

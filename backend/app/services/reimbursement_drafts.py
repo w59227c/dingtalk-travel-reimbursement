@@ -41,12 +41,11 @@ from app.schemas.reimbursements import (
     RelatedApprovalSelectionInput,
 )
 from app.services.dingtalk import DepartmentIdentity
+from app.services.general_approvals import approval_summary, verify_general_approvals
 from app.services.general_reimbursement import (
-    approval_summary,
     general_options,
     get_general_catalog,
     subject_category,
-    verify_general_approvals,
 )
 from app.services.oa_template_profiles import (
     OaTemplateCatalogContract,

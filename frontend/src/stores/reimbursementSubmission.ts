@@ -10,6 +10,7 @@ import {
   submitOaReimbursement,
 } from '@/api/reimbursements'
 import type {
+  ReimbursementDraft,
   ReimbursementSubmission,
   ReimbursementSubmissionStatus,
 } from '@/types/reimbursements'
@@ -507,6 +508,19 @@ export const useReimbursementSubmissionStore = defineStore(
       }
     }
 
+    function fetchSubmissionOnce(
+      record: PersistedSubmission,
+      requestGeneration: number,
+    ): Promise<ReimbursementSubmission | null> {
+      if (record.submissionId === null) return Promise.resolve(null)
+      if (pollFlight?.submissionId === record.submissionId) return pollFlight.promise
+      const promise = fetchSubmission(record, requestGeneration).finally(() => {
+        if (pollFlight?.promise === promise) pollFlight = null
+      })
+      pollFlight = { submissionId: record.submissionId, promise }
+      return promise
+    }
+
     function pollNow(): Promise<ReimbursementSubmission | null> {
       const current = submission.value
       if (current === null || (isTerminal(current.status) && current.status !== 'MANUAL_REVIEW')) {
@@ -514,6 +528,7 @@ export const useReimbursementSubmissionStore = defineStore(
         clearPollTimer()
         return Promise.resolve(current)
       }
+      // Reusing an active read must not reset its timer or rewrite its record.
       if (pollFlight?.submissionId === current.submissionId) return pollFlight.promise
       clearPollTimer()
       const record = recordForDraft(current.draftId) ?? {
@@ -523,12 +538,7 @@ export const useReimbursementSubmissionStore = defineStore(
         submissionId: current.submissionId,
       }
       record.submissionId = current.submissionId
-      const requestGeneration = generation
-      const promise = fetchSubmission(record, requestGeneration).finally(() => {
-        if (pollFlight?.promise === promise) pollFlight = null
-      })
-      pollFlight = { submissionId: current.submissionId, promise }
-      return promise
+      return fetchSubmissionOnce(record, generation)
     }
 
     async function recheck(): Promise<void> {
@@ -554,6 +564,14 @@ export const useReimbursementSubmissionStore = defineStore(
           submitting.value = false
         }
       }
+    }
+
+    /** Restore an already-read draft using its authoritative lock state and revision. */
+    function restoreForDraft(
+      draft: Pick<ReimbursementDraft, 'id' | 'status' | 'revision'>,
+    ): Promise<ReimbursementSubmission | null> {
+      return restore(draft.id, draft.status === 'LOCKED'
+        ? { discoverByDraft: true, expectedRevision: draft.revision } : undefined)
     }
 
     function restore(
@@ -595,12 +613,7 @@ export const useReimbursementSubmissionStore = defineStore(
         if (!isTerminal(submission.value.status)) schedulePoll(submission.value)
         return Promise.resolve(submission.value)
       }
-      if (pollFlight?.submissionId === record.submissionId) return pollFlight.promise
-      const promise = fetchSubmission(record, requestGeneration).finally(() => {
-        if (pollFlight?.promise === promise) pollFlight = null
-      })
-      pollFlight = { submissionId: record.submissionId, promise }
-      return promise
+      return fetchSubmissionOnce(record, requestGeneration)
     }
 
     async function discoverSubmissionForDraft(
@@ -687,6 +700,7 @@ export const useReimbursementSubmissionStore = defineStore(
       errorMessage,
       submit,
       restore,
+      restoreForDraft,
       pollNow,
       recheck,
       startPolling,

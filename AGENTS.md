@@ -80,6 +80,7 @@ make nginx-policy-check
 跨层、数据库结构、状态机、安全、OCR、Excel 或 OA 提交相关改动，应运行上面所有适用检查。仅在具备生产必需配置时运行 `make compose-config`。修改 OCR 制品、运行时、Docker 镜像或部署行为时，还要运行 `make ocr-models-check`、标准/低内存模式的 `make ocr-runtime-check`、`make ocr-memory-check` 及相关镜像 smoke 检查。
 
 - 前端行为变更需要有意义的 Vitest 覆盖；桌面端与移动端共享行为必须测试两种模式。
+- 材料预览、审批关联或保存／离页流程变更还须运行 `make browser-smoke`。首次使用先运行 `make browser-smoke-install`；该检查自行准备合成数据和临时本地服务，不接受真实环境地址。
 - 保存回读的 mock/fixture 应覆盖真实后端序列化，不能只原样返回请求；至少检查正常回读、成功但响应丢失、自有删除和真实并发差异，防止格式变化误报冲突或掩盖内容变化。
 - 后端 API 或 service 变更应按实际影响覆盖成功、拒绝、鉴权/归属、revision 冲突、幂等和异常恢复。
 - 数据库迁移应覆盖空数据库、受支持升级路径、当前 head/readiness 检查，以及可能丢失数据时的降级保护。

@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, nextTick } from 'vue'
 import { createMemoryHistory, createRouter, RouterView, type Router } from 'vue-router'
 
+import {
+  authSessionFixture, draftFileListFixture, noSubsidyReceiptInputFixture as canonicalNoSubsidyInput,
+  receiptExpenseInputFixture, reimbursementDraftFixture as makeDraft, reimbursementFileFixture,
+  reimbursementSubmissionFixture as submissionResult, savedExpenseReadbackFixture,
+} from '@/tests/fixtures/reimbursements'
 import { getMe, getPublicConfig, listReimbursementEmployees, prepareReimbursementContext, selectDepartmentForGeneralReimbursement, selectDepartmentFromTravelApproval } from '@/api/auth'
 import { calculateTotals, getExpenseCategories } from '@/api/expenses'
 import { fetchReadiness } from '@/api/health'
@@ -41,7 +46,6 @@ import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { useReimbursementSubmissionStore } from '@/stores/reimbursementSubmission'
 import { groupOverlappingSubsidyTrips } from '@/utils/subsidyTripGroups'
 import { updateSubsidyWindow } from '@/utils/subsidyWindow'
-import type { AuthSession } from '@/types/auth'
 import type {
   OaTravelApprovalList,
   ReimbursementDraft,
@@ -111,54 +115,7 @@ const options = {
   }],
 }
 
-const baseInput: ReimbursementDraftInput = {
-  ocrDispositionVersion: 1,
-  companyValue: '北京',
-  budgetCodeValue: 'DEMO-001',
-  project: { mode: 'manual', text: '示例项目' },
-  trip: null,
-  dismissedOcrFileIds: [],
-  items: [{
-    sourceFileId: 'file-1',
-    category: 'local_transport',
-    date: '2026-09-01',
-    displayDate: '2026-09-01',
-    description: '机场至酒店',
-    amount: '44.89',
-    receiptCount: 1,
-  }],
-}
-
-function canonicalNoSubsidyInput(): ReimbursementDraftInput {
-  return {
-    ...structuredClone(baseInput),
-    editingState: {
-      includeSubsidy: false,
-      trip: {
-        tripType: 'business',
-        startDate: '',
-        startTime: '09:00',
-        endDate: '',
-        endTime: '18:00',
-        policyConfirmed: false,
-        confirmedEffectiveDays: '',
-        noSubsidyException: false,
-      },
-      trips: [],
-    },
-    items: baseInput.items.map((item) => ({
-      ...structuredClone(item),
-      itineraryFileIds: [],
-      itineraryAutoMatchDisabled: false,
-      paymentProofFileIds: [],
-      hotelBillFileIds: [],
-      railType: 'unknown',
-      requiresItinerary: false,
-      cnyAmountConfirmed: false,
-      requiresCnyConfirmation: false,
-    })),
-  }
-}
+const baseInput = receiptExpenseInputFixture()
 
 const linkedApproval: ReimbursementRelatedApproval = {
   processInstanceId: 'travel-instance-1',
@@ -181,71 +138,9 @@ const selection: ReimbursementRelatedApprovalSelection = {
   queryWindow: { from: '2026-08-01', to: '2026-09-04' },
 }
 
-const activeFile: ReimbursementDraftFile = {
-  id: 'file-1',
-  name: '打车发票.pdf',
-  role: 'EXPENSE_SOURCE',
-  attachmentKind: 'other',
-  sortOrder: 0,
-  status: 'ACTIVE',
-  mediaType: 'application/pdf',
-  sizeBytes: 128,
-  ocrStatus: 'COMPLETE',
-  ocrResult: null,
-}
-
-function makeDraft(overrides: Partial<ReimbursementDraft> = {}): ReimbursementDraft {
-  return {
-    id: 'draft-1',
-    status: 'DRAFT',
-    revision: 1,
-    department: { id: '100', name: '测试部门' },
-    templateConfigVersion: 12,
-    relatedApprovalCount: 0,
-    expiresAt: '2026-10-04T00:00:00Z',
-    createdAt: '2026-09-04T00:00:00Z',
-    updatedAt: '2026-09-04T00:00:00Z',
-    lockedAt: null,
-    template: {
-      processCode: 'PROC-REIMBURSEMENT',
-      configVersion: 12,
-      schemaFingerprint: 'a'.repeat(64),
-    },
-    input: structuredClone(baseInput),
-    totals: {
-      expenseTotal: '44.89',
-      subsidyTotal: '0.00',
-      totalAmount: '44.89',
-      receiptCount: 1,
-      uppercaseAmount: '肆拾肆元捌角玖分',
-      subsidy: null,
-    },
-    relatedApprovals: [],
-    relatedApprovalSummary: null,
-    ...overrides,
-  }
-}
-
-function submissionResult(
-  overrides: Partial<ReimbursementSubmission> = {},
-): ReimbursementSubmission {
-  return {
-    submissionId: 'submission-1',
-    draftId: 'draft-1',
-    status: 'QUEUED',
-    statusVersion: 1,
-    attemptCount: 0,
-    processInstanceId: null,
-    businessId: null,
-    approvalUrl: null,
-    error: null,
-    pollAfterMs: 1_500,
-    createdAt: '2026-09-04T00:00:00Z',
-    updatedAt: '2026-09-04T00:00:00Z',
-    submittedAt: null,
-    ...overrides,
-  }
-}
+const activeFile = reimbursementFileFixture({
+  name: '打车发票.pdf', mediaType: 'application/pdf', sizeBytes: 128, ocrStatus: 'COMPLETE',
+})
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -260,7 +155,6 @@ function deferred<T>() {
 const ExpenseItemsCardStub = defineComponent({
   name: 'ExpenseItemsCard',
   props: {
-    durable: { type: Boolean, default: false },
     mobile: { type: Boolean, default: false },
     readonly: { type: Boolean, default: false },
     refreshingMaterialStatus: { type: Boolean, default: false },
@@ -268,7 +162,6 @@ const ExpenseItemsCardStub = defineComponent({
   emits: ['refresh-draft', 'refresh-material-status'],
   template: `<section
     data-testid="expense-items"
-    :data-durable="String(durable)"
     :data-mobile="String(mobile)"
     :data-readonly="String(readonly)"
   >费用明细</section>`,
@@ -351,11 +244,7 @@ function installServerMocks(): void {
     return { draft: serverDraft, selectedDepartment: department }
   })
   vi.mocked(getReimbursementDraft).mockImplementation(async () => serverDraft)
-  vi.mocked(listReimbursementDraftFiles).mockImplementation(async () => ({
-    draftId: serverDraft.id,
-    revision: serverDraft.revision,
-    items: serverFiles,
-  }))
+  vi.mocked(listReimbursementDraftFiles).mockImplementation(async () => draftFileListFixture(serverDraft, serverFiles))
   vi.mocked(listOaTravelApprovals).mockResolvedValue({
     templateConfigVersion: 12,
     queryWindow: selection.queryWindow,
@@ -410,22 +299,15 @@ function installServerMocks(): void {
 
 const coworker = { userId: 'synthetic-coworker', name: '合成同事' }
 const coworkerDepartment = { id: '200', name: '合成同事部门' }
-const personalSession: AuthSession = {
-  user: { userId: 'synthetic-user', name: '测试用户' },
-  departments: [{ id: '100', name: '测试部门' }],
-  selectedDepartment: { id: '100', name: '测试部门' },
-  isAdmin: false,
-  csrfToken: 'synthetic-csrf',
-  canDelegateReimbursements: true,
-}
-const delegatedSession: AuthSession = {
+let personalSession = authSessionFixture({ canDelegateReimbursements: true })
+let delegatedSession = authSessionFixture({
   ...personalSession,
   operator: personalSession.user,
   user: coworker,
   departments: [coworkerDepartment],
   selectedDepartment: coworkerDepartment,
   reimbursementContext: 'synthetic-signed-delegation',
-}
+})
 
 async function selectCoworker(wrapper: VueWrapper): Promise<void> {
   await wrapper.get('[data-testid="select-reimbursement-employee"]').trigger('click')
@@ -446,13 +328,7 @@ async function mountView(setup?: (auth: ReturnType<typeof useAuthStore>) => void
   setActivePinia(pinia)
   const auth = useAuthStore()
   auth.status = 'authenticated'
-  auth.session = {
-    user: { userId: 'synthetic-user', name: '测试用户' },
-    departments: [{ id: '100', name: '测试部门' }],
-    selectedDepartment: { id: '100', name: '测试部门' },
-    isAdmin: true,
-    csrfToken: 'synthetic-csrf',
-  }
+  auth.session = authSessionFixture({ isAdmin: true })
   useReimbursementSubmissionStore().oaSubmissionEnabled = true
   setup?.(auth)
   const expense = useExpenseStore()
@@ -855,7 +731,7 @@ describe('ReimburseView single-form OA flow', () => {
       await nextTick()
       await visibleButton(wrapper, '确认部门').trigger('click')
       await flushPromises()
-      expect(listWorkspaceReimbursements).toHaveBeenLastCalledWith({ kind: 'general', expectedDepartment: ordinary })
+      expect(listWorkspaceReimbursements).toHaveBeenLastCalledWith({ kind: 'general', expectedDepartment: ordinary, reimbursementContext: null })
       expect(drafts.currentDraft?.id).toBe(serverDraft.id)
       expect(createReimbursementDraft).not.toHaveBeenCalled()
     } finally { wrapper.unmount() }
@@ -1724,8 +1600,12 @@ describe('ReimburseView single-form OA flow', () => {
     window.requestAnimationFrame = (callback: FrameRequestCallback) => { callback(0); return 0 }
     window.cancelAnimationFrame = () => undefined
     vi.clearAllMocks()
+    personalSession = authSessionFixture({ canDelegateReimbursements: true })
+    delegatedSession = authSessionFixture({ ...personalSession, operator: personalSession.user, user: coworker,
+      departments: [coworkerDepartment], selectedDepartment: coworkerDepartment,
+      reimbursementContext: 'synthetic-signed-delegation' })
     serverDraft = makeDraft()
-    serverFiles = [activeFile]
+    serverFiles = [reimbursementFileFixture(activeFile)]
     installServerMocks()
   })
 
@@ -3458,6 +3338,37 @@ describe('ReimburseView single-form OA flow', () => {
     },
   )
 
+  it.each([false, true].flatMap(mobile => ['readonly', 'materials'].map(block => ({ mobile, block }))))(
+    'pauses scheduled autosave when the form becomes $block and retains live edits, mobile=$mobile', async ({ mobile, block }) => {
+      vi.useFakeTimers()
+      serverDraft.input = canonicalNoSubsidyInput()
+      const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      vi.mocked(updateReimbursementDraft).mockClear()
+      expense.items[0]!.amount = '95.00'
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(200)
+      if (block === 'readonly') drafts.reimbursementOptionsError = '合成 OA 模板读取故障'
+      else drafts.processingFiles = true
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(700)
+      await flushPromises()
+      expect(updateReimbursementDraft).not.toHaveBeenCalled()
+      expect(expense.items[0]!.amount).toBe('95.00')
+      expect(wrapper.text()).not.toContain('保存失败')
+      drafts.reimbursementOptionsError = ''
+      drafts.processingFiles = false
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(650)
+      await flushPromises()
+      expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+      expect(vi.mocked(updateReimbursementDraft).mock.calls[0]![2].items[0]!.amount).toBe('95.00')
+      expect(wrapper.get('[data-testid="autosave-status"]').text()).toBe('已保存')
+      wrapper.unmount()
+    },
+  )
+
   it('automatically saves incomplete subsidy dates and unfinished OCR amounts', async () => {
     const { wrapper, expense } = await mountView()
     vi.mocked(updateReimbursementDraft).mockClear()
@@ -5031,6 +4942,40 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true])('releases the reload confirmation after history is cancelled, mobile=%s', async mobile => {
+    serverDraft = makeDraft({ status: 'EXPIRED', input: canonicalNoSubsidyInput() })
+    vi.mocked(listReimbursementSubmissionHistory).mockResolvedValue([
+      { id: 'synthetic-history-cancel', lockedAt: '2026-09-04T00:03:00Z', relatedApprovalCount: 1 },
+    ])
+    const { wrapper, drafts, expense } = await mountView(undefined, false, mobile)
+    const pending = deferred<Awaited<ReturnType<typeof ElMessageBox.confirm>>>()
+    const confirm = vi.spyOn(ElMessageBox, 'confirm').mockReturnValueOnce(pending.promise).mockRejectedValueOnce('cancel')
+    try {
+      expense.items[0]!.description = '关闭历史后仍要留在本页的输入'
+      await nextTick()
+      await visibleButton(wrapper, '报销记录').trigger('click')
+      await flushPromises()
+      await visibleButton(wrapper, '查看明细').trigger('click')
+      await flushPromises()
+      expect(confirm).toHaveBeenCalledOnce()
+      const history = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('title') === '报销记录')!
+      history.vm.$emit('update:modelValue', false)
+      await flushPromises()
+      pending.resolve(undefined as never)
+      await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+      expect(expense.items[0]?.description).toBe('关闭历史后仍要留在本页的输入')
+      expect(visibleButton(wrapper, '报销记录').attributes('disabled')).toBeUndefined()
+      await visibleButton(wrapper, '报销记录').trigger('click')
+      await flushPromises()
+      await visibleButton(wrapper, '查看明细').trigger('click')
+      await flushPromises()
+      expect(confirm).toHaveBeenCalledTimes(2)
+      expect(getOaReimbursementSubmissionForDraft).not.toHaveBeenCalled()
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { pending.resolve(undefined as never); wrapper.unmount() }
+  })
+
   it.each([false, true])('allows retrying the history list and explains an empty result, mobile=%s', async (mobile) => {
     vi.mocked(listReimbursementSubmissionHistory).mockRejectedValueOnce(new Error('记录读取失败'))
     const { wrapper } = await mountView(undefined, false, mobile)
@@ -6227,6 +6172,31 @@ describe('ReimburseView single-form OA flow', () => {
     wrapper.unmount()
   })
 
+  it.each([false, true].flatMap(mobile => (['travel', 'general'] as const).map(kind => ({ mobile, kind }))))(
+    'clears a previous submission while initializing an editable $kind draft, mobile=$mobile', async ({ mobile, kind }) => {
+      serverDraft = makeDraft({ kind, input: canonicalNoSubsidyInput() })
+      const { wrapper, drafts } = await mountView(() => {
+        useReimbursementDraftStore().reimbursementKind = kind
+        const previous = useReimbursementSubmissionStore()
+        previous.activeDraftId = 'synthetic-previous-locked'
+        previous.submission = submissionResult({ draftId: 'synthetic-previous-locked', status: 'FAILED_FINAL' })
+        previous.idempotencyKey = 'synthetic-previous-key'
+      }, false, mobile)
+      try {
+        const submission = useReimbursementSubmissionStore()
+        expect(submission.activeDraftId).toBe(serverDraft.id)
+        expect(submission.submission).toBeNull()
+        expect(submission.idempotencyKey).toBeNull()
+        expect(submission.polling).toBe(false)
+        expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+        expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+        expect(getOaReimbursementSubmissionForDraft).not.toHaveBeenCalled()
+        expect(submitOaReimbursement).not.toHaveBeenCalled()
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { wrapper.unmount() }
+    },
+  )
+
   it.each([false, true].flatMap((mobile) => (
     ['QUEUED', 'UPLOADING', 'FAILED_RETRYABLE', 'MANUAL_REVIEW', 'OA_CREATING', 'RECONCILING', 'VERIFYING'] as const
   ).map((status) => ({ mobile, status }))))(
@@ -6282,6 +6252,98 @@ describe('ReimburseView single-form OA flow', () => {
       expect(drafts.currentDraft?.id).toBe(currentA.id)
       expect(expense.items[0]?.description).toBe('返回原部门后，用户正在填写的新内容')
     } finally { staleWorkspace.resolve({ items: [oldA], total: 1 }); wrapper.unmount() }
+  })
+
+  it.each([false, true].flatMap(mobile => ['legacy', 'empty'].map(oldResult => ({ mobile, oldResult }))))(
+    'ignores an old $oldResult workspace while waiting for its options, mobile=$mobile', async ({ mobile, oldResult }) => {
+      serverDraft.input = canonicalNoSubsidyInput()
+      const { wrapper, drafts, expense } = await mountView(undefined, false, mobile)
+      const pending = deferred<Awaited<ReturnType<typeof getOaReimbursementOptions>>>()
+      const options = JSON.parse(JSON.stringify(drafts.reimbursementOptions!))
+      try {
+        const oldItems = oldResult === 'legacy' ? [makeDraft({ id: 'synthetic-old-a' }), makeDraft({ id: 'synthetic-old-b' })] : []
+        vi.mocked(listWorkspaceReimbursements).mockResolvedValueOnce({ items: oldItems, total: oldItems.length })
+        vi.mocked(getOaReimbursementOptions).mockReturnValueOnce(pending.promise)
+        useAuthStore().session!.csrfToken = 'synthetic-session-b'
+        await flushPromises()
+        serverDraft = makeDraft({ id: 'synthetic-current-after-options', input: canonicalNoSubsidyInput() })
+        useAuthStore().session!.csrfToken = 'synthetic-csrf'
+        await flushPromises()
+        expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+        expense.items[0]!.description = '新一轮恢复后的输入'
+        await nextTick()
+        pending.resolve(options)
+        await flushPromises()
+        expect(wrapper.find('[data-testid="legacy-drafts"]').exists()).toBe(false)
+        expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+        expect(expense.items[0]?.description).toBe('新一轮恢复后的输入')
+        expect(wrapper.findComponent(ExpenseItemsCardStub).props('readonly')).toBe(false)
+        expect(createReimbursementDraft).not.toHaveBeenCalled()
+      } finally { pending.resolve(options); wrapper.unmount() }
+    },
+  )
+
+  it.each([false, true])('ignores a late workspace detail after returning to the original session, mobile=%s', async mobile => {
+    serverDraft.input = canonicalNoSubsidyInput()
+    const { wrapper, drafts, expense } = await mountView(undefined, false, mobile)
+    const pending = deferred<ReimbursementDraft>()
+    const old = makeDraft({ id: 'synthetic-old-detail', input: canonicalNoSubsidyInput() })
+    try {
+      vi.mocked(getReimbursementDraft).mockReturnValueOnce(pending.promise)
+      serverDraft = old
+      useAuthStore().session!.csrfToken = 'synthetic-session-b'
+      await flushPromises()
+      const current = makeDraft({ id: 'synthetic-returned-current', input: canonicalNoSubsidyInput() })
+      serverDraft = current
+      useAuthStore().session!.csrfToken = 'synthetic-csrf'
+      await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(current.id)
+      expense.items[0]!.description = '原会话恢复后继续编辑的说明'
+      await nextTick()
+      pending.resolve(old)
+      await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(current.id)
+      expect(expense.items[0]?.description).toBe('原会话恢复后继续编辑的说明')
+      expect(drafts.files).toEqual(serverFiles)
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+    } finally { pending.resolve(old); wrapper.unmount() }
+  })
+
+  it.each([false, true])('does not create an employee workspace after the page unmounts, mobile=%s', async mobile => {
+    serverDraft.input = canonicalNoSubsidyInput()
+    const pending = deferred<Awaited<ReturnType<typeof listWorkspaceReimbursements>>>()
+    vi.mocked(listReimbursementEmployees).mockResolvedValue([coworker])
+    vi.mocked(prepareReimbursementContext).mockResolvedValue(structuredClone(delegatedSession))
+    vi.mocked(listWorkspaceReimbursements).mockImplementation(request => request?.reimbursementContext
+      ? pending.promise : Promise.resolve({ items: [serverDraft], total: 1 }))
+    const { wrapper } = await mountView(auth => { auth.session = personalSession }, false, mobile)
+    try {
+      await selectCoworker(wrapper)
+      expect(getOaReimbursementOptions).toHaveBeenCalledWith(expect.objectContaining({ reimbursementContext: delegatedSession.reimbursementContext }))
+    } finally { wrapper.unmount() }
+    pending.resolve({ items: [], total: 0 })
+    await flushPromises()
+    expect(createReimbursementDraft).not.toHaveBeenCalled()
+    expect(useAuthStore().session?.user.userId).toBe(personalSession.user.userId)
+  })
+
+  it.each([false, true])('does not arbitrarily adopt one of multiple legacy workspaces during recovery readback, mobile=%s', async mobile => {
+    serverDraft = makeDraft({ status: 'LOCKED', revision: 5, input: canonicalNoSubsidyInput() })
+    vi.mocked(getOaReimbursementSubmissionForDraft).mockResolvedValue(submissionResult({ status: 'FAILED_FINAL', pollAfterMs: 0 }))
+    const { wrapper, drafts } = await mountView(undefined, false, mobile)
+    try {
+      const target = makeDraft({ id: 'synthetic-recovery-target', recoverySourceDraftId: serverDraft.id })
+      vi.mocked(recoverReimbursementDraft).mockRejectedValueOnce(new Error('合成恢复响应丢失'))
+      vi.mocked(listWorkspaceReimbursements).mockResolvedValue({ items: [target, makeDraft({ id: 'synthetic-legacy-second' })], total: 2 })
+      const detailReads = vi.mocked(getReimbursementDraft).mock.calls.length
+      await visibleButton(wrapper, '保留内容重新处理').trigger('click')
+      await flushPromises()
+      expect(drafts.currentDraft?.id).toBe(serverDraft.id)
+      expect(wrapper.text()).toContain('合成恢复响应丢失')
+      expect(getReimbursementDraft).toHaveBeenCalledTimes(detailReads)
+      expect(createReimbursementDraft).not.toHaveBeenCalled()
+      expect(submitOaReimbursement).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
   })
 
   it.each([false, true])('ignores a late autosave failure after a session roundtrip mobile=%s', async (mobile) => {
@@ -6740,12 +6802,9 @@ describe('ReimburseView single-form OA flow', () => {
     serverDraft.input = canonicalNoSubsidyInput()
     const { wrapper, expense, drafts } = await mountView(undefined, false, mobile)
     try {
-      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision, input) => {
-        serverDraft = { ...serverDraft, revision: revision + 1, input: structuredClone(input) }
-        // Real readback adds server-derived data, defaults and decimal formatting.
-        serverDraft.input.project = { mode: 'manual', text: '服务端预算完整标签' }
-        serverDraft.input.accountingSourceVerified = true
-        serverDraft.input.items[0]!.amount = '44.80'
+      const { readback } = savedExpenseReadbackFixture()
+      vi.mocked(updateReimbursementDraft).mockImplementationOnce(async (_id, revision) => {
+        serverDraft = { ...serverDraft, revision: revision + 1, input: readback }
         throw new Error('Synthetic committed response lost')
       })
       expense.items[0]!.amount = '44.8'

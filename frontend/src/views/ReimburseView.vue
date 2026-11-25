@@ -7,6 +7,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 
 import ExpenseItemsCard from '@/components/reimbursement/ExpenseItemsCard.vue'
+import { useReimbursementSaveCoordinator } from '@/components/reimbursement/useReimbursementSaveCoordinator'
+import { reimbursementEditingAvailability, reimbursementWorkspaceAvailability, reimbursementOutputAvailability, type ReimbursementOperationState } from '@/components/reimbursement/reimbursementOperationPolicy'
+import { emptyReimbursementInput, useReimbursementWorkspaceReader, type WorkspaceReadContext } from '@/components/reimbursement/useReimbursementWorkspaceReader'
 import ApprovalAccountingLine from '@/components/reimbursement/ApprovalAccountingLine.vue'
 import ReimbursementEmployeePicker from '@/components/reimbursement/ReimbursementEmployeePicker.vue'
 import ReimbursementReviewOverview from '@/components/reimbursement/ReimbursementReviewOverview.vue'
@@ -20,17 +23,14 @@ import { getMe, prepareReimbursementContext, selectDepartmentForGeneralReimburse
 import {
   correctReimbursementDepartment,
   openReimbursementWorkspace,
-  createReimbursementDraft,
-  getOaReimbursementOptions,
   getOaReimbursementSubmissionForDraft,
   getReimbursementDraft,
   listReimbursementSubmissionHistory,
-  listWorkspaceReimbursements,
 } from '@/api/reimbursements'
 import { isDelegationContextError, useAuthStore } from '@/stores/auth'
 import { useExpenseStore } from '@/stores/expense'
 import { useHealthStore } from '@/stores/health'
-import { readConsistentDraft, useReimbursementDraftStore } from '@/stores/reimbursementDraft'
+import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
 import { useReimbursementSubmissionStore } from '@/stores/reimbursementSubmission'
 import { isForeignExpense, type TripType } from '@/types/expenses'
 import type { AuthSession, ReimbursementEmployee } from '@/types/auth'
@@ -135,16 +135,14 @@ const workspaceActionError = computed({
   },
 })
 const workspaceConfirmationRequired = ref(false)
-let workspaceReadGeneration = 0
-interface WorkspaceReadContext { scope: string; generation: number }
 type ReplacementReadResult = { kind: 'unchanged' } | { kind: 'conflict' } | { kind: 'stale' } | { kind: 'empty' }
   | { kind: 'loaded'; draft: ReimbursementDraft }
-function beginWorkspaceRead(): WorkspaceReadContext {
-  return { scope: sessionScope(), generation: ++workspaceReadGeneration }
-}
-function acceptsWorkspaceRead(context: WorkspaceReadContext): boolean {
-  return !disposed && context.scope === sessionScope() && context.generation === workspaceReadGeneration
-}
+const workspaceReader = useReimbursementWorkspaceReader({
+  scope: sessionScope,
+  request: () => ({ expectedDepartment: auth.session?.selectedDepartment ?? undefined,
+    reimbursementContext: auth.session?.reimbursementContext ?? null, ...generalScopeOptions.value }),
+  drafts,
+})
 const confirmingDraftReload = ref(false)
 const pendingNewApproval = ref<ReimbursementRelatedApprovalSelection | null>(null)
 const historyVisible = ref(false)
@@ -214,13 +212,20 @@ const refreshingServiceStatus = ref(false)
 const savedInputSignature = ref('')
 const savedRelatedSignature = ref('')
 let calculationTimer: ReturnType<typeof setTimeout> | undefined
-let autosaveTimer: ReturnType<typeof setTimeout> | undefined
 let initializationPromise: Promise<void> | null = null
-let savePromise: Promise<void> | null = null
 let initializationScope = ''
 let initializedScope = ''
 let disposed = false
 let mobileFooterResizeObserver: ResizeObserver | undefined
+const saveCoordinator = useReimbursementSaveCoordinator({
+  target: () => ({ scope: sessionScope(), draftId: drafts.currentDraft?.id }),
+  canAutosave: () => Boolean(sessionScope()) && !changingDepartment.value
+    && !initializingWorkspace.value && !formReadOnly.value && !drafts.busy
+    && !confirmingDraftReload.value && !verifyingRelatedApprovals.value
+    && !bindingApprovalDepartment.value && !pendingDepartmentApproval.value && formDirty.value,
+  autosave: () => flushAutosave(),
+})
+const scheduleAutosave = saveCoordinator.schedule
 
 const companyOptions = computed(() => drafts.reimbursementOptions?.companyOptions ?? [])
 const budgetOptions = computed(() => drafts.reimbursementOptions?.budgetCodeOptions ?? [])
@@ -339,17 +344,29 @@ const draftDepartmentInvalid = computed(() => Boolean(drafts.currentDraft
   && !drafts.currentDraft.recoveryPending && ['DRAFT', 'REVIEW_READY'].includes(drafts.currentDraft.status)
   && !selectableDepartments.value.some(d => d.id === drafts.currentDraft?.department.id
     && d.name === drafts.currentDraft.department.name)))
-const formOperationBlocked = computed(() => !drafts.currentDraft || submitFlowPending.value
-  || Boolean(initializationError.value)
-  || delegationRevoked.value
-  || switchingReimbursement.value
-  || (isGeneral.value && verifyingRelatedApprovals.value)
-  || bindingApprovalDepartment.value
-  || workspaceConfirmationRequired.value
-  || draftUnavailable.value
-  || drafts.currentDraft.workspaceRetired || drafts.currentDraft.recoveryPending || recoveringReimbursement.value
-  || drafts.currentDraft.status === 'LOCKED' || draftExpired.value || trackedSubmission.value
-  || templateMismatch.value || reimbursementOptionsUnavailable.value || saveRequiresReload.value)
+const operationState = computed<ReimbursementOperationState>(() => ({
+  draft: drafts.currentDraft ? {
+    status: drafts.currentDraft.status, retired: Boolean(drafts.currentDraft.workspaceRetired),
+    recoveryPending: Boolean(drafts.currentDraft.recoveryPending), expired: draftExpired.value,
+    unavailable: draftUnavailable.value, trackedSubmission: trackedSubmission.value,
+  } : null,
+  mode: { general: isGeneral.value, administrator: auth.isAdmin },
+  options: { unavailable: reimbursementOptionsUnavailable.value, changed: templateMismatch.value,
+    needsAdministrator: templateNeedsAdmin.value },
+  verification: { initializationFailed: Boolean(initializationError.value), delegationRevoked: delegationRevoked.value,
+    workspaceUncertain: workspaceConfirmationRequired.value, reloadRequired: saveRequiresReload.value },
+  activity: {
+    switchingEmployee: switchingReimbursement.value, initializing: initializingWorkspace.value,
+    bindingDepartment: bindingApprovalDepartment.value, pendingDepartmentApproval: Boolean(pendingDepartmentApproval.value),
+    verifyingApprovals: verifyingRelatedApprovals.value, submitting: submitFlowPending.value,
+    submissionRequest: submission.submitting, recovering: recoveringReimbursement.value,
+    replacingTemplate: replacingTemplate.value, confirmingReload: confirmingDraftReload.value,
+    processingFiles: drafts.processingFiles, materialEditor: Boolean(expenseItemsCard.value?.hasOpenMaterialEditor),
+    busy: drafts.busy, saving: saving.value, refreshingMaterials: refreshingMaterialStatus.value,
+  },
+}))
+const editingAvailability = computed(() => reimbursementEditingAvailability(operationState.value))
+const formOperationBlocked = computed(() => !editingAvailability.value.allowed)
 const formReadOnly = formOperationBlocked
 const canRecoverTravelDepartmentFromApproval = computed(() => !isGeneral.value
   && draftDepartmentInvalid.value && !formOperationBlocked.value
@@ -357,29 +374,7 @@ const canRecoverTravelDepartmentFromApproval = computed(() => !isGeneral.value
 const changingDepartmentUnconfirmed = computed(() => generalDepartmentUnconfirmed.value)
 const departmentGateError = computed(() => departmentBindingError.value || initializationError.value
   || (changingDepartment.value ? saveError.value : ''))
-const formReadOnlyReason = computed(() => {
-  if (delegationRevoked.value) return '代报权限已失效，请返回本人报销'
-  if (!drafts.currentDraft) return '正在准备报销表单'
-  if (initializationError.value) return '请先重新加载当前报销'
-  if (switchingReimbursement.value) return '正在切换报销人，请稍候'
-  if (bindingApprovalDepartment.value) return '正在确认报销部门，请稍候'
-  if (workspaceConfirmationRequired.value) return '请先核对当前报销，确认新开结果后继续'
-  if (drafts.currentDraft.workspaceRetired) return '已新开另一笔报销，请重新进入当前报销'
-  if (draftUnavailable.value) return '当前报销记录已不可用，请新开一笔重新填写'
-  if (draftExpired.value) return '本次填写内容已过期，请重新填写'
-  if (drafts.currentDraft.recoveryPending || recoveringReimbursement.value) return '材料尚在恢复，请等待恢复完成'
-  if (submitFlowPending.value) return '正在提交，请稍候'
-  if (drafts.currentDraft.status === 'LOCKED' || trackedSubmission.value) return '本次报销内容已锁定，请查看提交进度'
-  if (saveRequiresReload.value) return '报销内容已更新，请核对最新报销内容'
-  if (reimbursementOptionsUnavailable.value) {
-    if (templateNeedsAdmin.value) return auth.isAdmin
-      ? 'OA 表单需要确认，请前往系统设置处理'
-      : 'OA 表单需要管理员确认，请联系管理员处理'
-    return '当前 OA 模板或选项不可用，请重新加载后继续填写'
-  }
-  if (templateMismatch.value) return 'OA 表单已更新，请按新表单重新填写'
-  return ''
-})
+const formReadOnlyReason = computed(() => editingAvailability.value.reason)
 const currentFormInput = computed<ReimbursementDraftInput>(() => {
   if (isGeneral.value) return {
     ocrDispositionVersion: 1,
@@ -495,29 +490,16 @@ const reimbursementSubject = computed(() => JSON.stringify([
 ]))
 const localUploadFailureReason = computed(() => expenseItemsCard.value?.hasUnpersistedFailedUploads
   ? '请先重试或移除尚未上传成功的文件' : '')
-const reimbursementOperationBlock = computed(() => {
-  if (generalDepartmentUnconfirmed.value || (changingDepartment.value && changingDepartmentUnconfirmed.value)) {
-    return '请先确认办理部门'
-  }
-  if (switchingReimbursement.value || initializingWorkspace.value || bindingApprovalDepartment.value
-    || pendingDepartmentApproval.value || verifyingRelatedApprovals.value || submitFlowPending.value
-    || submission.submitting || recoveringReimbursement.value || replacingTemplate.value
-    || confirmingDraftReload.value) return '请等待当前操作完成'
-  if (drafts.processingFiles) return '请等待本批文件上传和识别完成'
-  if (expenseItemsCard.value?.hasOpenMaterialEditor) return '请先完成材料编辑'
-  if (drafts.busy || saving.value || refreshingMaterialStatus.value) return '请等待当前报销操作完成'
-  return ''
-})
-const reimbursementSwitchBlock = computed(() => reimbursementOperationBlock.value || localUploadFailureReason.value)
-const reimbursementSwitchRecheck = computed(() => {
-  if (workspaceConfirmationRequired.value) return '请先核对当前报销，确认新开结果后再切换'
-  if (awaitingMaterialUpload.value || drafts.files.some(
-    (file) => file.status === 'ACTIVE' && file.ocrStatus === 'RUNNING' && file.ocrStale !== true,
-  )) return '请等待本批文件上传和识别完成'
-  if (saveRequiresReload.value) return '请先核对最新报销内容'
-  if (drafts.currentDraft && formReadOnly.value && hasUnsavedUserChanges.value) return formReadOnlyReason.value
-  return ''
-})
+const workspaceAvailability = computed(() => reimbursementWorkspaceAvailability(operationState.value, editingAvailability.value, {
+  departmentUnconfirmed: generalDepartmentUnconfirmed.value || (changingDepartment.value && changingDepartmentUnconfirmed.value),
+  failedUploadReason: localUploadFailureReason.value,
+  awaitingMaterials: awaitingMaterialUpload.value || drafts.files.some(file => file.status === 'ACTIVE'
+    && file.ocrStatus === 'RUNNING' && file.ocrStale !== true),
+  hasUnsavedChanges: hasUnsavedUserChanges.value,
+}))
+const reimbursementOperationBlock = computed(() => workspaceAvailability.value.operationReason)
+const reimbursementSwitchBlock = computed(() => workspaceAvailability.value.switchBlockReason)
+const reimbursementSwitchRecheck = computed(() => workspaceAvailability.value.switchRecheckReason)
 
 async function switchKind(kind: ReimbursementKind): Promise<void> {
   if (kind === drafts.reimbursementKind || switchingKind.value || reimbursementSwitchBlock.value
@@ -797,52 +779,25 @@ const attachmentPendingHint = computed(() => awaitingMaterialUpload.value
   ? '材料上传完成后会显示附件清单。'
   : expense.items.length ? '请先上传报销材料。' : isGeneral.value
     ? '填写费用明细后会显示附件清单。' : '填写费用明细或核对出差补助后会显示附件清单。')
-const submissionButtonReason = computed(() => formReadOnlyReason.value
-  || localUploadFailureReason.value
-  || generalCompanyError.value || generalBudgetError.value
-  || (accountingOptionsChanged.value ? '请重新关联出差审批' : '')
-  || (needsApprovalReconfirmation.value ? '请先重新确认出差审批' : '')
-  || subsidyInputError.value || expense.subsidyCalculationReason || submissionServiceReason.value
-  || (relatedApprovalVerificationPending.value ? '正在核验关联审批，请稍候' : '')
-  || (drafts.busy ? '请等待材料处理完成' : '')
-  || (drafts.pendingUploads.length ? '有材料尚未完成上传，请查看上传进度' : '')
-  || (materialSubmissionIssues.value.length
-    ? `还有 ${materialSubmissionIssues.value.length} 份材料需处理后才能提交 OA` : '')
-  || (missingMaterialItems.value.length ? `还有 ${missingMaterialItems.value.length} 笔费用需补材料` : ''))
+const outputAvailability = computed(() => reimbursementOutputAvailability(operationState.value, editingAvailability.value, {
+  mobile: props.mobile, failedUploadReason: localUploadFailureReason.value,
+  companyError: generalCompanyError.value, budgetError: generalBudgetError.value,
+  accountingChanged: Boolean(accountingOptionsChanged.value), approvalReconfirmationRequired: needsApprovalReconfirmation.value,
+  approvalVerificationPending: relatedApprovalVerificationPending.value,
+  companySelected: Boolean(companyValue.value), budgetSelected: Boolean(budgetCodeValue.value),
+  expenseCount: expense.items.length, itemReadinessError: expense.itemReadinessError,
+  subsidyInputError: subsidyInputError.value, subsidyCalculationReason: expense.subsidyCalculationReason,
+  serviceReason: submissionServiceReason.value, hasActiveMaterials: hasActiveMaterials.value,
+  pendingUploadCount: drafts.pendingUploads.length, materialIssueCount: materialSubmissionIssues.value.length,
+  missingMaterialExpenseCount: missingMaterialItems.value.length, saveError: saveError.value, formDirty: formDirty.value,
+}))
+const submissionButtonReason = computed(() => outputAvailability.value.submitReason)
 const mobileNextLabel = computed(() => mobileStep.value === mobileSteps.value.length - 1
   ? '提交 OA'
   : `下一步：${mobileSteps.value[mobileStep.value + 1]}`)
 const missingMaterialItems = computed(() => expense.sortedItems.map((item) => ({ item, missing: missingExpenseMaterials(item, drafts.files) }))
   .filter((entry) => entry.missing.length))
-const previewDisabledReason = computed(() => (initializationError.value ? '请先重新加载当前报销' : '')
-  || localUploadFailureReason.value
-  || (drafts.processingFiles ? '请等待本批文件上传和识别完成后再预览 Excel' : '')
-  || (draftUnavailable.value ? '当前报销记录已不可用，请新开一笔重新填写' : '')
-  || (drafts.currentDraft?.recoveryPending && draftExpired.value
-  ? '保留的材料已过期，请新开报销并重新上传材料' : '')
-  || (drafts.currentDraft?.recoveryPending || recoveringReimbursement.value
-  ? '请等待材料恢复完成后再预览 Excel' : '')
-  || (workspaceConfirmationRequired.value ? '请先核对当前报销，确认新开结果后再预览 Excel' : '')
-  || (drafts.currentDraft?.workspaceRetired && drafts.currentDraft.status !== 'LOCKED' ? '请先打开当前报销' : '')
-  || (isGeneral.value && templateMismatch.value && drafts.currentDraft?.status !== 'LOCKED'
-    ? 'OA 表单已更新，请按新表单重新填写' : '')
-  || generalCompanyError.value || generalBudgetError.value
-  || expense.itemReadinessError
-  || (isGeneral.value && !formReadOnly.value
-    ? (!expense.items.length ? '请先添加费用明细' : !hasActiveMaterials.value ? '请先上传报销材料' : '') : '')
-  || (saveRequiresReload.value ? '请先核对最新报销内容' : '')
-  || (accountingOptionsChanged.value ? '请重新关联出差审批' : '')
-  || subsidyInputError.value
-  || (!formReadOnly.value ? expense.subsidyCalculationReason : '')
-  || (!formReadOnly.value && drafts.pendingUploads.length ? '请等待材料上传完成后再预览 Excel' : '')
-  || (!formReadOnly.value && materialSubmissionIssues.value.length
-    ? '请先处理全部待确认或未完成的材料（含待关联材料），再预览 Excel' : '')
-  || (isGeneral.value && !companyValue.value ? '请先选择报销主体' : '')
-  || (!budgetCodeValue.value ? '请先选择预算代码' : '')
-  || (relatedApprovalVerificationPending.value ? '正在核验关联审批，请稍候' : '')
-  || (props.mobile && !formReadOnly.value && saveError.value ? '保存失败，请重试保存后再打开 Excel' : '')
-  || (props.mobile && !formReadOnly.value && (saving.value || formDirty.value) ? '正在保存当前内容，请稍候' : '')
-  || (submitFlowPending.value ? '正在提交，请稍候' : ''))
+const previewDisabledReason = computed(() => outputAvailability.value.previewReason)
 const submissionProgress: ReimbursementSubmissionStatus[] = [
   'QUEUED', 'VALIDATING', 'GENERATING_EXCEL', 'UPLOADING', 'OA_CREATING', 'VERIFYING', 'SUBMITTED',
 ]
@@ -885,7 +840,7 @@ async function showWorkspaceReimbursement(restored: ReimbursementDraft): Promise
   submission.abort()
   hydrate(restored)
   if (restored.status === 'LOCKED') {
-    try { await submission.restore(restored.id, { discoverByDraft: true, expectedRevision: restored.revision }) }
+    try { await submission.restoreForDraft(restored) }
     catch { /* Keep the persisted submission and its existing refresh action. */ }
   }
 }
@@ -937,14 +892,15 @@ async function recoverFailedReimbursement(): Promise<void> {
     recoveryErrorOwner.value = { sourceId, scope, generation }
     // The server may have durably begun a copy before a response was lost.
     try {
-      const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value })
-      const latest = workspace.items[0]
+      const context = workspaceReader.capture()
+      const workspace = await workspaceReader.list(context)
+      const latest = workspace.kind === 'current' ? workspace.draft : undefined
       if (acceptsRecovery() && drafts.currentDraft?.id === current.id
         && latest?.recoverySourceDraftId === sourceId) {
-        await drafts.loadDraft(latest.id, true)
-        if (acceptsRecovery() && drafts.currentDraft?.id === latest.id) {
-          await showWorkspaceReimbursement(drafts.currentDraft)
-        }
+        const loaded = await workspaceReader.load(context, latest.id, {
+          accept: () => acceptsRecovery() && drafts.currentDraft?.id === current.id,
+        })
+        if (acceptsRecovery() && workspaceReader.accepts(context) && loaded.kind === 'loaded') await showWorkspaceReimbursement(loaded.draft)
       }
     } catch { /* Preserve the original error and original form; a reload resumes the durable copy. */ }
   }
@@ -1080,26 +1036,6 @@ function reconcileRelatedApprovalsFromServer(
     ? 'accepted'
     : 'restored'
 }
-async function runSerializedSave<T>(
-  operation: () => Promise<T>,
-  target = { scope: sessionScope(), draftId: drafts.currentDraft?.id },
-): Promise<T> {
-  if (disposed || target.scope !== sessionScope() || target.draftId !== drafts.currentDraft?.id) {
-    throw new Error('当前报销已变化，原保存操作已取消')
-  }
-  if (savePromise) {
-    await savePromise
-    return runSerializedSave(operation, target)
-  }
-  const running = operation()
-  const lock = running.then(() => undefined, () => undefined)
-  savePromise = lock
-  try {
-    return await running
-  } finally {
-    if (savePromise === lock) savePromise = null
-  }
-}
 async function verifyRelatedApprovals(
   selections: ReimbursementRelatedApprovalSelection[],
 ): Promise<'accepted' | 'restored' | 'conflict' | 'stale'> {
@@ -1107,13 +1043,12 @@ async function verifyRelatedApprovals(
   const targetSignature = relatedSignature(requestedSelections)
   const draftId = drafts.currentDraft?.id ?? ''
   const scope = sessionScope()
-  if (autosaveTimer) clearTimeout(autosaveTimer)
   relatedApprovalVerificationError.value = ''
   relatedApprovalRetry.value = null
   verifyingRelatedApprovals.value = true
   selectedRelatedApprovals.value = requestedSelections
   try {
-    await runSerializedSave(() => drafts.saveRelatedApprovals(requestedSelections))
+    await saveCoordinator.run(() => drafts.saveRelatedApprovals(requestedSelections))
     const reconciliation = reconcileRelatedApprovalsFromServer(targetSignature, draftId, scope)
     if (reconciliation === 'accepted') {
       drafts.mutationError = ''
@@ -1222,21 +1157,19 @@ async function loadSubmittedReceipt(): Promise<void> {
   hydrate(locked)
 }
 async function readReplacementResult(previousId: string, context: WorkspaceReadContext): Promise<ReplacementReadResult> {
-  const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value })
-  if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== previousId) return { kind: 'stale' }
-  if (workspace.items.length > 1) throw new Error('发现多笔旧报销，请重新加载并选择保留哪一笔')
-  const latest = workspace.items[0], previous = drafts.currentDraft
-  if (!latest) return { kind: 'empty' }
+  const workspace = await workspaceReader.list(context)
+  if (workspace.kind === 'stale' || !workspaceReader.accepts(context) || drafts.currentDraft?.id !== previousId) return { kind: 'stale' }
+  if (workspace.kind === 'legacy') throw new Error('发现多笔旧报销，请重新加载并选择保留哪一笔')
+  if (workspace.kind === 'empty') return { kind: 'empty' }
+  const latest = workspace.draft, previous = drafts.currentDraft
   if (latest.id === previousId && latest.revision === previous.revision && latest.status === previous.status
     && Boolean(latest.recoveryPending) === Boolean(previous.recoveryPending)
     && Boolean(latest.workspaceRetired) === Boolean(previous.workspaceRetired)) {
     workspaceConfirmationRequired.value = false
     return { kind: 'unchanged' }
   }
-  let conflict = false, preserveEdits = false, retired = false
-  const adopted = await drafts.loadDraft(latest.id, true, (incoming) => {
-    if (!acceptsWorkspaceRead(context)) return false
-    if (incoming.workspaceRetired) { retired = true; return false }
+  let conflict = false, preserveEdits = false
+  const loaded = await workspaceReader.load(context, latest.id, { accept: (incoming) => {
     if (incoming.id !== previousId || !formDirty.value) return true
     const editable = ['DRAFT', 'REVIEW_READY'].includes(incoming.status) && !incoming.recoveryPending
     if (!editable || inputSignature(incoming.input) !== savedInputSignature.value
@@ -1246,134 +1179,78 @@ async function readReplacementResult(previousId: string, context: WorkspaceReadC
     }
     preserveEdits = true
     return true
-  })
-  if (!acceptsWorkspaceRead(context)) return { kind: 'stale' }
+  } })
+  if (loaded.kind === 'stale' || !workspaceReader.accepts(context)) return { kind: 'stale' }
   if (conflict) {
     workspaceConfirmationRequired.value = false
     saveRequiresReload.value = true
     saveError.value = '服务器中的报销状态或内容已变化，本页修改已保留，请核对最新报销内容'
     return { kind: 'conflict' }
   }
-  if (retired || drafts.loadError || !adopted || drafts.currentDraft?.id !== latest.id) {
-    throw new Error(drafts.loadError || '当前报销读取期间已变化，请重新核对')
-  }
+  if (loaded.kind === 'rejected') throw new Error(loaded.message || '当前报销读取期间已变化，请重新核对')
   workspaceConfirmationRequired.value = false
   drafts.mutationError = ''
-  return preserveEdits ? { kind: 'unchanged' } : { kind: 'loaded', draft: drafts.currentDraft }
+  return preserveEdits ? { kind: 'unchanged' } : loaded
 }
 async function confirmCurrentWorkspace(): Promise<void> {
   const previousId = drafts.currentDraft?.id
   if (!previousId || !sessionScope() || !workspaceConfirmationRequired.value || initializingWorkspace.value) return
-  const context = beginWorkspaceRead()
+  const context = workspaceReader.begin()
   initializingWorkspace.value = true
   try {
     const result = await readReplacementResult(previousId, context)
-    if (!acceptsWorkspaceRead(context) || result.kind === 'stale') return
+    if (!workspaceReader.accepts(context) || result.kind === 'stale') return
     if (result.kind === 'empty') {
       if (!await openEditableReimbursement(false, context)) return
-      if (!acceptsWorkspaceRead(context)) return
+      if (!workspaceReader.accepts(context)) return
       pendingNewApproval.value = null
       await returnToApprovalStep()
-      if (!acceptsWorkspaceRead(context)) return
+      if (!workspaceReader.accepts(context)) return
     } else if (result.kind === 'loaded') {
       await showWorkspaceReimbursement(result.draft)
-      if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== result.draft.id) return
+      if (!workspaceReader.accepts(context) || drafts.currentDraft?.id !== result.draft.id) return
       pendingNewApproval.value = null
       await returnToApprovalStep()
-      if (!acceptsWorkspaceRead(context)) return
+      if (!workspaceReader.accepts(context)) return
     }
     workspaceActionError.value = ''
     drafts.mutationError = ''
   } catch {
-    if (acceptsWorkspaceRead(context)) workspaceActionError.value = '暂时无法核对当前报销，请稍后重试'
+    if (workspaceReader.accepts(context)) workspaceActionError.value = '暂时无法核对当前报销，请稍后重试'
   } finally {
-    if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
+    if (workspaceReader.accepts(context)) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
-function emptyReimbursementInput(): ReimbursementDraftInput {
-  if (drafts.reimbursementKind === 'general') return {
-    ocrDispositionVersion: 1, companyValue: '', budgetCodeValue: '',
-    trip: null, items: [], dismissedOcrFileIds: [],
-  }
-  return {
-    ocrDispositionVersion: 1,
-    companyValue: '',
-    budgetCodeValue: '',
-    trip: null,
-    trips: [],
-    editingState: {
-      includeSubsidy: false,
-      trip: {
-        tripType: 'business', startDate: '', startTime: '09:00', endDate: '', endTime: '18:00',
-        policyConfirmed: false, confirmedEffectiveDays: '', noSubsidyException: false,
-      },
-      trips: [],
-    },
-    items: [],
-    dismissedOcrFileIds: [],
-  }
-}
-
 async function openEditableReimbursement(
   replaceCurrent = false,
-  context = beginWorkspaceRead(),
+  context = workspaceReader.begin(),
 ): Promise<boolean> {
   if (legacyDrafts.value.length > 1) throw new Error('请先选择保留哪一笔当前报销')
   const previous = replaceCurrent && drafts.currentDraft
     ? { id: drafts.currentDraft.id, revision: drafts.currentDraft.revision } : undefined
   let created: ReimbursementDraft
   try {
-    created = await drafts.createDraft(emptyReimbursementInput(), true, auth.session?.selectedDepartment ?? undefined, previous)
+    created = await drafts.createDraft(emptyReimbursementInput(drafts.reimbursementKind), true, auth.session?.selectedDepartment ?? undefined, previous)
   } catch (error) {
-    if (!acceptsWorkspaceRead(context)) return false
+    if (!workspaceReader.accepts(context)) return false
     if (!previous || drafts.currentDraft?.id !== previous.id) throw error
     workspaceConfirmationRequired.value = true
     let result: ReplacementReadResult
     try { result = await readReplacementResult(previous.id, context) }
     catch { throw new Error('无法确认新开结果，请先核对当前报销') }
-    if (!acceptsWorkspaceRead(context) || result.kind === 'stale') return false
+    if (!workspaceReader.accepts(context) || result.kind === 'stale') return false
     if (result.kind === 'empty') return openEditableReimbursement(false, context)
     if (result.kind === 'conflict') throw new Error(saveError.value, { cause: error })
     if (result.kind === 'unchanged') throw error
     created = result.draft
   }
-  if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== created.id) return false
+  if (!workspaceReader.accepts(context) || drafts.currentDraft?.id !== created.id) return false
   workspaceConfirmationRequired.value = false
   expense.reset()
   await showWorkspaceReimbursement(created)
-  if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== created.id) return false
+  if (!workspaceReader.accepts(context) || drafts.currentDraft?.id !== created.id) return false
   if (templateMismatch.value) await drafts.loadReimbursementOptions()
-  return acceptsWorkspaceRead(context) && drafts.currentDraft?.id === created.id
-}
-
-async function prepareReimbursementWorkspace(target: AuthSession, signal: AbortSignal) {
-  const request = { signal, reimbursementContext: target.reimbursementContext ?? null }
-  const [workspace, options] = await Promise.allSettled([
-    listWorkspaceReimbursements(request), getOaReimbursementOptions(request),
-  ])
-  if (workspace.status === 'rejected') throw workspace.reason
-  if (workspace.value.items.length > 1) return null
-  const current = workspace.value.items[0]
-  if (!current && !target.selectedDepartment) return null
-  if (current && (current.department.id !== target.selectedDepartment?.id
-    || current.department.name !== target.selectedDepartment?.name)) {
-    const restored = await openReimbursementWorkspace(current.id, [current], request)
-    target.selectedDepartment = restored.selectedDepartment
-    if (restored.reimbursementContext) {
-      target.reimbursementContext = restored.reimbursementContext
-      request.reimbursementContext = restored.reimbursementContext
-    }
-  }
-  const expectedDepartment = target.selectedDepartment!
-  if (!current && options.status === 'rejected') throw options.reason
-  const recent = current ?? await createReimbursementDraft(emptyReimbursementInput(), {
-    ...request, reuseExisting: true, expectedDepartment,
-  })
-  const read = await readConsistentDraft(recent.id, request)
-  if (read.draft.workspaceRetired) {
-    throw new Error('目标报销已发生变化，请重新选择报销人')
-  }
-  return { read, options }
+  return workspaceReader.accepts(context) && drafts.currentDraft?.id === created.id
 }
 
 async function switchReimbursementEmployee(userId: string | null): Promise<void> {
@@ -1395,7 +1272,7 @@ async function switchReimbursementEmployee(userId: string | null): Promise<void>
   reimbursementSwitchRequest = request
   reimbursementSwitchError.value = ''
   switchingReimbursement.value = true
-  if (autosaveTimer) clearTimeout(autosaveTimer)
+  saveCoordinator.cancelScheduled()
   let discardDeniedEdits = false
   try {
     if (returningToPersonal && recheckReason && !delegationRevoked.value) {
@@ -1409,7 +1286,7 @@ async function switchReimbursementEmployee(userId: string | null): Promise<void>
       if (!accepts()) return
       if (!delegationRevoked.value) throw new Error(recheckReason)
     }
-    if (!delegationRevoked.value && !formWasReadOnly && (formDirty.value || savePromise)) {
+    if (!delegationRevoked.value && !formWasReadOnly && (formDirty.value || saveCoordinator.pending.value)) {
       try {
         await flushAutosave()
       } catch (error) {
@@ -1437,8 +1314,8 @@ async function switchReimbursementEmployee(userId: string | null): Promise<void>
       : target.user.userId !== userId || !target.operator || !target.reimbursementContext) {
       throw new Error('返回的报销人不匹配，请重新选择')
     }
-    const workspace = await prepareReimbursementWorkspace(target, request.signal)
-    if (!accepts()) return
+    const workspace = await workspaceReader.prepareEmployee(target, request.signal)
+    if (!accepts() || workspace === undefined) return
     if (draftId && hasUnsavedUserChanges.value && !discardDeniedEdits) {
       throw new Error('当前报销还有未保存的内容，请确认保存后再切换')
     }
@@ -1481,7 +1358,7 @@ function chooseReimbursementEmployee(employee: ReimbursementEmployee): void {
   void switchReimbursementEmployee(employee.userId === auth.session?.operator?.userId ? null : employee.userId)
 }
 async function runWorkspaceInitialization(scope: string, reservedDraftId?: string): Promise<void> {
-  const context = beginWorkspaceRead()
+  const context = workspaceReader.begin()
   if (context.scope !== scope) return
   initializingWorkspace.value = true
   initializationError.value = ''
@@ -1489,15 +1366,15 @@ async function runWorkspaceInitialization(scope: string, reservedDraftId?: strin
     const [, , , workspace] = await Promise.all([
       expense.loadCategories(), drafts.loadReimbursementOptions(),
       auth.session?.selectedDepartment ? drafts.loadDrafts(0, 50, auth.session.selectedDepartment) : Promise.resolve(),
-      listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value }),
+      workspaceReader.list(context),
     ])
-    if (!acceptsWorkspaceRead(context)) return
+    if (workspace.kind === 'stale' || !workspaceReader.accepts(context)) return
     if (drafts.listError) throw new Error(drafts.listError)
     // Only the current reimbursement is restored; replaced work is never
     // rediscovered merely because a background submission changed status.
-    legacyDrafts.value = workspace.items.length > 1 ? workspace.items : []
-    if (legacyDrafts.value.length) return
-    const recent = workspace.items[0]
+    legacyDrafts.value = workspace.kind === 'legacy' ? workspace.items : []
+    if (workspace.kind === 'legacy') return
+    const recent = workspace.kind === 'current' ? workspace.draft : undefined
     const currentDepartment = selectableDepartments.value.find(d => d.id === recent?.department.id)
     if (recent && (!auth.session?.selectedDepartment || (currentDepartment
       && (currentDepartment.id !== auth.session.selectedDepartment.id
@@ -1513,7 +1390,7 @@ async function runWorkspaceInitialization(scope: string, reservedDraftId?: strin
       if (!isGeneral.value && !drafts.reimbursementOptionsError
         && !drafts.travelApprovals.length && !drafts.travelApprovalsError) {
         await nextTick()
-        if (!acceptsWorkspaceRead(context)) return
+        if (!workspaceReader.accepts(context)) return
         await departmentApprovalSelector.value?.search()
       }
       return
@@ -1522,25 +1399,24 @@ async function runWorkspaceInitialization(scope: string, reservedDraftId?: strin
       throw new Error('目标部门的报销已在其他页面更新，请确认后重新加载')
     }
     if (recent) {
-      const adopted = await drafts.loadDraft(recent.id, true, (incoming) => acceptsWorkspaceRead(context) && !incoming.workspaceRetired)
-      if (!acceptsWorkspaceRead(context)) return
-      const opened = drafts.currentDraft
-      if (!adopted || !opened || opened.id !== recent.id) throw new Error(drafts.loadError || '报销内容加载失败')
+      const loaded = await workspaceReader.load(context, recent.id)
+      if (loaded.kind === 'stale' || !workspaceReader.accepts(context)) return
+      if (loaded.kind === 'rejected') throw new Error(loaded.message || '报销内容加载失败')
+      const opened = loaded.draft
       workspaceConfirmationRequired.value = false
       hydrate(opened)
       try {
-        await submission.restore(opened.id, opened.status === 'LOCKED'
-          ? { discoverByDraft: true, expectedRevision: opened.revision } : undefined)
+        await submission.restoreForDraft(opened)
       } catch { /* The submission card renders the recoverable error. */ }
     } else {
       if (drafts.reimbursementOptionsError) throw new Error(drafts.reimbursementOptionsError)
       if (!await openEditableReimbursement(false, context)) return
     }
-    if (acceptsWorkspaceRead(context)) initializedScope = scope
+    if (workspaceReader.accepts(context)) initializedScope = scope
   } catch (error) {
-    if (acceptsWorkspaceRead(context)) initializationError.value = error instanceof Error ? error.message : '报销表单加载失败，请重试'
+    if (workspaceReader.accepts(context)) initializationError.value = error instanceof Error ? error.message : '报销表单加载失败，请重试'
   } finally {
-    if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
+    if (workspaceReader.accepts(context)) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
 function initializeWorkspace(force = false, reservedDraftId?: string): Promise<void> {
@@ -1556,8 +1432,8 @@ function initializeWorkspace(force = false, reservedDraftId?: string): Promise<v
   return running
 }
 async function openCurrentWorkspace(): Promise<void> {
-  const scope = sessionScope(), draftId = drafts.currentDraft?.id
-  const generation = workspaceReadGeneration
+  const draftId = drafts.currentDraft?.id
+  const readContext = workspaceReader.capture()
   if (initializingWorkspace.value || drafts.busy || saving.value || confirmingDraftReload.value) return
   if (hasUnsavedUserChanges.value) {
     confirmingDraftReload.value = true
@@ -1568,23 +1444,15 @@ async function openCurrentWorkspace(): Promise<void> {
         { confirmButtonText: '舍弃本页修改并打开', cancelButtonText: '保留本页', type: 'warning' },
       )
     } catch { return }
-    finally { if (scope === sessionScope() && generation === workspaceReadGeneration) confirmingDraftReload.value = false }
+    finally { if (workspaceReader.accepts(readContext)) confirmingDraftReload.value = false }
   }
-  if (disposed || scope !== sessionScope() || generation !== workspaceReadGeneration
+  if (!workspaceReader.accepts(readContext)
     || draftId !== drafts.currentDraft?.id || drafts.busy || saving.value) return
   await initializeWorkspace(true)
 }
-function scheduleAutosave(): void {
-  if (autosaveTimer) clearTimeout(autosaveTimer)
-  if (disposed || !sessionScope() || changingDepartment.value || initializingWorkspace.value || formReadOnly.value
-    || drafts.busy || confirmingDraftReload.value || verifyingRelatedApprovals.value || bindingApprovalDepartment.value
-    || pendingDepartmentApproval.value || !formDirty.value) return
-  autosaveTimer = setTimeout(() => { void flushAutosave().catch(() => undefined) }, 600)
-}
 async function flushAutosave(options: { includeRelated?: boolean } = {}): Promise<void> {
-  if (autosaveTimer) clearTimeout(autosaveTimer)
   const includeRelated = options.includeRelated !== false
-  await runSerializedSave(async () => {
+  await saveCoordinator.run(async () => {
     // Never enqueue a snapshot behind a file mutation: its references can already
     // be deleted by the time the queued save runs. The idle watcher retries using
     // the latest form; explicit preview/submit must not treat a skipped save as success.
@@ -1643,7 +1511,7 @@ onBeforeRouteLeave(async (to) => {
   // Before a workspace can open, default values have no saved draft baseline.
   // They are not employee edits; file failures and pending operations stay guarded above.
   if (!sessionScope() || !drafts.currentDraft
-    || ((!formDirty.value || (formReadOnly.value && !hasUnsavedUserChanges.value)) && !savePromise)) return true
+    || ((!formDirty.value || (formReadOnly.value && !hasUnsavedUserChanges.value)) && !saveCoordinator.pending.value)) return true
   if (auth.isAdmin && templateNeedsAdmin.value
     && to.path === (props.mobile ? '/m/settings' : '/admin/settings')) {
     if (drafts.busy || saving.value) {
@@ -1841,8 +1709,7 @@ async function finishNewEntry(selection?: ReimbursementRelatedApprovalSelection)
 async function startNewInDepartment(newSelection?: ReimbursementRelatedApprovalSelection): Promise<void> {
   if (!canStartNewReimbursement.value || initializingWorkspace.value || drafts.busy
     || reimbursementOptionsUnavailable.value || confirmingDraftReload.value) return
-  const scope = sessionScope()
-  const generation = workspaceReadGeneration
+  const readContext = workspaceReader.capture()
   const draftId = drafts.currentDraft?.id
   if (!submission.succeeded || hasUnsavedUserChanges.value) {
     confirmingDraftReload.value = true
@@ -1857,19 +1724,19 @@ async function startNewInDepartment(newSelection?: ReimbursementRelatedApprovalS
         { confirmButtonText: '确认新开', cancelButtonText: '继续当前报销', type: 'warning' },
       )
     } catch { return }
-    finally { if (scope === sessionScope() && generation === workspaceReadGeneration) confirmingDraftReload.value = false }
-    if (disposed || scope !== sessionScope() || generation !== workspaceReadGeneration || draftId !== drafts.currentDraft?.id
+    finally { if (workspaceReader.accepts(readContext)) confirmingDraftReload.value = false }
+    if (!workspaceReader.accepts(readContext) || draftId !== drafts.currentDraft?.id
       || !canStartNewReimbursement.value || drafts.busy || reimbursementOptionsUnavailable.value) return
   }
   const selection = newSelection ?? pendingNewApproval.value
-  const context = beginWorkspaceRead()
+  const context = workspaceReader.begin()
   workspaceActionError.value = ''
   initializingWorkspace.value = true
   try {
     if (!await openEditableReimbursement(true, context)) return
-    if (!acceptsWorkspaceRead(context)) return
+    if (!workspaceReader.accepts(context)) return
     await returnToApprovalStep()
-    if (!acceptsWorkspaceRead(context)) return
+    if (!workspaceReader.accepts(context)) return
     const opened = drafts.currentDraft
     if (opened?.status !== 'DRAFT' && opened?.status !== 'REVIEW_READY') return
     pendingNewApproval.value = null
@@ -1880,23 +1747,23 @@ async function startNewInDepartment(newSelection?: ReimbursementRelatedApprovalS
     }
   }
   catch (error) {
-    if (!acceptsWorkspaceRead(context)) return
+    if (!workspaceReader.accepts(context)) return
     workspaceActionError.value = error instanceof Error ? error.message : '新报销准备失败'
     ElMessage.error(workspaceActionError.value)
     void refreshOptionsAfterError(error)
   }
   finally {
-    if (acceptsWorkspaceRead(context)) {
+    if (workspaceReader.accepts(context)) {
       initializingWorkspace.value = false
       if (!saveError.value) scheduleAutosave()
     }
   }
 }
 async function returnToApprovalStep(): Promise<void> {
-  const scope = sessionScope(), generation = workspaceReadGeneration
+  const readContext = workspaceReader.capture()
   mobileStep.value = 0
   await nextTick()
-  if (!disposed && scope === sessionScope() && generation === workspaceReadGeneration) scrollToWorkspaceStart()
+  if (workspaceReader.accepts(readContext)) scrollToWorkspaceStart()
 }
 function scrollToWorkspaceStart(): void {
   document.querySelector<HTMLElement>('[data-testid="reimbursement-workspace-start"]')
@@ -1940,7 +1807,8 @@ async function refreshOptionsAfterError(error: unknown): Promise<void> {
 
 async function openSavedReimbursement(draftId: string, history?: AbortSignal): Promise<void> {
   const scope = history ? historyScope() : sessionScope()
-  const acceptsRead = () => !disposed && !history?.aborted && scope === (history ? historyScope() : sessionScope())
+  let context = workspaceReader.capture()
+  const acceptsRead = () => workspaceReader.accepts(context) && !history?.aborted && scope === (history ? historyScope() : sessionScope())
   const previousId = drafts.currentDraft?.id
   if (!scope || initializingWorkspace.value || drafts.busy || saving.value
     || submitFlowPending.value || confirmingDraftReload.value || submission.submitting) return
@@ -1961,7 +1829,7 @@ async function openSavedReimbursement(draftId: string, history?: AbortSignal): P
   if (!acceptsRead() || previousId !== drafts.currentDraft?.id) return
   if (previousId && hasUnsavedUserChanges.value) {
     confirmingDraftReload.value = true
-    if (autosaveTimer) clearTimeout(autosaveTimer)
+    saveCoordinator.cancelScheduled()
     try {
       await ElMessageBox.confirm(
         '本页有尚未保存的修改。继续将读取服务器保存的内容，本页未保存的修改会被舍弃。',
@@ -1969,11 +1837,15 @@ async function openSavedReimbursement(draftId: string, history?: AbortSignal): P
         { confirmButtonText: '读取已保存内容', cancelButtonText: '保留本页', type: 'warning' },
       )
     } catch { return }
-    finally { if (scope === (history ? historyScope() : sessionScope())) { confirmingDraftReload.value = false; scheduleAutosave() } }
+    finally {
+      // Cancelling the history read must still release its own confirmation.
+      if (workspaceReader.accepts(context)) { confirmingDraftReload.value = false; scheduleAutosave() }
+    }
   }
   if (!acceptsRead() || previousId !== drafts.currentDraft?.id
     || drafts.busy || saving.value || (history && !canOpenHistory.value)) return
-  if (autosaveTimer) clearTimeout(autosaveTimer)
+  context = workspaceReader.begin()
+  saveCoordinator.cancelScheduled()
   initializingWorkspace.value = true
   workspaceActionError.value = ''
   try {
@@ -1982,16 +1854,17 @@ async function openSavedReimbursement(draftId: string, history?: AbortSignal): P
     if (history && (receipt?.status !== 'SUBMITTED' || receipt.draftId !== draftId)) {
       throw new Error('这笔报销的成功回执暂不可用，请重新加载')
     }
-    await drafts.loadDraft(draftId, true,
-      history ? incoming => acceptsRead() && incoming.status === 'LOCKED' : undefined, Boolean(history))
-    if (!acceptsRead()) return
-    const opened = drafts.currentDraft
-    if (!opened || opened.id !== draftId || drafts.loadError) {
-      const message = drafts.loadError || '这笔报销已不可用，请重新加载报销列表'
+    const loaded = await workspaceReader.load(context, draftId, {
+      source: history ? 'history' : 'saved', accept: acceptsRead,
+    })
+    if (!acceptsRead() || loaded.kind === 'stale') return
+    if (loaded.kind === 'rejected') {
+      const message = loaded.message || '这笔报销已不可用，请重新加载报销列表'
       if (history) historyDetailError.value = message
       else workspaceActionError.value = message
       return
     }
+    const opened = loaded.draft
     if (history) {
       historyOrigin.value = { draftId: previousId, mobileStep: mobileStep.value, pendingApproval: pendingNewApproval.value }
       pendingNewApproval.value = null
@@ -2001,8 +1874,7 @@ async function openSavedReimbursement(draftId: string, history?: AbortSignal): P
     if (history) historicalSubmission.value = receipt
     else {
       try {
-        await submission.restore(opened.id, opened.status === 'LOCKED'
-          ? { discoverByDraft: true, expectedRevision: opened.revision } : undefined)
+        await submission.restoreForDraft(opened)
       } catch { /* The submission panel shows the recovery action. */ }
     }
     if (!acceptsRead() || drafts.currentDraft?.id !== draftId) return
@@ -2012,7 +1884,7 @@ async function openSavedReimbursement(draftId: string, history?: AbortSignal): P
   } catch (error) {
     if (acceptsRead() && history) historyDetailError.value = apiErrorMessage(error, '报销明细加载失败，请重试')
   } finally {
-    if (scope === (history ? historyScope() : sessionScope())) { initializingWorkspace.value = false; scheduleAutosave() }
+    if (workspaceReader.accepts(context)) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
 async function reconcileMaterialRevision(): Promise<void> {
@@ -2110,13 +1982,13 @@ async function returnFromHistory(): Promise<void> {
     expense.reset()
     return
   }
-  const context = beginWorkspaceRead()
+  const context = workspaceReader.begin()
   initializingWorkspace.value = true
   workspaceActionError.value = ''
   try {
-    const workspace = await listWorkspaceReimbursements({ expectedDepartment: auth.session?.selectedDepartment ?? undefined, ...generalScopeOptions.value })
-    if (!acceptsWorkspaceRead(context) || historyOrigin.value !== origin || drafts.currentDraft?.id !== historicalId) return
-    if (workspace.items.length > 1) {
+    const workspace = await workspaceReader.list(context)
+    if (workspace.kind === 'stale' || !workspaceReader.accepts(context) || historyOrigin.value !== origin || drafts.currentDraft?.id !== historicalId) return
+    if (workspace.kind === 'legacy') {
       legacyDrafts.value = workspace.items
       historyOrigin.value = null
       historicalSubmission.value = null
@@ -2124,7 +1996,7 @@ async function returnFromHistory(): Promise<void> {
       expense.reset()
       return
     }
-    const latest = workspace.items[0]
+    const latest = workspace.kind === 'current' ? workspace.draft : undefined
     if (!latest) {
       // History's type only controls its display. First-entry department
       // selection belongs to the original workspace and must follow this read.
@@ -2139,31 +2011,29 @@ async function returnFromHistory(): Promise<void> {
         mobileStep.value = 0
         return
       }
-      if (!await openEditableReimbursement(false, context) || !acceptsWorkspaceRead(context)) return
+      if (!await openEditableReimbursement(false, context) || !workspaceReader.accepts(context)) return
       historyOrigin.value = null
       historicalSubmission.value = null
       pendingNewApproval.value = null
       await returnToApprovalStep()
       return
     }
-    const adopted = await drafts.loadDraft(latest.id, true, (incoming) => acceptsWorkspaceRead(context) && !incoming.workspaceRetired)
-    if (!acceptsWorkspaceRead(context)) return
-    if (!adopted || drafts.currentDraft?.id !== latest.id || drafts.loadError) {
-      throw new Error(drafts.loadError || '当前报销已变化，请重新返回')
-    }
+    const loaded = await workspaceReader.load(context, latest.id)
+    if (loaded.kind === 'stale' || !workspaceReader.accepts(context)) return
+    if (loaded.kind === 'rejected') throw new Error(loaded.message || '当前报销已变化，请重新返回')
     if (drafts.reimbursementKind === 'general') generalDepartmentConfirmed.value = true
     historyOrigin.value = null
     historicalSubmission.value = null
-    await showWorkspaceReimbursement(drafts.currentDraft)
-    if (!acceptsWorkspaceRead(context) || drafts.currentDraft?.id !== latest.id) return
+    await showWorkspaceReimbursement(loaded.draft)
+    if (!workspaceReader.accepts(context) || drafts.currentDraft?.id !== latest.id) return
     pendingNewApproval.value = latest.id === origin.draftId ? origin.pendingApproval : null
     mobileStep.value = latest.id === origin.draftId ? origin.mobileStep : 0
     await nextTick()
-    if (acceptsWorkspaceRead(context)) scrollToWorkspaceStart()
+    if (workspaceReader.accepts(context)) scrollToWorkspaceStart()
   } catch (error) {
-    if (acceptsWorkspaceRead(context)) workspaceActionError.value = error instanceof Error ? error.message : '当前报销读取失败，请重试返回'
+    if (workspaceReader.accepts(context)) workspaceActionError.value = error instanceof Error ? error.message : '当前报销读取失败，请重试返回'
   } finally {
-    if (acceptsWorkspaceRead(context)) { initializingWorkspace.value = false; scheduleAutosave() }
+    if (workspaceReader.accepts(context)) { initializingWorkspace.value = false; scheduleAutosave() }
   }
 }
 
@@ -2171,11 +2041,10 @@ async function replaceOutdatedForm(): Promise<void> {
   if (!canReplaceOutdatedForm.value || replacingTemplate.value || drafts.busy) return
   const draftId = drafts.currentDraft?.id
   if (!draftId) return
-  const scope = sessionScope()
-  const generation = workspaceReadGeneration
+  const readContext = workspaceReader.capture()
   let context: WorkspaceReadContext | undefined
-  const acceptsReplacement = () => context ? acceptsWorkspaceRead(context)
-    : !disposed && scope === sessionScope() && generation === workspaceReadGeneration
+  const acceptsReplacement = () => context ? workspaceReader.accepts(context)
+    : workspaceReader.accepts(readContext)
   replacingTemplate.value = true
   try {
     await ElMessageBox.confirm(
@@ -2194,12 +2063,12 @@ async function replaceOutdatedForm(): Promise<void> {
     if (latest.status === 'LOCKED') {
       hydrate(latest)
       try {
-        await submission.restore(draftId, { discoverByDraft: true, expectedRevision: latest.revision })
+        await submission.restoreForDraft(latest)
       } catch { /* The submission panel shows the recovery action. */ }
       return
     }
     if (!canReplaceOutdatedForm.value || drafts.busy) return
-    context = beginWorkspaceRead()
+    context = workspaceReader.begin()
     initializingWorkspace.value = true
     if (!await openEditableReimbursement(true, context)) return
     if (acceptsReplacement()) await returnToApprovalStep()
@@ -2248,7 +2117,7 @@ async function resolveDepartmentForApproval(
   const requestedSelections = [selection]
   const explicitSwitch = changingDepartment.value && !isGeneral.value
   const saveSource = explicitSwitch ? !formReadOnly.value && formDirty.value : inputDirty.value
-  if (autosaveTimer) clearTimeout(autosaveTimer)
+  saveCoordinator.cancelScheduled()
   relatedApprovalVerificationError.value = ''
   verifyingRelatedApprovals.value = true
   if (!explicitSwitch) selectedRelatedApprovals.value = requestedSelections
@@ -2460,9 +2329,8 @@ watch(() => drafts.currentDraft?.id, () => { generalApprovalOpen.value = false }
 watch([sessionScope, reimbursementSubject], ([currentScope, subject], [, previousSubject]) => {
   const resolvingTravelDepartment = subject === previousSubject
     && bindingApprovalDepartment.value
-  if (autosaveTimer) clearTimeout(autosaveTimer)
+  saveCoordinator.reset()
   saving.value = false
-  savePromise = null
   verifyingRelatedApprovals.value = false
   bindingApprovalDepartment.value = false
   pendingDepartmentApproval.value = null
@@ -2474,7 +2342,7 @@ watch([sessionScope, reimbursementSubject], ([currentScope, subject], [, previou
   refreshingMaterialStatus.value = false
   refreshingServiceStatus.value = false
   recoveryGeneration++
-  workspaceReadGeneration++
+  workspaceReader.invalidate()
   confirmingDraftReload.value = false
   replacingTemplate.value = false
   recoveringReimbursement.value = false
@@ -2499,6 +2367,10 @@ watch(() => expenseItemsCard.value?.hasOpenMaterialEditor, (open) => {
   }
 })
 watch([currentFormInput, selectedRelatedApprovals], scheduleAutosave, { deep: true })
+watch(formReadOnly, (readOnly) => {
+  if (readOnly) saveCoordinator.cancelScheduled()
+  else if (!saveError.value) scheduleAutosave()
+})
 watch(workspaceActionError, (message) => { if (message) void revealAttention('workspace') }, { flush: 'post' })
 watch(() => submittedResult.value?.draftId, (draftId) => {
   if (draftId) void loadSubmittedReceipt()
@@ -2597,11 +2469,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (recoveryRefreshTimer) clearTimeout(recoveryRefreshTimer)
   disposed = true
+  workspaceReader.invalidate()
   reimbursementSwitchRequest?.abort()
   historyRequest?.abort()
   historyDetailRequest?.abort()
   if (calculationTimer) clearTimeout(calculationTimer)
-  if (autosaveTimer) clearTimeout(autosaveTimer)
   mobileFooterResizeObserver?.disconnect()
   window.removeEventListener('beforeunload', warnBeforeUnload)
   window.removeEventListener('focus', refreshOptionsOnForeground)

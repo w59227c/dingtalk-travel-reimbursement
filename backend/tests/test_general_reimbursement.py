@@ -859,7 +859,7 @@ def test_general_approval_search_reports_incomplete_stage(client_factory, failur
             json.loads(line)
             for line in capsys.readouterr().err.splitlines()
             if line.startswith("{")
-            and json.loads(line).get("logger") == "app.services.general_reimbursement"
+            and json.loads(line).get("logger") == "app.services.general_approvals"
         ]
         assert len(records) == 1
         assert records[0]["errorCode"] == "DINGTALK_OPENAPI_FAILED"

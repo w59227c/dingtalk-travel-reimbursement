@@ -864,15 +864,6 @@ def _option_with_current_display(
     return matches[0]
 
 
-async def load_fresh_submission_template(
-    database_session_factory: sessionmaker[Session],
-    workflow: DingTalkWorkflowClient,
-) -> OaTemplateCatalogContract:
-    """Compatibility name for callers that predate the aggregate catalog."""
-
-    return await load_fresh_submission_catalog(database_session_factory, workflow)
-
-
 def validate_template_mapping(schema: FormSchema, mappings: dict[str, str]) -> dict[str, str]:
     normalized = _validate_mapping(
         schema,

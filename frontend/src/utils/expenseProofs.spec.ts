@@ -1,12 +1,53 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  isRailExpense,
+  linkedExpenseProofs,
   materialSubmissionBlockReason,
   missingExpenseMaterials,
   requiresPaymentProof,
 } from './expenseProofs'
 import type { ExpenseItem } from '@/types/expenses'
 import type { ReimbursementDraftFile } from '@/types/reimbursements'
+import { reimbursementFileFixture } from '@/tests/fixtures/reimbursements'
+
+describe('linked expense proofs', () => {
+  it.each([
+    ['itinerary', 'itineraryFileIds'], ['payment_proof', 'paymentProofFileIds'],
+    ['hotel_bill', 'hotelBillFileIds'], ['waybill', 'waybillFileIds'], ['other', 'receiptAttachmentFileIds'],
+  ] as const)('keeps valid %s files in display order and permits purged metadata only for history', (kind, field) => {
+    const proof = (id: string, overrides: Partial<ReimbursementDraftFile> = {}) => reimbursementFileFixture({
+      id, role: 'ATTACHMENT_ONLY', attachmentKind: kind, ...overrides,
+    })
+    const first = proof('first'), second = proof('second')
+    const purged = proof('purged', { status: 'PURGED' })
+    const files = [first, second, purged,
+      proof('pending', { materialClassification: { status: 'needs_confirmation', kind: 'unknown', reason: null, pageCount: 1 } }),
+      proof('wrong-role', { role: 'EXPENSE_SOURCE' }),
+      proof('wrong-kind', { attachmentKind: kind === 'other' ? 'payment_proof' : 'other' }),
+      proof('deleting', { status: 'DELETING' }), proof('unlinked')]
+    const ids = ['second', 'first', 'second', 'purged', 'pending', 'wrong-role', 'wrong-kind', 'deleting', 'missing']
+    const item = { [field]: ids }
+    expect(linkedExpenseProofs(item, files, kind)).toEqual([first, second])
+    expect(linkedExpenseProofs(item, files, kind, { allowPurged: true })).toEqual([first, second, purged])
+    expect(item[field]).toEqual(ids)
+    expect(linkedExpenseProofs({}, files, kind)).toEqual([])
+  })
+})
+
+describe('rail expense applicability', () => {
+  it.each([
+    { category: 'rail_fare', transportType: 'other', general: false, expected: true },
+    { category: 'rail_fare', transportType: 'other', general: true, expected: true },
+    { category: 'local_transport', transportType: 'rail', general: false, expected: false },
+    { category: 'local_transport', transportType: 'rail', general: true, expected: true },
+    { category: 'local_transport', transportType: 'taxi', general: true, expected: false },
+    { category: 'local_transport', transportType: undefined, general: true, expected: false },
+    { category: 'other', transportType: 'rail', general: true, expected: false },
+  ] as const)('applies railway ticket rules to $category/$transportType, general=$general: $expected', ({ category, transportType, general, expected }) => {
+    expect(isRailExpense({ category, transportType }, general)).toBe(expected)
+  })
+})
 
 describe('payment proof requirement', () => {
   it.each([
@@ -24,6 +65,15 @@ describe('payment proof requirement', () => {
     expect(requiresPaymentProof({ ...item, receiptCount: 1 })).toBe(true)
     expect(requiresPaymentProof({ ...item, sourceFileId: 'invoice' })).toBe(true)
     expect(requiresPaymentProof({ ...item, source: 'ocr' })).toBe(true)
+  })
+
+  it.each([
+    { subjectValue: undefined, transportType: 'rail', railType: 'high_speed', expected: true },
+    { subjectValue: 'synthetic-transport', transportType: 'rail', railType: 'high_speed', expected: false },
+    { subjectValue: 'synthetic-transport', transportType: 'rail', railType: 'emu', expected: true },
+    { subjectValue: 'synthetic-transport', transportType: 'taxi', railType: 'high_speed', expected: true },
+  ] as const)('keeps the high-speed exemption scoped to the chosen expense subject and transport: %j', ({ expected, ...item }) => {
+    expect(requiresPaymentProof({ ...item, amount: '600.00', category: 'local_transport' })).toBe(expected)
   })
 
   it('does not request itineraries for taxis with a stale legacy flag', () => {

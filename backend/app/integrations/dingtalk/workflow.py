@@ -250,23 +250,8 @@ class DingTalkWorkflowClient:
     def __init__(self, client: DingTalkOpenAPIClient) -> None:
         self._client = client
 
-    async def list_visible_template_codes(self, user_id: str) -> tuple[tuple[str, ...], bool]:
-        templates, complete = await self.list_visible_templates(user_id)
-        return tuple(item.process_code for item in templates), complete
-
-    async def list_visible_templates(
-        self, user_id: str
-    ) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
-        user_id = _required_identifier(user_id, field_name="user_id")
-        return await self._read_template_directory(user_id=user_id)
-
     async def list_enterprise_templates(self) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
         """Read the enterprise directory without filtering by start visibility."""
-        return await self._read_template_directory(user_id=None)
-
-    async def _read_template_directory(
-        self, *, user_id: str | None,
-    ) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
         templates: dict[str, WorkflowVisibleTemplate] = {}
         cursor = 0
         while True:
@@ -274,10 +259,7 @@ class DingTalkWorkflowClient:
                 data = await self._client.request_openapi_json(
                     "GET",
                     "/v1.0/workflow/processes/userVisibilities/templates",
-                    params={
-                        "nextToken": cursor, "maxResults": 100,
-                        **({"userId": user_id} if user_id is not None else {}),
-                    },
+                    params={"nextToken": cursor, "maxResults": 100},
                     retry_transient=True,
                 )
             except DingTalkOpenAPIError:

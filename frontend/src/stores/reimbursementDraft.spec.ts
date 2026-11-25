@@ -21,11 +21,14 @@ import {
   uploadReimbursementDraftFile,
 } from '@/api/reimbursements'
 import { useReimbursementDraftStore } from '@/stores/reimbursementDraft'
+import {
+  deletedReceiptReadbackFixture, manualExpenseInputFixture, reimbursementDraftFixture,
+  reimbursementFileFixture, savedExpenseReadbackFixture,
+} from '@/tests/fixtures/reimbursements'
 import { downloadAndOpenDingTalkDocument } from '@/utils/dingtalk'
 import type {
   ReimbursementDraft,
   ReimbursementDraftFile,
-  ReimbursementDraftInput,
 } from '@/types/reimbursements'
 
 vi.mock('@/api/excel', () => ({ downloadBlob: vi.fn() }))
@@ -49,67 +52,14 @@ vi.mock('@/api/reimbursements', () => ({
 }))
 vi.mock('@/utils/dingtalk', () => ({ downloadAndOpenDingTalkDocument: vi.fn() }))
 
-const input: ReimbursementDraftInput = {
-  ocrDispositionVersion: 1,
-  companyValue: '北京',
-  budgetCodeValue: 'DEMO-001',
-  project: { mode: 'manual', text: '示例项目' },
-  trip: null,
-  dismissedOcrFileIds: [],
-  items: [{
-    category: 'other',
-    date: '2026-09-01',
-    displayDate: '2026-09-01',
-    description: '打车费',
-    amount: '44.89',
-    receiptCount: 1,
-  }],
-}
+let input = manualExpenseInputFixture()
 
 function draft(id = 'draft-1', revision = 1): ReimbursementDraft {
-  return {
-    id,
-    status: 'DRAFT',
-    revision,
-    department: { id: '100', name: '测试部门' },
-    templateConfigVersion: 12,
-    relatedApprovalCount: 0,
-    expiresAt: '2026-10-04T00:00:00Z',
-    createdAt: '2026-09-04T00:00:00Z',
-    updatedAt: `2026-09-04T00:00:0${revision}Z`,
-    lockedAt: null,
-    template: {
-      processCode: 'PROC-REIMBURSEMENT',
-      configVersion: 12,
-      schemaFingerprint: 'a'.repeat(64),
-    },
-    input,
-    totals: {
-      expenseTotal: '44.89',
-      subsidyTotal: '0.00',
-      totalAmount: '44.89',
-      receiptCount: 1,
-      uppercaseAmount: '肆拾肆元捌角玖分',
-      subsidy: null,
-    },
-    relatedApprovals: [],
-    relatedApprovalSummary: null,
-  }
+  return reimbursementDraftFixture({ id, revision, input, updatedAt: `2026-09-04T00:00:0${revision}Z` })
 }
 
 function serverFile(id = 'file-1'): ReimbursementDraftFile {
-  return {
-    id,
-    name: '票据.jpg',
-    role: 'EXPENSE_SOURCE',
-    attachmentKind: 'other',
-    sortOrder: 0,
-    status: 'ACTIVE',
-    mediaType: 'image/jpeg',
-    sizeBytes: 5,
-    ocrStatus: 'NOT_REQUESTED',
-    ocrResult: null,
-  }
+  return reimbursementFileFixture({ id })
 }
 
 function deferred<T>() {
@@ -159,6 +109,24 @@ describe('persistent reimbursement draft store', () => {
       expect(updateReimbursementDraft).toHaveBeenCalledOnce()
     },
   )
+
+  it.each([false, true])('accepts a contract-shaped saved response, lostResponse=%s', async lostResponse => {
+    const { request, readback } = savedExpenseReadbackFixture()
+    const store = useReimbursementDraftStore()
+    store.currentDraft = reimbursementDraftFixture({ input: request })
+    store.files = [serverFile()]
+    const saved = reimbursementDraftFixture({ revision: 2, input: readback })
+    if (lostResponse) {
+      vi.mocked(updateReimbursementDraft).mockRejectedValueOnce(new Error('Synthetic committed response lost'))
+      vi.mocked(getReimbursementDraft).mockResolvedValueOnce(saved)
+    } else vi.mocked(updateReimbursementDraft).mockResolvedValueOnce(saved)
+    await expect(store.saveDraft(request)).resolves.toEqual(saved)
+    expect(store.revisionConflict).toBe(false)
+    expect(store.currentDraft?.input.items[0]?.amount).toBe('44.80')
+    expect(store.currentDraft?.input.items[0]?.receiptAttachmentFileIds).toBeUndefined()
+    expect(updateReimbursementDraft).toHaveBeenCalledOnce()
+    expect(getReimbursementDraft).toHaveBeenCalledTimes(lostResponse ? 1 : 0)
+  })
 
   it('keeps an unresolved write until its current server input is adopted', async () => {
     const store = useReimbursementDraftStore()
@@ -311,6 +279,7 @@ describe('persistent reimbursement draft store', () => {
   })
 
   beforeEach(() => {
+    input = manualExpenseInputFixture()
     setActivePinia(createPinia())
     vi.clearAllMocks()
     vi.mocked(listReimbursementDrafts).mockResolvedValue({
@@ -1392,14 +1361,7 @@ describe('persistent reimbursement draft store', () => {
   it.each([false, true].flatMap((changed) => [
     { changed, remaining: [] as string[] }, { changed, remaining: ['file-2'] },
   ]))('compares canonical receipt references after a lost deletion response, changed=$changed remaining=$remaining', async ({ changed, remaining }) => {
-    const before = structuredClone(input)
-    Object.assign(before.items[0]!, {
-      itineraryFileIds: [], paymentProofFileIds: [], hotelBillFileIds: [],
-      receiptAttachmentFileIds: ['file-1', ...remaining],
-    })
-    const after = structuredClone(before)
-    if (remaining.length) after.items[0]!.receiptAttachmentFileIds = remaining
-    else delete after.items[0]!.receiptAttachmentFileIds
+    const { before, readback: after } = deletedReceiptReadbackFixture(remaining)
     if (changed) after.items[0]!.amount = '88.88'
     vi.mocked(createReimbursementDraft).mockResolvedValue({ ...draft(), input: before })
     vi.mocked(deleteReimbursementDraftFile).mockRejectedValueOnce(new Error('response lost'))

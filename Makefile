@@ -1,6 +1,7 @@
 .PHONY: \
 	backend-install backend-test backend-lint backend-format \
 	frontend-install frontend-test frontend-typecheck frontend-lint frontend-build \
+	browser-smoke browser-smoke-install \
 	compose-config compose-config-development nginx-policy-check \
 	ocr-models-check ocr-runtime-check ocr-memory-check verify deploy-check clean \
 	dev dev-backend dev-frontend \
@@ -34,6 +35,13 @@ frontend-lint:
 
 frontend-build:
 	cd frontend && npm run build
+
+browser-smoke-install:
+	cd frontend && npm run test:browser:install
+
+browser-smoke: frontend-build
+	cd frontend && npm run test:browser:runner
+	cd frontend && npm run test:browser
 
 compose-config:
 	docker compose config --quiet

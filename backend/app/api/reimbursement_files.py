@@ -27,11 +27,8 @@ from app.services.file_coordination import (
     SessionFilesRetired,
     UploadBusy,
 )
-from app.services.general_reimbursement import (
-    get_general_catalog,
-    refresh_general_catalog,
-    verify_general_approvals,
-)
+from app.services.general_approvals import verify_general_approvals
+from app.services.general_reimbursement import get_general_catalog, refresh_general_catalog
 from app.services.multipart_uploads import parse_upload_files
 from app.services.oa_template_profiles import load_fresh_submission_catalog
 from app.services.ocr_service import OcrService

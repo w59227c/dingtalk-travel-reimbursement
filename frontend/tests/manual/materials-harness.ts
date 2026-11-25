@@ -129,6 +129,6 @@ const app = createApp({ render: () => h('main', { style: 'max-width:1200px;margi
     }, '开始模拟批次'),
     h('p', { 'data-testid': 'pipeline-published-count' }, `费用列表已发布 ${expense.items.length} 笔（批次完成前应保持 0）`),
   ] : []),
-  h(ExpenseItemsCard, { durable: true }),
+  h(ExpenseItemsCard, { mobile: new URLSearchParams(location.search).get('mobile') === '1' }),
 ]) })
 app.use(pinia).use(ElementPlus).mount('#app')
