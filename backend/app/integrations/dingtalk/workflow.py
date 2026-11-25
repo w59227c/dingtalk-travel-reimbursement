@@ -258,6 +258,15 @@ class DingTalkWorkflowClient:
         self, user_id: str
     ) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
         user_id = _required_identifier(user_id, field_name="user_id")
+        return await self._read_template_directory(user_id=user_id)
+
+    async def list_enterprise_templates(self) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
+        """Read the enterprise directory without filtering by start visibility."""
+        return await self._read_template_directory(user_id=None)
+
+    async def _read_template_directory(
+        self, *, user_id: str | None,
+    ) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
         templates: dict[str, WorkflowVisibleTemplate] = {}
         cursor = 0
         while True:
@@ -265,7 +274,10 @@ class DingTalkWorkflowClient:
                 data = await self._client.request_openapi_json(
                     "GET",
                     "/v1.0/workflow/processes/userVisibilities/templates",
-                    params={"userId": user_id, "nextToken": cursor, "maxResults": 100},
+                    params={
+                        "nextToken": cursor, "maxResults": 100,
+                        **({"userId": user_id} if user_id is not None else {}),
+                    },
                     retry_transient=True,
                 )
             except DingTalkOpenAPIError:
@@ -273,59 +285,18 @@ class DingTalkWorkflowClient:
                     return tuple(templates.values()), False
                 raise
             result = data.get("result")
-            if not isinstance(result, dict):
+            if not isinstance(result, dict) or not isinstance(result.get("processList"), list):
                 return tuple(templates.values()), False
-            records = result.get("processList")
-            if not isinstance(records, list):
-                return tuple(templates.values()), False
-            for row in records:
-                if (
-                    not isinstance(row, dict)
-                    or not isinstance(row.get("processCode"), str)
-                    or not row["processCode"].strip()
-                ):
-                    return tuple(templates.values()), False
-                name = row.get("name")
-                code = row["processCode"].strip()
-                templates[code] = WorkflowVisibleTemplate(
-                    code, name.strip() if isinstance(name, str) else ""
-                )
-            next_cursor = result.get("nextToken")
-            if next_cursor is None or next_cursor == 0 or next_cursor == "0":
-                return tuple(templates.values()), True
-            if not str(next_cursor).isdigit() or int(next_cursor) <= cursor:
-                return tuple(templates.values()), False
-            cursor = int(next_cursor)
-
-    async def list_enterprise_templates(self) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
-        """Read the enterprise directory without filtering by start visibility."""
-        templates: dict[str, WorkflowVisibleTemplate] = {}
-        cursor = 0
-        while True:
-            try:
-                data = await self._client.request_oapi_json(
-                    "POST",
-                    "/topapi/process/listbyuserid",
-                    json={"offset": cursor, "size": 100},
-                    retry_transient=True,
-                )
-            except DingTalkOpenAPIError:
-                if templates:
-                    return tuple(templates.values()), False
-                raise
-            result = data.get("result")
-            if not isinstance(result, dict) or not isinstance(result.get("process_list"), list):
-                return tuple(templates.values()), False
-            for row in result["process_list"]:
+            for row in result["processList"]:
                 try:
                     if not isinstance(row, dict):
                         raise ValueError
-                    code = _required_process_code(row.get("process_code"))
+                    code = _required_process_code(row.get("processCode"))
                     name = _optional_bounded_text(row.get("name"), max_length=1024) or ""
                 except ValueError:
                     return tuple(templates.values()), False
                 templates[code] = WorkflowVisibleTemplate(code, name)
-            next_cursor = result.get("next_cursor")
+            next_cursor = result.get("nextToken")
             if isinstance(next_cursor, bool):
                 return tuple(templates.values()), False
             if next_cursor is None or next_cursor == 0 or next_cursor == "0":

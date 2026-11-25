@@ -404,7 +404,13 @@ async def find_general_approvals(
 ) -> dict[str, object]:
     try:
         visible, directory_complete = await workflow.list_enterprise_templates()
-    except DingTalkOpenAPIError:
+    except DingTalkOpenAPIError as exc:
+        if exc.code == "DINGTALK_PERMISSION_MISSING":
+            raise ApiError(
+                "GENERAL_APPROVAL_DIRECTORY_PERMISSION_MISSING",
+                "钉钉应用缺少审批模板读取权限，请联系管理员开通后重试",
+                503,
+            ) from None
         visible, directory_complete = (), False
     names = {item.process_code: item.name for item in visible if item.name}
     available_codes = tuple(sorted({item.process_code for item in visible}))

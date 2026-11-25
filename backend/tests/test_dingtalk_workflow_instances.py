@@ -117,7 +117,7 @@ async def test_visible_templates_keep_successful_pages_when_directory_is_incompl
 
 
 @pytest.mark.asyncio
-async def test_enterprise_templates_paginate_without_an_employee_visibility_filter(
+async def test_enterprise_templates_use_modern_directory_without_employee_visibility_filter(
     settings_factory,
 ):
     pages = []
@@ -125,16 +125,19 @@ async def test_enterprise_templates_paginate_without_an_employee_visibility_filt
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/token"):
             return token_response()
-        assert request.method == "POST"
-        assert request.url.path == "/topapi/process/listbyuserid"
-        body = json.loads(request.content)
-        assert set(body) == {"offset", "size"}
-        assert body["size"] == 100
-        pages.append(body["offset"])
-        return httpx.Response(200, json={"errcode": 0, "result": {
-            "process_list": [{"process_code": f"PROC-SYNTHETIC-{body['offset']}",
-                              "name": f"合成类型{body['offset']}"}],
-            **({"next_cursor": 100} if body["offset"] == 0 else {}),
+        if request.url.path == "/topapi/process/listbyuserid":
+            return httpx.Response(200, json={"errcode": 88, "errmsg": "合成接口权限不足"})
+        assert request.method == "GET"
+        assert request.url.path == "/v1.0/workflow/processes/userVisibilities/templates"
+        assert request.headers["x-acs-dingtalk-access-token"] == "private-access-token"
+        assert set(request.url.params) == {"nextToken", "maxResults"}
+        assert request.url.params["maxResults"] == "100"
+        cursor = int(request.url.params["nextToken"])
+        pages.append(cursor)
+        return httpx.Response(200, json={"result": {
+            "processList": [{"processCode": f"PROC-SYNTHETIC-{cursor}",
+                             "name": f"合成类型{cursor}"}],
+            **({"nextToken": 100} if cursor == 0 else {}),
         }})
 
     client, workflow = workflow_client(settings_factory, handler)
@@ -157,22 +160,21 @@ async def test_enterprise_templates_keep_successful_pages_when_incomplete(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/token"):
             return token_response()
-        body = json.loads(request.content)
-        if body["offset"] == 0:
-            return httpx.Response(200, json={"errcode": 0, "result": {
-                "process_list": [{"process_code": "PROC-SYNTHETIC-FIRST", "name": "合成类型"}],
-                "next_cursor": 100,
+        if request.url.params["nextToken"] == "0":
+            return httpx.Response(200, json={"result": {
+                "processList": [{"processCode": "PROC-SYNTHETIC-FIRST", "name": "合成类型"}],
+                "nextToken": 100,
             }})
         if failure == "request":
-            return httpx.Response(403, json={"errcode": 60011})
+            return httpx.Response(403, json={"code": "Forbidden.AccessDenied.PermissionDenied"})
         if failure == "result":
-            return httpx.Response(200, json={"errcode": 0, "result": {}})
-        row = {"process_code": []} if failure == "row" else {
-            "process_code": "PROC-SYNTHETIC-SECOND",
+            return httpx.Response(200, json={"result": {}})
+        row = {"processCode": []} if failure == "row" else {
+            "processCode": "PROC-SYNTHETIC-SECOND",
             "name": {} if failure == "name" else "合成第二类型",
         }
-        return httpx.Response(200, json={"errcode": 0, "result": {
-            "process_list": [row], "next_cursor": True if failure == "boolean" else 100,
+        return httpx.Response(200, json={"result": {
+            "processList": [row], "nextToken": True if failure == "boolean" else 100,
         }})
 
     client, workflow = workflow_client(settings_factory, handler)
@@ -682,13 +684,13 @@ async def test_general_approval_search_accepts_empty_unnamed_text_notes(settings
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/token"):
             return token_response()
-        if request.url.path == "/topapi/process/listbyuserid":
+        if request.url.path == "/v1.0/workflow/processes/userVisibilities/templates":
             return httpx.Response(
                 200,
                 json={
                     "result": {
-                        "process_list": [
-                            {"process_code": "PROC-SYNTHETIC"},
+                        "processList": [
+                            {"processCode": "PROC-SYNTHETIC"},
                         ]
                     }
                 },

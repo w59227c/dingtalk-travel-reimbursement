@@ -946,6 +946,36 @@ def test_general_approval_search_resumes_within_the_same_template_and_day(
         raise AssertionError("exact-match approval was never reached")
 
 
+def test_general_directory_permission_failure_explains_the_required_action_and_can_recover(
+    client_factory,
+):
+    class PermissionWorkflow(GeneralWorkflow):
+        denied = True
+
+        async def list_enterprise_templates(self):
+            if self.denied:
+                raise DingTalkOpenAPIError._permission_denied(
+                    http_status=403, upstream_code="Forbidden.AccessDenied.PermissionDenied",
+                )
+            return await super().list_enterprise_templates()
+
+    client = client_factory(auth_mock_enabled=True)
+    mock_login(client)
+    workflow = PermissionWorkflow()
+    client.app.state.dingtalk_workflow = workflow
+    url = "/api/oa/general-approvals"
+    response = client.get(url)
+    assert response.status_code == 503, response.text
+    assert response.json()["error"]["code"] == "GENERAL_APPROVAL_DIRECTORY_PERMISSION_MISSING"
+    assert "权限" in response.json()["error"]["message"]
+    assert "管理员" in response.json()["error"]["message"]
+    workflow.denied = False
+    recovered = client.get(url)
+    assert recovered.status_code == 200, recovered.text
+    assert recovered.json()["data"]["complete"] is True
+    assert recovered.json()["data"]["items"]
+
+
 @pytest.mark.parametrize(
     "subject,category,amount,extra",
     [

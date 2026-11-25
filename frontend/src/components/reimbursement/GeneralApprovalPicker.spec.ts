@@ -385,6 +385,30 @@ describe.each([false, true])('automatic general approval search, mobile=%s', (mo
     expect(wrapper.text()).toContain('当前范围已查完')
   })
 
+  it('shows an actionable directory permission error and recovers after permission is restored', async () => {
+    const message = '钉钉应用缺少审批模板读取权限，请联系管理员开通后重试'
+    const denied = Object.assign(new Error(message), { isAxiosError: true,
+      response: { status: 503, data: { error: {
+        code: 'GENERAL_APPROVAL_DIRECTORY_PERMISSION_MISSING', message,
+      } } } })
+    vi.mocked(listGeneralApprovals).mockRejectedValueOnce(denied)
+      .mockResolvedValueOnce({ items: [first], complete: true })
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true })
+    await flushPromises()
+    expect(wrapper.text()).toContain(message)
+    expect(wrapper.text()).not.toContain('当前范围已查完')
+    expect(wrapper.text()).not.toContain('当前查询范围内没有符合条件的审批')
+    await wrapper.get('input[aria-label="搜索本人审批"]').setValue('采购')
+    expect(listGeneralApprovals).toHaveBeenCalledOnce()
+    await wrapper.findAll('button').find(button => button.text() === '重新加载')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain(message)
+    expect(wrapper.text()).toContain(first.title)
+    expect(wrapper.text()).toContain('当前范围已查完')
+    expect(listGeneralApprovals).toHaveBeenCalledTimes(2)
+  })
+
   it('pauses on collapse, resumes on expansion, and ignores the cancelled response', async () => {
     const old = deferred<GeneralApprovalSearchResult>()
     vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [first], complete: false, nextCursor: 'synthetic-page-2' })
