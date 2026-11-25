@@ -114,6 +114,9 @@ class GeneralWorkflow(LocalWorkflowBoundary):
             for code in (*self.schemas, PURCHASE_CODE)
         ), True
 
+    async def list_enterprise_templates(self):
+        return await self.list_visible_templates("mock-user")
+
     async def list_process_instance_ids(self, *, process_code, next_token, **kwargs):
         if process_code == TRAVEL_PROCESS_CODE:
             page = await super().list_process_instance_ids(
@@ -123,7 +126,7 @@ class GeneralWorkflow(LocalWorkflowBoundary):
             )
         elif process_code == PURCHASE_CODE:
             assert kwargs["user_ids"] == ("mock-user",)
-            assert kwargs["statuses"] == ("COMPLETED",)
+            assert kwargs["statuses"] == ("COMPLETED", "RUNNING", "TERMINATED")
             page = WorkflowInstanceIdPage((PURCHASE_INSTANCE, "synthetic-other-user"), None)
         else:
             return WorkflowInstanceIdPage((), None)
@@ -626,7 +629,7 @@ def test_general_template_rejects_a_restricted_relation_policy(client_factory):
             )
 
 
-def test_general_approval_search_only_returns_approved_owned_instances(client_factory):
+def test_general_approval_search_returns_all_owned_statuses(client_factory):
     states = {
         "synthetic-approved": ("COMPLETED", "agree", "mock-user"),
         "synthetic-running": ("RUNNING", "agree", "mock-user"),
@@ -665,16 +668,19 @@ def test_general_approval_search_only_returns_approved_owned_instances(client_fa
     response = client.get("/api/oa/general-approvals", params={"from": today, "to": today})
     assert response.status_code == 200, response.text
     page = response.json()["data"]
-    assert [item["processInstanceId"] for item in page["items"]] == ["synthetic-approved"]
+    assert {item["processInstanceId"] for item in page["items"]} == set(states) - {
+        "synthetic-other-owner"
+    }
+    assert {item["processCode"] for item in page["items"]} == {PURCHASE_CODE}
     assert page["complete"] is True
-    assert workflow.requested_statuses == [("COMPLETED",)]
+    assert workflow.requested_statuses == [("COMPLETED", "RUNNING", "TERMINATED")]
 
 
 @pytest.mark.parametrize(
     "status,result",
     [("RUNNING", None), ("TERMINATED", "agree"), ("COMPLETED", "refuse"), ("COMPLETED", None)],
 )
-def test_general_approval_selection_rejects_unapproved_instances(client_factory, status, result):
+def test_general_approval_selection_accepts_all_owned_states(client_factory, status, result):
     class UnapprovedWorkflow(GeneralWorkflow):
         async def get_process_instance(self, instance_id):
             source = await super().get_process_instance(instance_id)
@@ -701,24 +707,32 @@ def test_general_approval_selection_rejects_unapproved_instances(client_factory,
         headers=headers,
         json={"expectedRevision": draft["revision"], "instanceIds": [PURCHASE_INSTANCE]},
     )
-    assert response.status_code == 422, response.text
-    assert response.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_APPROVED"
+    assert response.status_code == 200, response.text
     current = client.get(f"/api/reimbursements/drafts/{draft['id']}").json()["data"]
-    assert current["revision"] == draft["revision"]
-    assert current["input"].get("generalApprovalIds", []) == []
+    assert current["revision"] == draft["revision"] + 1
+    assert current["input"]["generalApprovalIds"] == [PURCHASE_INSTANCE]
+    assert current["input"]["generalApprovalSummaries"][0]["status"] == status
 
 
-def test_general_rechecks_approved_associations_before_preview_and_submit(client_factory):
+@pytest.mark.parametrize(
+    "status,result",
+    [("RUNNING", None), ("TERMINATED", "agree"), ("COMPLETED", "refuse"), ("COMPLETED", None)],
+)
+def test_general_rechecks_association_ownership_before_preview_and_submit(
+    client_factory, status, result
+):
     class ChangedWorkflow(GeneralWorkflow):
         revoked = False
 
         async def get_process_instance(self, instance_id):
             source = await super().get_process_instance(instance_id)
-            return (
-                replace(source, status="TERMINATED")
-                if self.revoked and instance_id == PURCHASE_INSTANCE
-                else source
-            )
+            if instance_id != PURCHASE_INSTANCE:
+                return source
+            if self.revoked:
+                return replace(
+                    source, status="TERMINATED", originator_user_id="synthetic-other-owner"
+                )
+            return replace(source, status=status, result=result)
 
     client = client_factory(auth_mock_enabled=True)
     login = mock_login(client)
@@ -787,14 +801,14 @@ def test_general_rechecks_approved_associations_before_preview_and_submit(client
     for endpoint in ("excel-preview", "excel-preview-ticket"):
         rejected = client.post(f"{path}/{endpoint}", headers=headers, json=revision)
         assert rejected.status_code == 422, rejected.text
-        assert rejected.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_APPROVED"
+        assert rejected.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_OWNED"
     rejected = client.post(
         f"/api/oa/reimbursements/{draft['id']}/submit",
         headers={**headers, "Idempotency-Key": "44000000-0000-4000-8000-000000000000"},
         json=revision,
     )
     assert rejected.status_code == 422, rejected.text
-    assert rejected.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_APPROVED"
+    assert rejected.json()["error"]["code"] == "OA_GENERAL_APPROVAL_NOT_OWNED"
     current = client.get(path).json()["data"]
     assert current["revision"] == draft["revision"]
     assert current["status"] == "REVIEW_READY"
@@ -1016,6 +1030,9 @@ def test_general_can_preview_missing_supporting_proofs_but_cannot_review(
     "scenario",
     [
         "normal",
+        "running-related-approval",
+        "refused-related-approval",
+        "terminated-related-approval",
         "template-rebound",
         "budget-stopped",
         "subject-reclassified-at-lock",
@@ -1035,6 +1052,21 @@ def test_general_reimbursement_separates_workspaces_and_submits_exact_frozen_sub
     login = mock_login(client)
     headers = {"X-CSRF-Token": login["csrfToken"]}
     workflow = GeneralWorkflow()
+    related_state = {
+        "running-related-approval": ("RUNNING", None),
+        "refused-related-approval": ("COMPLETED", "refuse"),
+        "terminated-related-approval": ("TERMINATED", "agree"),
+    }.get(scenario)
+    if related_state:
+        original_get = workflow.get_process_instance
+
+        async def get_with_status(instance_id):
+            instance = await original_get(instance_id)
+            if instance_id == PURCHASE_INSTANCE:
+                return replace(instance, status=related_state[0], result=related_state[1])
+            return instance
+
+        monkeypatch.setattr(workflow, "get_process_instance", get_with_status)
     asyncio.run(configure_profiles(client.app, workflow))
     client.app.state.settings.dingtalk_oa_worker_enabled = True
 
@@ -1117,6 +1149,9 @@ def test_general_reimbursement_separates_workspaces_and_submits_exact_frozen_sub
     )
     saved_approvals = general["input"]["generalApprovalSummaries"]
     assert saved_approvals[0]["title"] == "合成采购审批"
+    if related_state:
+        assert saved_approvals[0]["status"] == related_state[0]
+        assert saved_approvals[0]["result"] == related_state[1]
     assert data(client.get(f"{draft}/general-approvals")) == saved_approvals
     uploaded = data(
         _upload(
@@ -1448,3 +1483,86 @@ def test_general_approval_template_filter_uses_directory_codes_and_preserves_sea
         item["processInstanceId"] for item in all_templates.json()["data"]["items"]
     }
     assert {PURCHASE_CODE, TRAVEL_PROCESS_CODE} <= set(workflow.queried_codes)
+
+
+def test_general_discovers_owned_history_after_employee_loses_template_visibility(client_factory):
+    class HistoricalWorkflow(GeneralWorkflow):
+        async def list_visible_templates(self, user_id):
+            return (WorkflowVisibleTemplate(PURCHASE_CODE, "采购申请"),), True
+
+        async def list_enterprise_templates(self):
+            return (
+                WorkflowVisibleTemplate(PURCHASE_CODE, "采购申请"),
+                WorkflowVisibleTemplate(TRAVEL_PROCESS_CODE, "合成历史出差"),
+                WorkflowVisibleTemplate(GENERAL_CODE, "合成无记录类型"),
+            ), True
+
+    client = client_factory(auth_mock_enabled=True)
+    mock_login(client)
+    workflow = HistoricalWorkflow()
+    client.app.state.dingtalk_workflow = workflow
+    response = client.get("/api/oa/general-approvals")
+    assert response.status_code == 200, response.text
+    page = response.json()["data"]
+    assert {entry["processCode"] for entry in page["templates"]} == {
+        PURCHASE_CODE, TRAVEL_PROCESS_CODE,
+    }
+    assert TRAVEL_INSTANCE_ID in {entry["processInstanceId"] for entry in page["items"]}
+    assert page["complete"] is True
+
+
+def test_general_types_come_only_from_actual_owned_records_without_configured_templates(
+    client_factory,
+):
+    def data(response):
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    empty_code = "PROC-SYNTHETIC-EMPTY"
+    other_code = "PROC-SYNTHETIC-OTHER-OWNER"
+    running_code = "PROC-SYNTHETIC-RUNNING"
+
+    class OwnedTypesWorkflow(GeneralWorkflow):
+        def __init__(self):
+            super().__init__()
+            self.queried_codes = []
+
+        async def list_visible_templates(self, user_id):
+            return tuple(WorkflowVisibleTemplate(code, name) for code, name in (
+                (PURCHASE_CODE, "合成采购"), (running_code, "合成申请中"),
+                (empty_code, "合成空模板"), (other_code, "合成他人模板"),
+            )), True
+
+        async def list_process_instance_ids(self, *, process_code, **query):
+            self.queried_codes.append(process_code)
+            assert query["user_ids"] == ("mock-user",)
+            return WorkflowInstanceIdPage({
+                PURCHASE_CODE: (PURCHASE_INSTANCE,), running_code: ("synthetic-running",),
+                empty_code: (), other_code: ("synthetic-other-owner",),
+            }[process_code], None)
+
+        async def get_process_instance(self, instance_id):
+            source = await super().get_process_instance(PURCHASE_INSTANCE)
+            owner = (
+                "synthetic-other-user" if instance_id == "synthetic-other-owner" else "mock-user"
+            )
+            return replace(source, instance_id=instance_id, originator_user_id=owner,
+                status="RUNNING" if instance_id == "synthetic-running" else "COMPLETED",
+                result=None if instance_id == "synthetic-running" else "refuse")
+
+    client = client_factory(auth_mock_enabled=True)
+    mock_login(client)
+    workflow = OwnedTypesWorkflow()
+    asyncio.run(configure_profiles(client.app, workflow))
+    endpoint = "/api/oa/general-approvals"
+    page = data(client.get(endpoint))
+    assert page["complete"] is True
+    assert {entry["processCode"] for entry in page["templates"]} == {PURCHASE_CODE, running_code}
+    assert {entry["processCode"] for entry in page["items"]} == {PURCHASE_CODE, running_code}
+    assert set(workflow.queried_codes) == {PURCHASE_CODE, running_code, empty_code, other_code}
+    # Keyword narrowing must not hide types for actual employee records.
+    searched = data(client.get(endpoint, params={"q": "synthetic-no-match"}))
+    assert searched["items"] == []
+    assert searched["templates"] == page["templates"]
+    # A configured reimbursement/travel template is never injected into discovery.
+    assert client.get(endpoint, params={"processCode": TRAVEL_PROCESS_CODE}).status_code == 422

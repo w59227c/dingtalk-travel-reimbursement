@@ -16,14 +16,10 @@ from app.services.general_reimbursement import (
     find_general_approvals,
     general_approval_date_range,
     general_options,
-    get_general_catalog,
     refresh_general_catalog,
     subject_category,
 )
-from app.services.oa_template_profiles import (
-    load_fresh_submission_catalog,
-    require_submission_ready_catalog,
-)
+from app.services.oa_template_profiles import load_fresh_submission_catalog
 from app.services.reimbursement_context import (
     get_reimbursement_session,
     require_live_reimbursement_actor,
@@ -92,22 +88,6 @@ async def get_current_user_general_approvals(
     date_range = general_approval_date_range(from_date, to_date, days=days)
     session_id = current.record.session_id_hash
     user_id = current.reimbursement_user_id
-    known_codes = []
-    known_names = {}
-    for kind in ("general", "travel"):
-        try:
-            catalog = (
-                get_general_catalog if kind == "general" else require_submission_ready_catalog
-            )(database)
-        except ApiError:
-            continue
-        known_codes.extend(
-            (catalog.reimbursement.process_code, *catalog.allowed_travel_process_codes)
-        )
-        known_names[catalog.reimbursement.process_code] = catalog.reimbursement.schema.template_name
-        known_names.update(
-            {item.process_code: item.schema.template_name for item in catalog.travel_profiles}
-        )
     database.rollback()
     result = await find_general_approvals(
         request.app.state.dingtalk_workflow,
@@ -117,8 +97,6 @@ async def get_current_user_general_approvals(
         session_id=session_id,
         secret=request.app.state.settings.session_secret,
         cursor=cursor,
-        known_codes=tuple(known_codes),
-        known_names=known_names,
         process_code=process_code.strip(),
     )
     require_live_reimbursement_actor(database, current, session_id)

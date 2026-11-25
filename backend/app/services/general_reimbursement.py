@@ -277,23 +277,13 @@ async def verify_general_approvals(
     user_id: str,
     instance_ids: list[str],
 ) -> tuple[WorkflowApprovalSummary, ...]:
-    approved = []
+    verified = []
     for instance_id in instance_ids:
         instance = await workflow.get_process_instance_summary(instance_id)
         if instance.instance_id != instance_id or instance.originator_user_id != user_id:
             raise ApiError("OA_GENERAL_APPROVAL_NOT_OWNED", "只能关联本人发起的审批", 422)
-        if not _is_approved(instance):
-            raise ApiError(
-                "OA_GENERAL_APPROVAL_NOT_APPROVED",
-                "只能关联已通过的审批，请移除未通过的关联后重试",
-                422,
-            )
-        approved.append(instance)
-    return tuple(approved)
-
-
-def _is_approved(instance: WorkflowApprovalSummary) -> bool:
-    return instance.status == "COMPLETED" and instance.result == "agree"
+        verified.append(instance)
+    return tuple(verified)
 
 
 def approval_summary(instance: WorkflowApprovalSummary) -> dict[str, object]:
@@ -410,17 +400,14 @@ async def find_general_approvals(
     session_id: str,
     secret: str,
     cursor: str | None = None,
-    known_codes: tuple[str, ...] = (),
-    known_names: dict[str, str] | None = None,
     process_code: str = "",
 ) -> dict[str, object]:
     try:
-        visible, directory_complete = await workflow.list_visible_templates(user_id)
+        visible, directory_complete = await workflow.list_enterprise_templates()
     except DingTalkOpenAPIError:
         visible, directory_complete = (), False
-    names = dict(known_names or {})
-    names.update({item.process_code: item.name for item in visible if item.name})
-    available_codes = tuple(sorted(set((*(item.process_code for item in visible), *known_codes))))
+    names = {item.process_code: item.name for item in visible if item.name}
+    available_codes = tuple(sorted({item.process_code for item in visible}))
     if process_code and process_code not in available_codes:
         raise ApiError(
             "GENERAL_APPROVAL_TEMPLATE_UNAVAILABLE",
@@ -432,7 +419,7 @@ async def find_general_approvals(
     scope = token_hash(
         json.dumps(
             [
-                "general-approved-approval-search-v4",
+                "general-approval-search-v6",
                 session_id,
                 user_id,
                 windows,
@@ -464,7 +451,7 @@ async def find_general_approvals(
     incomplete_reasons = set(position.incomplete_reasons)
     if not directory_complete:
         incomplete_reasons.add("directory")
-    ids: dict[str, None] = {}
+    ids: dict[str, str] = {}
     requests = 0
     # Bound each request while retaining the exact upstream position for the next batch.
     while codes and window_index < len(windows) and requests < 32 and len(ids) < 120:
@@ -478,13 +465,14 @@ async def find_general_approvals(
                 next_token=page_token,
                 max_results=20,
                 user_ids=(user_id,),
-                statuses=("COMPLETED",),
+                statuses=("COMPLETED", "RUNNING", "TERMINATED"),
             )
         except ApiError:
             partial = True
             incomplete_reasons.add("list")
         else:
-            ids.update(dict.fromkeys(batch.instance_ids))
+            for instance_id in batch.instance_ids:
+                ids.setdefault(instance_id, codes[template_index])
             if batch.next_token is not None and batch.next_token > page_token:
                 page_token = batch.next_token
                 continue
@@ -515,13 +503,15 @@ async def find_general_approvals(
     partial = partial or any(item is None for item in details)
     if any(item is None for item in details):
         incomplete_reasons.add("detail")
-    matches = [
+    owned = [
         item
         for item in details
         if item is not None
         and item.originator_user_id == user_id
-        and _is_approved(item)
-        and (
+    ]
+    matches = [
+        item for item in owned
+        if (
             not keyword
             or keyword.casefold()
             in " ".join(
@@ -534,13 +524,16 @@ async def find_general_approvals(
         )
     ]
     matches.sort(key=lambda item: (item.created_at, item.instance_id), reverse=True)
+    matched_codes = {ids[item.instance_id] for item in owned}
     has_more = bool(codes) and window_index < len(windows)
     return {
         "templates": [
             {"processCode": code, "name": names.get(code) or "未命名审批单"}
-            for code in available_codes
+            for code in available_codes if code in matched_codes
         ],
-        "items": [approval_summary(item) for item in matches],
+        "items": [
+            {**approval_summary(item), "processCode": ids[item.instance_id]} for item in matches
+        ],
         "complete": not has_more and not partial,
         "incompleteReasons": sorted(incomplete_reasons),
         **(

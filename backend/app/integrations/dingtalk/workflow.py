@@ -297,6 +297,45 @@ class DingTalkWorkflowClient:
                 return tuple(templates.values()), False
             cursor = int(next_cursor)
 
+    async def list_enterprise_templates(self) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
+        """Read the enterprise directory without filtering by start visibility."""
+        templates: dict[str, WorkflowVisibleTemplate] = {}
+        cursor = 0
+        while True:
+            try:
+                data = await self._client.request_oapi_json(
+                    "POST",
+                    "/topapi/process/listbyuserid",
+                    json={"offset": cursor, "size": 100},
+                    retry_transient=True,
+                )
+            except DingTalkOpenAPIError:
+                if templates:
+                    return tuple(templates.values()), False
+                raise
+            result = data.get("result")
+            if not isinstance(result, dict) or not isinstance(result.get("process_list"), list):
+                return tuple(templates.values()), False
+            for row in result["process_list"]:
+                try:
+                    if not isinstance(row, dict):
+                        raise ValueError
+                    code = _required_process_code(row.get("process_code"))
+                    name = _optional_bounded_text(row.get("name"), max_length=1024) or ""
+                except ValueError:
+                    return tuple(templates.values()), False
+                templates[code] = WorkflowVisibleTemplate(code, name)
+            next_cursor = result.get("next_cursor")
+            if isinstance(next_cursor, bool):
+                return tuple(templates.values()), False
+            if next_cursor is None or next_cursor == 0 or next_cursor == "0":
+                return tuple(templates.values()), True
+            if not str(next_cursor).isascii() or not str(next_cursor).isdigit():
+                return tuple(templates.values()), False
+            if int(next_cursor) <= cursor:
+                return tuple(templates.values()), False
+            cursor = int(next_cursor)
+
     async def get_form_schema(self, process_code: str) -> FormSchema:
         # Official contract: GET with processCode in the query string and the
         # organization access token in x-acs-dingtalk-access-token.

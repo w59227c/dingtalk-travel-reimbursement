@@ -1,4 +1,4 @@
-<script setup lang="ts" generic="Row extends { processInstanceId: string; title: string; businessId: string; linkedOnly: boolean }">
+<script setup lang="ts" generic="Row extends { processInstanceId: string; title: string; businessId: string; linkedOnly: boolean; linkedOnlyLabel?: string }">
 import { computed, ref, watch } from 'vue'
 import {
   APPROVAL_QUERY_HINT, GENERAL_APPROVAL_QUERY_HINT, approvalQueryEndDisabled, approvalQueryStartDisabled,
@@ -19,6 +19,7 @@ const props = defineProps<{
   maxSelections?: number
   unavailableReason?: (row: Row) => string
   selectionHelp?: string
+  searchLabel?: string
 }>()
 const fromDate = defineModel<string>('fromDate', { required: true })
 const toDate = defineModel<string>('toDate', { required: true })
@@ -27,13 +28,22 @@ const expanded = defineModel<boolean>('expanded', { default: true })
 const emit = defineEmits<{ search: []; toggle: [row: Row, checked: boolean] }>()
 const pageSize = 10
 const page = ref(1)
-const pageCount = computed(() => Math.max(1, Math.ceil(props.rows.length / pageSize)))
-const visibleRows = computed(() => props.rows.slice((page.value - 1) * pageSize, page.value * pageSize))
+const general = computed(() => props.kind === 'general')
+const orderedRows = computed<Row[]>((previous) => {
+  if (!general.value || page.value === 1 || !previous) return props.rows
+  // Keep pages stable while browsing; append discoveries and refresh existing rows.
+  // Returning home or changing filters restores the current chronological order.
+  const current = new Map(props.rows.map(row => [row.processInstanceId, row]))
+  const previousIds = new Set(previous.map(row => row.processInstanceId))
+  return [...previous.flatMap(row => current.get(row.processInstanceId) ?? []),
+    ...props.rows.filter(row => !previousIds.has(row.processInstanceId))]
+})
+const pageCount = computed(() => Math.max(1, Math.ceil(orderedRows.value.length / pageSize)))
+const visibleRows = computed(() => orderedRows.value.slice((page.value - 1) * pageSize, page.value * pageSize))
 const filtersOpen = ref(false)
 const hasFilters = computed(() => Boolean(fromDate.value || toDate.value || keyword.value.trim()))
 const startCalendarMonth = computed(() => toDate.value ? new Date(`${toDate.value}T00:00:00`) : undefined)
 const endCalendarMonth = computed(() => fromDate.value ? new Date(`${fromDate.value}T00:00:00`) : undefined)
-const general = computed(() => props.kind === 'general')
 const dateLimit = computed(() => general.value ? 365 : 180)
 const headingId = computed(() => `${props.kind}-approval-heading`)
 const filtersId = computed(() => general.value ? 'general-approval-filters' : 'approval-query-filters')
@@ -52,6 +62,7 @@ function search() {
 <template>
   <section
     class="travel-approval-section"
+    :class="{ 'travel-approval-section--mobile': mobile }"
     :data-testid="`${kind}-approval-section`"
     :aria-labelledby="headingId"
     :aria-busy="busy || loading"
@@ -98,7 +109,7 @@ function search() {
         >
           <slot name="category-filter" />
         </div>
-        <span v-else>近期已通过的审批</span>
+        <span v-else>{{ general ? '近期审批' : '近期已通过的审批' }}</span>
         <el-button
           link
           type="primary"
@@ -159,14 +170,14 @@ function search() {
             maxlength="100"
             :placeholder="general ? '标题、审批编号或说明' : '标题或审批编号'"
             :aria-label="general ? '搜索本人审批' : '搜索出差审批'"
-            @keyup.enter="search"
+            @keyup.enter="!general && search()"
           />
           <el-button
             class="travel-query-button"
             :loading="loading"
             @click="search"
           >
-            查询审批
+            {{ searchLabel || '查询审批' }}
           </el-button>
         </div>
         <p class="travel-query-help">
@@ -199,7 +210,7 @@ function search() {
           v-for="row in visibleRows"
           :key="row.processInstanceId"
           class="travel-approval-row"
-          :class="{ 'is-selected': selectedIds.has(row.processInstanceId) }"
+          :class="{ 'is-selected': selectedIds.has(row.processInstanceId), 'is-filtered-selection': general && row.linkedOnly }"
         >
           <el-checkbox
             :model-value="selectedIds.has(row.processInstanceId)"
@@ -215,7 +226,7 @@ function search() {
                 size="small"
                 type="info"
               >
-                已关联
+                {{ row.linkedOnlyLabel || '已关联' }}
               </el-tag>
               <slot
                 name="status"
@@ -244,7 +255,7 @@ function search() {
         v-model:current-page="page"
         :page-count="pageCount"
         :pager-count="5"
-        :disabled="loading || busy"
+        :disabled="busy || (loading && !general)"
         layout="prev, pager, next"
         size="small"
         class="approval-pagination"

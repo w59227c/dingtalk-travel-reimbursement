@@ -13,6 +13,7 @@ export type ReimbursementKind = 'travel' | 'general'
 
 export interface GeneralApproval {
   processInstanceId: string
+  processCode?: string
   title: string
   businessId: string
   status: string

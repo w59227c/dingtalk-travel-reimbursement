@@ -662,25 +662,38 @@ describe('ReimburseView single-form OA flow', () => {
     },
   )
 
-  it.each([false, true])('only offers passed general approvals even when a stale response contains other statuses, mobile=%s', async (mobile) => {
+  it.each([false, true])('shows and saves general approvals in every state, mobile=%s', async (mobile) => {
     serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
     const passed = { processInstanceId: 'synthetic-approved', title: '合成已通过审批',
       businessId: 'SYNTHETIC-APPROVED', status: 'COMPLETED', result: 'agree', createdAt: '2026-11-10T01:00:00Z' }
-    vi.mocked(listGeneralApprovals).mockResolvedValue({ complete: true, items: [passed,
+    const entries = [passed,
       { ...passed, processInstanceId: 'synthetic-terminated', title: '合成已终止审批', status: 'TERMINATED' },
       { ...passed, processInstanceId: 'synthetic-refused', title: '合成已拒绝审批', result: 'refuse' },
       { ...passed, processInstanceId: 'synthetic-running', title: '合成审批中记录', status: 'RUNNING' },
-    ] })
-    const { wrapper } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
+    ]
+    vi.mocked(listGeneralApprovals).mockResolvedValue({ complete: true, items: entries })
+    vi.mocked(replaceGeneralApprovals).mockImplementation(async (_id, revision, ids) => {
+      serverDraft = { ...serverDraft, revision: revision + 1,
+        input: { ...serverDraft.input, generalApprovalIds: ids,
+          generalApprovalSummaries: entries.filter(entry => ids.includes(entry.processInstanceId)) } }
+      return serverDraft
+    })
+    const { wrapper, drafts } = await mountView(() => { useReimbursementDraftStore().reimbursementKind = 'general' }, false, mobile)
     try {
       const section = wrapper.get('[data-testid="general-approval-section"]')
       section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
       await flushPromises()
       expect(section.text()).toContain(passed.title)
-      expect(section.text()).not.toContain('合成已终止审批')
-      expect(section.text()).not.toContain('合成已拒绝审批')
-      expect(section.text()).not.toContain('合成审批中记录')
-      expect(section.findAll('.travel-approval-row')).toHaveLength(1)
+      expect(section.text()).toContain('合成已终止审批')
+      expect(section.text()).toContain('合成已拒绝审批')
+      expect(section.text()).toContain('合成审批中记录')
+      expect(section.findAll('.travel-approval-row')).toHaveLength(4)
+      const terminated = section.findAll('.travel-approval-row')
+        .find(row => row.text().includes('合成已终止审批'))!
+      await terminated.get('input[type="checkbox"]').setValue(true)
+      await flushPromises()
+      expect(drafts.currentDraft?.input.generalApprovalIds).toEqual(['synthetic-terminated'])
+      expect(drafts.currentDraft?.input.generalApprovalSummaries?.[0]?.status).toBe('TERMINATED')
     } finally { wrapper.unmount() }
   })
 
@@ -700,7 +713,7 @@ describe('ReimburseView single-form OA flow', () => {
       section.findComponent({ name: 'ElSwitch' }).vm.$emit('update:modelValue', true)
       await flushPromises()
       expect(section.text()).toContain(legacy.title)
-      expect(section.text()).toContain('该关联审批未通过，请取消关联后再办理')
+      expect(section.text()).not.toContain('该关联审批未通过，请取消关联后再办理')
       const checkbox = section.get<HTMLInputElement>('.travel-approval-list input[type="checkbox"]')
       expect(checkbox.element.checked).toBe(true)
       expect(checkbox.element.disabled).toBe(false)
@@ -762,7 +775,7 @@ describe('ReimburseView single-form OA flow', () => {
     } finally { wrapper.unmount() }
   })
 
-  it.each([false, true])('requires a fresh search after editing the approval filters, mobile=%s', async (mobile) => {
+  it.each([false, true])('keeps keywords local and restarts the approval search only after applying dates, mobile=%s', async (mobile) => {
     serverDraft = makeDraft({ kind: 'general', input: { ...baseInput, items: [] } })
     const oldPage = deferred<Awaited<ReturnType<typeof listGeneralApprovals>>>()
     vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [], complete: false, nextCursor: 'old-page' })
@@ -775,13 +788,19 @@ describe('ReimburseView single-form OA flow', () => {
       await flushPromises()
       if (mobile) await visibleButton(wrapper, '筛选审批').trigger('click')
       await section.get('input[aria-label="搜索本人审批"]').setValue('差旅申请')
-      expect(section.text()).toContain('筛选条件已修改')
+      expect(section.text()).not.toContain('筛选条件已修改')
       expect(section.text()).not.toContain('继续查找')
       expect(listGeneralApprovals).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(listGeneralApprovals).mock.calls[1]![1].aborted).toBe(false)
+      const dates = section.findAllComponents({ name: 'ElDatePicker' })
+      dates[0]!.vm.$emit('update:modelValue', '2026-08-01')
+      dates[1]!.vm.$emit('update:modelValue', '2026-09-04')
+      await flushPromises()
+      expect(section.text()).toContain('日期范围已修改')
       expect(vi.mocked(listGeneralApprovals).mock.calls[1]![1].aborted).toBe(true)
       await visibleButton(wrapper, '查询审批').trigger('click')
       await flushPromises()
-      expect(listGeneralApprovals).toHaveBeenLastCalledWith({ query: '差旅申请' }, expect.any(AbortSignal))
+      expect(listGeneralApprovals).toHaveBeenLastCalledWith({ from: '2026-08-01', to: '2026-09-04' }, expect.any(AbortSignal))
       oldPage.resolve({ items: [], complete: false, nextCursor: 'stale-page' })
       await flushPromises()
       expect(listGeneralApprovals).toHaveBeenCalledTimes(3)
@@ -1430,7 +1449,7 @@ describe('ReimburseView single-form OA flow', () => {
       await filters.get('.travel-query-button').trigger('click')
       await flushPromises()
       expect(listGeneralApprovals).toHaveBeenLastCalledWith({
-        from: '2026-08-01', to: '2026-09-04', query: '示例差旅',
+        from: '2026-08-01', to: '2026-09-04',
       }, expect.any(AbortSignal))
       expect(section.text()).toContain(approval.title)
       expect(checkbox().element.checked).toBe(true)

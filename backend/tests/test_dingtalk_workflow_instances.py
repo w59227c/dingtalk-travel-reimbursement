@@ -116,6 +116,74 @@ async def test_visible_templates_keep_successful_pages_when_directory_is_incompl
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_enterprise_templates_paginate_without_an_employee_visibility_filter(
+    settings_factory,
+):
+    pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return token_response()
+        assert request.method == "POST"
+        assert request.url.path == "/topapi/process/listbyuserid"
+        body = json.loads(request.content)
+        assert set(body) == {"offset", "size"}
+        assert body["size"] == 100
+        pages.append(body["offset"])
+        return httpx.Response(200, json={"errcode": 0, "result": {
+            "process_list": [{"process_code": f"PROC-SYNTHETIC-{body['offset']}",
+                              "name": f"合成类型{body['offset']}"}],
+            **({"next_cursor": 100} if body["offset"] == 0 else {}),
+        }})
+
+    client, workflow = workflow_client(settings_factory, handler)
+    try:
+        templates, complete = await workflow.list_enterprise_templates()
+        assert pages == [0, 100]
+        assert [entry.process_code for entry in templates] == [
+            "PROC-SYNTHETIC-0", "PROC-SYNTHETIC-100",
+        ]
+        assert complete is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["request", "result", "row", "name", "cursor", "boolean"])
+async def test_enterprise_templates_keep_successful_pages_when_incomplete(
+    settings_factory, failure,
+):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            return token_response()
+        body = json.loads(request.content)
+        if body["offset"] == 0:
+            return httpx.Response(200, json={"errcode": 0, "result": {
+                "process_list": [{"process_code": "PROC-SYNTHETIC-FIRST", "name": "合成类型"}],
+                "next_cursor": 100,
+            }})
+        if failure == "request":
+            return httpx.Response(403, json={"errcode": 60011})
+        if failure == "result":
+            return httpx.Response(200, json={"errcode": 0, "result": {}})
+        row = {"process_code": []} if failure == "row" else {
+            "process_code": "PROC-SYNTHETIC-SECOND",
+            "name": {} if failure == "name" else "合成第二类型",
+        }
+        return httpx.Response(200, json={"errcode": 0, "result": {
+            "process_list": [row], "next_cursor": True if failure == "boolean" else 100,
+        }})
+
+    client, workflow = workflow_client(settings_factory, handler)
+    try:
+        templates, complete = await workflow.list_enterprise_templates()
+        assert templates[0].process_code == "PROC-SYNTHETIC-FIRST"
+        assert complete is False
+    finally:
+        await client.close()
+
+
 def create_command() -> CreateProcessInstanceCommand:
     return CreateProcessInstanceCommand(
         process_code="PROC-REIMBURSEMENT",
@@ -614,13 +682,13 @@ async def test_general_approval_search_accepts_empty_unnamed_text_notes(settings
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/token"):
             return token_response()
-        if request.url.path.endswith("/templates"):
+        if request.url.path == "/topapi/process/listbyuserid":
             return httpx.Response(
                 200,
                 json={
                     "result": {
-                        "processList": [
-                            {"processCode": "PROC-SYNTHETIC"},
+                        "process_list": [
+                            {"process_code": "PROC-SYNTHETIC"},
                         ]
                     }
                 },
@@ -725,7 +793,9 @@ def test_approval_summary_rejects_missing_required_metadata(overrides):
         ("COMPLETED", None),
     ],
 )
-async def test_summary_reads_do_not_allow_unapproved_associations(settings_factory, status, result):
+async def test_summary_reads_allow_general_associations_in_all_states(
+    settings_factory, status, result
+):
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/token"):
             return token_response()
@@ -740,11 +810,15 @@ async def test_summary_reads_do_not_allow_unapproved_associations(settings_facto
 
     client, workflow = workflow_client(settings_factory, handler)
     try:
-        with pytest.raises(ApiError) as caught:
+        (instance,) = await verify_general_approvals(
+            workflow, user_id="employee-1", instance_ids=["instance-1"]
+        )
+        assert instance.status == status
+        assert instance.result == result
+        with pytest.raises(ApiError, match="只能关联本人发起的审批"):
             await verify_general_approvals(
-                workflow, user_id="employee-1", instance_ids=["instance-1"]
+                workflow, user_id="other-user", instance_ids=["instance-1"]
             )
-        assert caught.value.code == "OA_GENERAL_APPROVAL_NOT_APPROVED"
     finally:
         await client.close()
 

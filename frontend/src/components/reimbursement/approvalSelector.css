@@ -110,6 +110,7 @@
 }
 
 .travel-approval-title strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.travel-approval-section--mobile .is-filtered-selection .travel-approval-title strong { flex-basis: 100%; }
 
 @container approval-filters (min-width: 640px) {
   .travel-query-grid:not(.travel-query-grid--mobile) {
