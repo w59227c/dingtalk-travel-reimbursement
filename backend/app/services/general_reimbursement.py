@@ -411,16 +411,35 @@ async def find_general_approvals(
     secret: str,
     cursor: str | None = None,
     known_codes: tuple[str, ...] = (),
+    known_names: dict[str, str] | None = None,
+    process_code: str = "",
 ) -> dict[str, object]:
     try:
-        visible, directory_complete = await workflow.list_visible_template_codes(user_id)
+        visible, directory_complete = await workflow.list_visible_templates(user_id)
     except DingTalkOpenAPIError:
         visible, directory_complete = (), False
-    codes = tuple(sorted(set((*visible, *known_codes))))
+    names = dict(known_names or {})
+    names.update({item.process_code: item.name for item in visible if item.name})
+    available_codes = tuple(sorted(set((*(item.process_code for item in visible), *known_codes))))
+    if process_code and process_code not in available_codes:
+        raise ApiError(
+            "GENERAL_APPROVAL_TEMPLATE_UNAVAILABLE",
+            "所选审批类别暂不可用，请选择其他类别或全部审批单后重试",
+            503 if not directory_complete else 422,
+        )
+    codes = (process_code,) if process_code else available_codes
     windows = approval_windows(*date_range)
     scope = token_hash(
         json.dumps(
-            ["general-approved-approval-search-v3", session_id, user_id, windows, keyword, codes]
+            [
+                "general-approved-approval-search-v4",
+                session_id,
+                user_id,
+                windows,
+                keyword,
+                process_code,
+                codes,
+            ]
         ),
         secret,
     )
@@ -517,6 +536,10 @@ async def find_general_approvals(
     matches.sort(key=lambda item: (item.created_at, item.instance_id), reverse=True)
     has_more = bool(codes) and window_index < len(windows)
     return {
+        "templates": [
+            {"processCode": code, "name": names.get(code) or "未命名审批单"}
+            for code in available_codes
+        ],
         "items": [approval_summary(item) for item in matches],
         "complete": not has_more and not partial,
         "incompleteReasons": sorted(incomplete_reasons),

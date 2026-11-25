@@ -1054,3 +1054,29 @@ def test_collect_snapshot_source_reads_review_ready_state_without_locking_draft(
         database.refresh(draft)
         assert draft.status == ReimbursementDraftStatus.REVIEW_READY.value
         assert draft.locked_at is None
+
+
+def test_numbered_documents_freeze_shared_names_and_reject_tampering():
+    legacy = build_snapshot(_source())
+    original_json = serialize_snapshot(legacy)
+    numbered = payloads.number_submission_snapshot(
+        legacy, submission_date=date(2026, 11, 25), sequence=2
+    )
+    assert numbered.snapshot_version == 13
+    assert numbered.excel.file_name == "差旅费报销单-测试员工-261125-2.xlsx"
+    assert (
+        payloads.snapshot_document_filename(numbered, pdf=True) == "票据汇总-测试员工-261125-2.pdf"
+    )
+    raw = serialize_snapshot(numbered)
+    assert parse_snapshot(raw, expected_sha256=snapshot_sha256(numbered)) == numbered
+    assert serialize_snapshot(legacy) == original_json
+    assert payloads.snapshot_document_filename(legacy, pdf=True) == "票据汇总.pdf"
+    changed = json.loads(raw)
+    changed["documentNaming"]["sequence"] = 3
+    with pytest.raises(ApiError):
+        parse_snapshot(
+            json.dumps(changed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        )
+    for update in ({"snapshot_version": 11}, {"document_naming": None}):
+        with pytest.raises(ValidationError):
+            serialize_snapshot(numbered.model_copy(update=update))

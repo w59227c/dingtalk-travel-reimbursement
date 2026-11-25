@@ -59,7 +59,9 @@ async def test_visible_templates_use_openapi_get_and_preserve_pagination(setting
             200,
             json={
                 "result": {
-                    "processList": [{"processCode": f"PROC-SYNTHETIC-{cursor}"}],
+                    "processList": [
+                        {"processCode": f"PROC-SYNTHETIC-{cursor}", "name": f"合成审批-{cursor}"}
+                    ],
                     **({"nextToken": 100} if cursor == 0 else {}),
                 }
             },
@@ -67,8 +69,11 @@ async def test_visible_templates_use_openapi_get_and_preserve_pagination(setting
 
     client, workflow = workflow_client(settings_factory, handler)
     try:
-        codes, complete = await workflow.list_visible_template_codes("employee-1")
-        assert codes == ("PROC-SYNTHETIC-0", "PROC-SYNTHETIC-100")
+        templates, complete = await workflow.list_visible_templates("employee-1")
+        assert [(item.process_code, item.name) for item in templates] == [
+            ("PROC-SYNTHETIC-0", "合成审批-0"),
+            ("PROC-SYNTHETIC-100", "合成审批-100"),
+        ]
         assert complete is True
         assert pages == [0, 100]
     finally:

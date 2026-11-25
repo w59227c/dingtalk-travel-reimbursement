@@ -116,8 +116,7 @@ def upgrade() -> None:
     _update_file_kinds(upgrade=True)
 
 
-def downgrade() -> None:
-    _begin_sqlite_transaction()
+def _preflight_downgrade() -> None:
     connection = op.get_bind()
     if any(
         connection.exec_driver_sql(query).scalar()
@@ -143,6 +142,11 @@ def downgrade() -> None:
     if context.opts.get("destination_rev") not in {down_revision, "-1"}:
         previous = ScriptDirectory.from_config(context.config).get_revision(down_revision)
         previous.module._preflight_downgrade()
+
+
+def downgrade() -> None:
+    _begin_sqlite_transaction()
+    _preflight_downgrade()
     _update_file_kinds(upgrade=False)
     op.drop_column("receipt_keyword_mappings", "welfare_type")
     op.drop_column("reimbursement_drafts", "kind")

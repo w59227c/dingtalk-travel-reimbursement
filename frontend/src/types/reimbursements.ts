@@ -23,7 +23,13 @@ export interface GeneralApproval {
 
 export type GeneralApprovalIncompleteReason = 'directory' | 'list' | 'detail' | 'pagination'
 
+export interface GeneralApprovalTemplate {
+  processCode: string
+  name: string
+}
+
 export interface GeneralApprovalSearchResult {
+  templates?: GeneralApprovalTemplate[]
   items: GeneralApproval[]
   complete: boolean
   nextCursor?: string

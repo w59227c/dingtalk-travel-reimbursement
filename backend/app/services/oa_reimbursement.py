@@ -64,6 +64,7 @@ from app.services.oa_reimbursement_payload import (
     parse_create_command,
     parse_snapshot,
     serialize_create_command,
+    snapshot_document_filename,
     snapshot_excel_input,
     verify_excel_template,
 )
@@ -77,7 +78,6 @@ from app.services.oa_template_profiles import (
     validate_travel_template_mapping,
 )
 from app.services.receipt_bundle import (
-    RECEIPT_BUNDLE_FILENAME,
     ReceiptBundleSource,
     generate_receipt_bundle,
 )
@@ -709,13 +709,16 @@ class SnapshotSubmissionMaterializer:
             expense_labels=workbook_input.expense_labels,
             subject_labels=workbook_input.subject_labels,
         )
-        if result.filename != snapshot.excel.file_name:
+        from app.services.excel_generator import build_download_filename
+        if result.filename != build_download_filename(
+            snapshot.identity.name, snapshot.input.project.filename_component
+        ):
             raise ApiError(
                 "REIMBURSEMENT_EXCEL_NAME_MISMATCH",
                 "报销单文件名与锁定快照不一致",
                 409,
             )
-        return result.filename, snapshot.excel.media_type, result.content
+        return snapshot_document_filename(snapshot), snapshot.excel.media_type, result.content
 
     def generate_bundle(self, job: SubmissionJob) -> tuple[str, str, bytes]:
         snapshot = self._snapshot(job)
@@ -738,7 +741,7 @@ class SnapshotSubmissionMaterializer:
                 )
 
         content = generate_receipt_bundle(sources(), max_bytes=self._staging.max_object_bytes)
-        return RECEIPT_BUNDLE_FILENAME, "application/pdf", content
+        return snapshot_document_filename(snapshot, pdf=True), "application/pdf", content
 
     def read_upload(self, _job: SubmissionJob, upload: SubmissionUpload) -> bytes:
         if not upload.local_storage_key:

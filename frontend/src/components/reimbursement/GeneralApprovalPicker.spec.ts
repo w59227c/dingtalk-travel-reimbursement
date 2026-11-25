@@ -42,6 +42,8 @@ function mountPicker(mobile: boolean) {
 }
 
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-11-25T08:00:00Z'))
   vi.resetAllMocks()
   vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [], complete: true })
   vi.mocked(getSavedGeneralApprovals).mockResolvedValue([])
@@ -51,9 +53,38 @@ beforeEach(() => {
     disconnect() {}
   }
 })
-afterEach(() => { for (const wrapper of mounted.splice(0)) wrapper.unmount() })
+afterEach(() => {
+  for (const wrapper of mounted.splice(0)) wrapper.unmount()
+  vi.useRealTimers()
+})
 
 describe.each([false, true])('automatic general approval search, mobile=%s', (mobile) => {
+  it('keeps the category in the filter toolbar with only one selector in either mode', async () => {
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true })
+    await flushPromises()
+    expect(wrapper.findAllComponents({ name: 'ElSelect' })).toHaveLength(1)
+    if (mobile) {
+      const heading = wrapper.get('.approval-filter-heading')
+      expect(heading.get('[aria-label="审批类别"]').isVisible()).toBe(true)
+      expect(wrapper.get('fieldset').isVisible()).toBe(false)
+      await heading.get('button[aria-label="筛选审批"]').trigger('click')
+      expect(heading.get('button[aria-label="筛选审批"]').attributes('aria-expanded')).toBe('true')
+      expect(wrapper.get('fieldset').attributes('style')).not.toContain('display: none')
+      expect(wrapper.findAllComponents({ name: 'ElSelect' })).toHaveLength(1)
+      expect(wrapper.find('fieldset [aria-label="审批类别"]').exists()).toBe(false)
+    } else {
+      const toolbar = wrapper.get('.travel-query-grid')
+      expect(toolbar.classes()).toContain('travel-query-grid--category')
+      expect(toolbar.get('.approval-query-category [aria-label="审批类别"]').isVisible()).toBe(true)
+      expect(toolbar.get('input[aria-label="审批查询开始日期"]').isVisible()).toBe(true)
+      expect(toolbar.get('input[aria-label="搜索本人审批"]').isVisible()).toBe(true)
+    }
+    await wrapper.setProps({ readonly: true })
+    expect(wrapper.find('[aria-label="审批类别"]').exists()).toBe(false)
+    expect(wrapper.get('.travel-query-grid').classes()).not.toContain('travel-query-grid--category')
+  })
+
   it('shows bounded plain descriptions and approved status beside the title in both modes', async () => {
     const entry = { ...first, summaryFields: [
       { label: '所属公司', value: '合成公司' },
@@ -295,4 +326,104 @@ describe.each([false, true])('automatic general approval search, mobile=%s', (mo
     await flushPromises()
     expect(listGeneralApprovals).toHaveBeenCalledOnce()
   })
+  it('queries a selected real template automatically while retaining other selected approvals', async () => {
+    const templates = [{ processCode: 'synthetic-purchase', name: '采购申请' },
+      { processCode: 'synthetic-travel', name: '境内出差申请' }]
+    vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [first], complete: true, templates })
+      .mockResolvedValueOnce({ items: [last], complete: true, templates })
+      .mockResolvedValueOnce({ items: [first, last], complete: true, templates })
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true, modelValue: [first.processInstanceId], savedApprovals: [first] })
+    await flushPromises()
+    const select = wrapper.getComponent({ name: 'ElSelect' })
+    expect(select.isVisible()).toBe(true)
+    expect(select.props('placeholder')).toBe('全部审批单')
+    expect(select.props('disabled')).toBe(false)
+    expect(wrapper.findAllComponents({ name: 'ElOption' }).map(option => option.props('label')))
+      .toEqual(['全部审批单', '采购申请', '境内出差申请'])
+    select.vm.$emit('update:modelValue', 'synthetic-travel')
+    await flushPromises()
+    expect(listGeneralApprovals).toHaveBeenLastCalledWith({ processCode: 'synthetic-travel' }, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain(first.title)
+    expect(wrapper.text()).toContain(last.title)
+    expect(wrapper.text()).toContain('已选 1 张')
+    const selected = wrapper.findAll('.travel-approval-row').find(row => row.text().includes(first.title))!
+    await selected.get('input[type="checkbox"]').setValue(false)
+    expect(wrapper.emitted('update:modelValue')?.at(-1)).toEqual([[]])
+    select.vm.$emit('update:modelValue', '')
+    await flushPromises()
+    expect(listGeneralApprovals).toHaveBeenLastCalledWith({}, expect.any(AbortSignal))
+  })
+
+  it('cancels an old template page and ignores its late response after switching categories', async () => {
+    const pending = deferred<GeneralApprovalSearchResult>()
+    vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [first], complete: false,
+      nextCursor: 'old-page', templates: [{ processCode: 'synthetic-travel', name: '境内出差申请' }] })
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce({ items: [last], complete: true })
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true })
+    await flushPromises()
+    const oldSignal = vi.mocked(listGeneralApprovals).mock.calls[1]![1]
+    wrapper.getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'synthetic-travel')
+    await flushPromises()
+    expect(oldSignal.aborted).toBe(true)
+    expect(listGeneralApprovals).toHaveBeenLastCalledWith({ processCode: 'synthetic-travel' }, expect.any(AbortSignal))
+    pending.resolve({ items: [first], complete: false, nextCursor: 'stale-next' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain(first.title)
+    expect(wrapper.text()).toContain(last.title)
+    expect(listGeneralApprovals).toHaveBeenCalledTimes(3)
+    await wrapper.setProps({ busy: true })
+    expect(wrapper.getComponent({ name: 'ElSelect' }).props('disabled')).toBe(true)
+    await wrapper.setProps({ readonly: true })
+    expect(wrapper.findComponent({ name: 'ElSelect' }).exists()).toBe(false)
+  })
+
+  it('resets the category once when another draft opens without replaying its query', async () => {
+    const templates = [{ processCode: 'synthetic-purchase', name: '采购申请' }]
+    vi.mocked(listGeneralApprovals).mockResolvedValue({ items: [first], complete: true, templates })
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true })
+    await flushPromises()
+    wrapper.getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'synthetic-purchase')
+    await flushPromises()
+    expect(listGeneralApprovals).toHaveBeenCalledTimes(2)
+    await wrapper.setProps({ draftId: 'another-synthetic-draft' })
+    await flushPromises()
+    expect(listGeneralApprovals).toHaveBeenCalledTimes(3)
+    expect(listGeneralApprovals).toHaveBeenLastCalledWith({}, expect.any(AbortSignal))
+    expect(wrapper.getComponent({ name: 'ElSelect' }).props('modelValue')).toBe('')
+  })
+
+  it('clears previous candidates on category changes with invalid dates while keeping saved associations', async () => {
+    const templates = [{ processCode: 'synthetic-travel', name: '境内出差申请' }]
+    const selected = { ...last, title: '已关联合成审批' }
+    const match = { ...first, processInstanceId: 'new-travel-match', title: '合成出差审批' }
+    vi.mocked(listGeneralApprovals).mockResolvedValueOnce({ items: [first, selected], complete: true, templates })
+      .mockResolvedValueOnce({ items: [match], complete: true, templates })
+    const wrapper = mountPicker(mobile)
+    await wrapper.setProps({ expanded: true, modelValue: [selected.processInstanceId], savedApprovals: [selected] })
+    await flushPromises()
+    wrapper.findAllComponents({ name: 'ElDatePicker' })[0]!.vm.$emit('update:modelValue', '2026-11-01')
+    await flushPromises()
+    wrapper.getComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', 'synthetic-travel')
+    await flushPromises()
+    expect(listGeneralApprovals).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).not.toContain(first.title)
+    expect(wrapper.findAll('.travel-approval-row')).toHaveLength(1)
+    expect(wrapper.get('.travel-approval-row').text()).toContain(selected.title)
+    expect(wrapper.get('.travel-approval-row').text()).toContain('已关联')
+    expect(wrapper.text()).toContain('自定义日期范围需要同时填写开始和结束日期')
+    expect(wrapper.find('[data-testid="general-approval-query-complete"]').exists()).toBe(false)
+    wrapper.findAllComponents({ name: 'ElDatePicker' })[1]!.vm.$emit('update:modelValue', '2026-11-10')
+    await wrapper.findAll('button').find(button => button.text() === '查询审批')!.trigger('click')
+    await flushPromises()
+    expect(listGeneralApprovals).toHaveBeenLastCalledWith({
+      from: '2026-11-01', to: '2026-11-10', processCode: 'synthetic-travel',
+    }, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain(match.title)
+    expect(wrapper.text()).toContain(selected.title)
+  })
+
 })

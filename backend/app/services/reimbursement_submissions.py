@@ -4,9 +4,10 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, delete, exists, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, aliased
 from sqlalchemy.sql import ColumnElement
@@ -665,6 +666,43 @@ def create_submission(
                 ((item.subject_value, item.category) for item in snapshot.input.items),
             )
         actor.require_current_delegation(database)
+        if snapshot is not None:
+            from app.services.oa_reimbursement_payload import (
+                number_submission_snapshot,
+                serialize_snapshot,
+            )
+            from app.services.oa_reimbursement_payload import (
+                snapshot_sha256 as calculate_snapshot_sha256,
+            )
+
+            # The successful draft CAS above holds SQLite's write lock until commit.
+            # Submission audit rows are retained even after failure or file cleanup;
+            # counting all kinds/operators here therefore never reuses an issued number.
+            shanghai = ZoneInfo("Asia/Shanghai")
+            submission_date = created_at.replace(tzinfo=UTC).astimezone(shanghai).date()
+            start = (
+                datetime.combine(submission_date, time.min, shanghai)
+                .astimezone(UTC)
+                .replace(tzinfo=None)
+            )
+            end = start + timedelta(days=1)
+            issued = (
+                database.scalar(
+                    select(func.count(ReimbursementSubmission.id)).where(
+                        ReimbursementSubmission.corp_id == actor.corp_id,
+                        ReimbursementSubmission.originator_user_id == actor.user_id,
+                        ReimbursementSubmission.created_at >= start,
+                        ReimbursementSubmission.created_at < end,
+                    )
+                )
+                or 0
+            )
+            snapshot = number_submission_snapshot(
+                snapshot, submission_date=submission_date, sequence=issued + 1
+            )
+            canonical_snapshot = serialize_snapshot(snapshot)
+            snapshot_sha256 = calculate_snapshot_sha256(snapshot)
+            snapshot_version = snapshot.snapshot_version
         submission = ReimbursementSubmission(
             id=submission_id,
             draft_id=draft.id,

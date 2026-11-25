@@ -22,7 +22,7 @@ class ReadinessReport:
     checks: dict[str, str]
 
 
-_EXPECTED_ALEMBIC_REVISION = "20261119_0029"
+_EXPECTED_ALEMBIC_REVISION = "20261125_0030"
 _REQUIRED_COLUMNS = {
     "oa_template_profiles": {
         "profile_key",

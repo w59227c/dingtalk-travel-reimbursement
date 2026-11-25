@@ -202,12 +202,12 @@ export async function recoverReimbursementDraft(
 }
 
 export async function listGeneralApprovals(
-  filters: { from?: string; to?: string; query?: string; cursor?: string },
+  filters: { from?: string; to?: string; query?: string; cursor?: string; processCode?: string },
   signal: AbortSignal,
 ) {
   const response = await http.get<ApiEnvelope<GeneralApprovalSearchResult>>(
     '/oa/general-approvals',
-    { params: { from: filters.from, to: filters.to, q: filters.query, cursor: filters.cursor }, timeout: 120_000, signal },
+    { params: { from: filters.from, to: filters.to, q: filters.query, cursor: filters.cursor, processCode: filters.processCode }, timeout: 120_000, signal },
   )
   return response.data.data
 }

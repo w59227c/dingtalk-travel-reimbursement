@@ -441,10 +441,18 @@ class SnapshotFormValue(_SnapshotModel):
     value: Annotated[str, StringConstraints(max_length=2 * 1024 * 1024)]
 
 
+class SnapshotDocumentNaming(_SnapshotModel):
+    submission_date: StrictCalendarDate
+    sequence: PositiveInt
+
+
 class ReimbursementSnapshot(_SnapshotModel):
-    snapshot_version: Literal[6, 7, 8, 9, 10, 11, 12] = SNAPSHOT_VERSION
+    snapshot_version: Literal[6, 7, 8, 9, 10, 11, 12, 13] = SNAPSHOT_VERSION
     kind: Literal["travel", "general"] = Field(
         default="travel", exclude_if=lambda value: value == "travel"
+    )
+    document_naming: SnapshotDocumentNaming | None = Field(
+        default=None, exclude_if=lambda value: value is None
     )
     draft_id: Annotated[str, StringConstraints(min_length=1, max_length=36)]
     draft_revision: PositiveInt
@@ -1000,6 +1008,35 @@ def _snapshot_excel_subjects(
         tuple(option.label for option in subjects),
         tuple(label_by_value[item.subject_value] for item in snapshot.ordered_items),
     )
+
+
+def snapshot_document_filename(snapshot: ReimbursementSnapshot, *, pdf: bool = False) -> str:
+    naming = snapshot.document_naming
+    if naming is None:
+        if pdf:
+            return "票据汇总.pdf"
+        return build_download_filename(
+            snapshot.identity.name, snapshot.input.project.filename_component
+        )
+    employee = sanitize_filename_component(snapshot.identity.name)
+    suffix = f"{employee}-{naming.submission_date:%y%m%d}-{naming.sequence}"
+    return f"票据汇总-{suffix}.pdf" if pdf else f"差旅费报销单-{suffix}.xlsx"
+
+
+def number_submission_snapshot(
+    snapshot: ReimbursementSnapshot, *, submission_date: date, sequence: int
+) -> ReimbursementSnapshot:
+    """Freeze names only while claiming the draft, never during a preview."""
+    naming = SnapshotDocumentNaming(submission_date=submission_date, sequence=sequence)
+    numbered = snapshot.model_copy(update={"snapshot_version": 13, "document_naming": naming})
+    numbered = numbered.model_copy(
+        update={
+            "excel": numbered.excel.model_copy(
+                update={"file_name": snapshot_document_filename(numbered)}
+            )
+        }
+    )
+    return ReimbursementSnapshot.model_validate(numbered.model_dump(mode="json", by_alias=True))
 
 
 def serialize_snapshot(snapshot: ReimbursementSnapshot) -> str:
@@ -1775,10 +1812,12 @@ def is_oa_department_id(value: str) -> bool:
 
 
 def _validate_snapshot_semantics(snapshot: ReimbursementSnapshot) -> None:
+    if (snapshot.snapshot_version == 13) != (snapshot.document_naming is not None):
+        raise ValueError("numbered document names require snapshot v13")
     is_general = snapshot.kind == "general"
     if is_general:
         if (
-            snapshot.snapshot_version != 12
+            snapshot.snapshot_version not in {12, 13}
             or snapshot.oa_initiator is not None
             or snapshot.travel_period is not None
             or snapshot.selections.travel_type is not None
@@ -2123,11 +2162,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
                 snapshot.totals,
                 legacy_reason=snapshot.input.general_reason,
             )
-            or snapshot.excel.file_name
-            != build_download_filename(
-                snapshot.identity.name,
-                snapshot.input.project.filename_component,
-            )
+            or snapshot.excel.file_name != snapshot_document_filename(snapshot)
         ):
             raise ValueError("general reimbursement data differs from the snapshot")
         return
@@ -2254,10 +2289,7 @@ def _validate_business_snapshot(snapshot: ReimbursementSnapshot) -> None:
         raise ValueError("company selection mismatch")
     if snapshot.input.budget_code_value != snapshot.selections.budget_code.value:
         raise ValueError("budget selection mismatch")
-    expected_filename = build_download_filename(
-        snapshot.identity.name,
-        snapshot.input.project.filename_component,
-    )
+    expected_filename = snapshot_document_filename(snapshot)
     if snapshot.excel.file_name != expected_filename:
         raise ValueError("generated Excel name mismatch")
 

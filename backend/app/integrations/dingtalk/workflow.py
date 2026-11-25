@@ -82,6 +82,12 @@ class DingTalkProcessInstanceCreateOutcomeUnknown(ApiError):
 
 
 @dataclass(frozen=True, slots=True)
+class WorkflowVisibleTemplate:
+    process_code: str
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
 class WorkflowInstanceIdPage:
     instance_ids: tuple[str, ...]
     next_token: int | None
@@ -245,8 +251,14 @@ class DingTalkWorkflowClient:
         self._client = client
 
     async def list_visible_template_codes(self, user_id: str) -> tuple[tuple[str, ...], bool]:
+        templates, complete = await self.list_visible_templates(user_id)
+        return tuple(item.process_code for item in templates), complete
+
+    async def list_visible_templates(
+        self, user_id: str
+    ) -> tuple[tuple[WorkflowVisibleTemplate, ...], bool]:
         user_id = _required_identifier(user_id, field_name="user_id")
-        codes: dict[str, None] = {}
+        templates: dict[str, WorkflowVisibleTemplate] = {}
         cursor = 0
         while True:
             try:
@@ -257,28 +269,32 @@ class DingTalkWorkflowClient:
                     retry_transient=True,
                 )
             except DingTalkOpenAPIError:
-                if codes:
-                    return tuple(codes), False
+                if templates:
+                    return tuple(templates.values()), False
                 raise
             result = data.get("result")
             if not isinstance(result, dict):
-                return tuple(codes), False
+                return tuple(templates.values()), False
             records = result.get("processList")
             if not isinstance(records, list):
-                return tuple(codes), False
+                return tuple(templates.values()), False
             for row in records:
                 if (
                     not isinstance(row, dict)
                     or not isinstance(row.get("processCode"), str)
                     or not row["processCode"].strip()
                 ):
-                    return tuple(codes), False
-                codes[row["processCode"]] = None
+                    return tuple(templates.values()), False
+                name = row.get("name")
+                code = row["processCode"].strip()
+                templates[code] = WorkflowVisibleTemplate(
+                    code, name.strip() if isinstance(name, str) else ""
+                )
             next_cursor = result.get("nextToken")
             if next_cursor is None or next_cursor == 0 or next_cursor == "0":
-                return tuple(codes), True
+                return tuple(templates.values()), True
             if not str(next_cursor).isdigit() or int(next_cursor) <= cursor:
-                return tuple(codes), False
+                return tuple(templates.values()), False
             cursor = int(next_cursor)
 
     async def get_form_schema(self, process_code: str) -> FormSchema:

@@ -155,8 +155,10 @@ class DraftFileDeletion:
 
 @dataclass(frozen=True, slots=True)
 class WorkbookPreviewSnapshot:
+    # An unsubmitted preview has no issued document number.
     canonical_input_json: str
     excel: ExcelGenerationInput
+    filename: str | None = None
 
 
 def serialize_draft_file(
@@ -1186,7 +1188,7 @@ async def generate_draft_excel_preview(
                 raise ApiError(
                     "REIMBURSEMENT_PREVIEW_CHANGED", "报销选项或材料已更新，请重新预览", 409
                 )
-    return result
+    return replace(result, filename=snapshot.filename) if snapshot.filename else result
 
 
 def _workbook_preview_snapshot(
@@ -1224,6 +1226,7 @@ def _workbook_preview_snapshot(
         return WorkbookPreviewSnapshot(
             canonical_input_json=draft.input_json,
             excel=snapshot_excel_input(submission_snapshot),
+            filename=submission_snapshot.excel.file_name,
         )
     try:
         draft_input = ReimbursementDraftInput.model_validate_json(draft.input_json)

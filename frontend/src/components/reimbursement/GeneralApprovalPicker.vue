@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { apiErrorCode, apiErrorMessage } from '@/api/errors'
 import { getSavedGeneralApprovals, listGeneralApprovals } from '@/api/reimbursements'
-import type { GeneralApproval, GeneralApprovalIncompleteReason } from '@/types/reimbursements'
+import type { GeneralApproval, GeneralApprovalIncompleteReason, GeneralApprovalTemplate } from '@/types/reimbursements'
 import { approvalQueryDateError } from '@/utils/approvalQueryDates'
 import ApprovalSelectorPanel from './ApprovalSelectorPanel.vue'
 
@@ -21,15 +21,17 @@ const expanded = defineModel<boolean>('expanded', { required: true })
 const fromDate = ref('')
 const toDate = ref('')
 const keyword = ref('')
+const processCode = ref('')
+const templates = ref<GeneralApprovalTemplate[]>([])
 const visibleFilters = computed(() => ({
-  from: fromDate.value, to: toDate.value, query: keyword.value.trim(),
+  from: fromDate.value, to: toDate.value, query: keyword.value.trim(), processCode: processCode.value,
 }))
-const activeFilters = ref<{ from: string; to: string; query: string } | null>(null)
+const activeFilters = ref<{ from: string; to: string; query: string; processCode: string } | null>(null)
 const filtersChanged = computed(() => {
   const applied = activeFilters.value
   const visible = visibleFilters.value
   return Boolean(applied && (applied.from !== visible.from || applied.to !== visible.to
-    || applied.query !== visible.query))
+    || applied.query !== visible.query || applied.processCode !== visible.processCode))
 })
 const dateError = computed(() => approvalQueryDateError(fromDate.value, toDate.value, undefined, 365))
 const loading = ref(false)
@@ -119,9 +121,11 @@ async function search(cursor?: string): Promise<void> {
       const response = await listGeneralApprovals({
         ...(filters.from ? { from: filters.from, to: filters.to } : {}),
         ...(filters.query ? { query: filters.query } : {}),
+        ...(filters.processCode ? { processCode: filters.processCode } : {}),
         ...(pageCursor ? { cursor: pageCursor } : {}),
       }, controller.signal)
       if (!acceptsResponse()) return
+      if (response.templates) templates.value = response.templates
       const approved = response.items.filter(isApproved)
       for (const entry of approved) known.set(entry.processInstanceId, entry)
       const byId = new Map([...items.value, ...approved].map(entry => [entry.processInstanceId, entry]))
@@ -172,10 +176,20 @@ watch([queryAvailable, () => props.busy, filtersChanged], ([available, busy, cha
     void search(nextCursor.value || undefined)
   }
 }, { immediate: true })
+watch(processCode, () => {
+  if (request && activeFilters.value?.processCode === processCode.value) return
+  cancelSearch()
+  activeFilters.value = null
+  items.value = []
+  incompleteReasons.value = []
+  complete.value = false
+  error.value = ''; incomplete.value = false; nextCursor.value = ''
+  void search()
+})
 watch(() => props.draftId, () => {
   cancelSearch()
   activeFilters.value = null
-  fromDate.value = ''; toDate.value = ''; keyword.value = ''
+  fromDate.value = ''; toDate.value = ''; keyword.value = ''; processCode.value = ''; templates.value = []
   complete.value = false
   error.value = ''; incomplete.value = false; incompleteReasons.value = []
   nextCursor.value = ''; items.value = []; known.clear(); pendingIds.value = null
@@ -211,11 +225,37 @@ onBeforeUnmount(cancelSearch)
     :empty-description="emptyDescription"
     :rows="rows"
     :selected-ids="selectedIds"
+    :result-scope="processCode"
     :max-selections="limit"
     selection-help="仅可关联本人发起且已通过的审批，选中或取消后自动保存。"
     @search="search()"
     @toggle="(row, checked) => toggle(row.processInstanceId, checked)"
   >
+    <template #category-filter>
+      <div
+        v-if="!readonly"
+        class="approval-category-filter"
+      >
+        <el-select
+          v-model="processCode"
+          aria-label="审批类别"
+          placeholder="全部审批单"
+          :disabled="busy"
+          filterable
+        >
+          <el-option
+            label="全部审批单"
+            value=""
+          />
+          <el-option
+            v-for="item in templates"
+            :key="item.processCode"
+            :label="item.name"
+            :value="item.processCode"
+          />
+        </el-select>
+      </div>
+    </template>
     <template #notifications>
       <p
         v-if="loading"
@@ -306,4 +346,7 @@ onBeforeUnmount(cancelSearch)
 .approval-summary-fields { display: grid; gap: 4px; min-width: 0; }
 .approval-summary-fields small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--el-text-color-secondary); }
 .approval-created-at { margin-top: 3px; }
+.approval-category-filter .el-select {
+  width: 100%;
+}
 </style>

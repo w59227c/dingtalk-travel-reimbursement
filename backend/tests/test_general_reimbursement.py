@@ -32,6 +32,7 @@ from app.integrations.dingtalk.workflow import (
     RelatedTemplatePolicy,
     WorkflowFormValue,
     WorkflowInstanceIdPage,
+    WorkflowVisibleTemplate,
 )
 from app.models.reimbursement import ReimbursementSubmission
 from app.services import reimbursement_files
@@ -104,9 +105,14 @@ class GeneralWorkflow(LocalWorkflowBoundary):
         self.schemas[GENERAL_CODE] = self.general
         self.approval_time = datetime.now(UTC)
 
-    async def list_visible_template_codes(self, user_id):
+    async def list_visible_templates(self, user_id):
         assert user_id == "mock-user"
-        return (*self.schemas, PURCHASE_CODE), True
+        return tuple(
+            WorkflowVisibleTemplate(
+                code, self.schemas[code].template_name if code in self.schemas else "采购申请"
+            )
+            for code in (*self.schemas, PURCHASE_CODE)
+        ), True
 
     async def list_process_instance_ids(self, *, process_code, next_token, **kwargs):
         if process_code == TRAVEL_PROCESS_CODE:
@@ -633,8 +639,8 @@ def test_general_approval_search_only_returns_approved_owned_instances(client_fa
     class MixedWorkflow(GeneralWorkflow):
         requested_statuses = []
 
-        async def list_visible_template_codes(self, user_id):
-            return (PURCHASE_CODE,), True
+        async def list_visible_templates(self, user_id):
+            return (WorkflowVisibleTemplate(PURCHASE_CODE, "采购申请"),), True
 
         async def list_process_instance_ids(self, **query):
             self.requested_statuses.append(query["statuses"])
@@ -803,8 +809,8 @@ def test_general_rechecks_approved_associations_before_preview_and_submit(client
 @pytest.mark.parametrize("failure", [None, "directory", "list", "detail"])
 def test_general_approval_search_reports_incomplete_stage(client_factory, failure, capsys):
     class PartialWorkflow(GeneralWorkflow):
-        async def list_visible_template_codes(self, user_id):
-            return (PURCHASE_CODE,), failure != "directory"
+        async def list_visible_templates(self, user_id):
+            return (WorkflowVisibleTemplate(PURCHASE_CODE, "采购申请"),), failure != "directory"
 
         async def list_process_instance_ids(self, **query):
             if failure == "list":
@@ -855,12 +861,14 @@ def test_general_approval_search_resumes_within_the_same_template_and_day(
         fail_directory_once = False
         directory_reads = 0
 
-        async def list_visible_template_codes(self, user_id):
+        async def list_visible_templates(self, user_id):
             if self.fail_directory_once:
                 self.fail_directory_once = False
                 raise DingTalkOpenAPIError(http_status=429)
             self.directory_reads += 1
-            return (PURCHASE_CODE,), not (directory_partial and self.directory_reads == 1)
+            return (WorkflowVisibleTemplate(PURCHASE_CODE, "采购申请"),), not (
+                directory_partial and self.directory_reads == 1
+            )
 
         async def list_process_instance_ids(self, *, process_code, next_token, **_query):
             if process_code != PURCHASE_CODE:
@@ -900,6 +908,11 @@ def test_general_approval_search_resumes_within_the_same_template_and_day(
         assert cursor and cursor not in seen
         assert len(cursor) <= 256
         if not seen:
+            changed_type = client.get(
+                url, params={**params, "processCode": PURCHASE_CODE, "cursor": cursor}
+            )
+            assert changed_type.status_code == 422
+            assert changed_type.json()["error"]["code"] == "GENERAL_APPROVAL_SEARCH_CURSOR_INVALID"
             assert (
                 client.get(url, params={**params, "q": "别的标题", "cursor": cursor}).status_code
                 == 422
@@ -1395,3 +1408,43 @@ def test_general_reimbursement_separates_workspaces_and_submits_exact_frozen_sub
     assert parse_snapshot(serialize_snapshot(legacy)) == legacy
     assert [entry.file_type for entry in storage.committed] == ["pdf", "xlsx"]
     assert data(client.get(f"{root}/{travel['id']}"))["revision"] == travel["revision"]
+
+
+def test_general_approval_template_filter_uses_directory_codes_and_preserves_search(client_factory):
+    class RecordingWorkflow(GeneralWorkflow):
+        queried_codes = []
+
+        async def list_process_instance_ids(self, **query):
+            self.queried_codes.append(query["process_code"])
+            return await super().list_process_instance_ids(**query)
+
+    client = client_factory(auth_mock_enabled=True)
+    workflow = RecordingWorkflow()
+    mock_login(client)
+    asyncio.run(configure_profiles(client.app, workflow))
+    endpoint = "/api/oa/general-approvals"
+    result = client.get(endpoint, params={"processCode": PURCHASE_CODE, "q": "合成采购"})
+    assert result.status_code == 200, result.text
+    page = result.json()["data"]
+    assert {item["processCode"]: item["name"] for item in page["templates"]}[
+        PURCHASE_CODE
+    ] == "采购申请"
+    assert [item["processInstanceId"] for item in page["items"]] == [PURCHASE_INSTANCE]
+    assert set(workflow.queried_codes) == {PURCHASE_CODE}
+    workflow.queried_codes.clear()
+    rejected = client.get(endpoint, params={"processCode": "synthetic-unavailable"})
+    assert rejected.status_code == 422
+    assert not workflow.queried_codes
+    travel = client.get(endpoint, params={"processCode": TRAVEL_PROCESS_CODE})
+    assert travel.status_code == 200, travel.text
+    assert PURCHASE_INSTANCE not in {
+        item["processInstanceId"] for item in travel.json()["data"]["items"]
+    }
+    assert set(workflow.queried_codes) == {TRAVEL_PROCESS_CODE}
+    workflow.queried_codes.clear()
+    all_templates = client.get(endpoint)
+    assert all_templates.status_code == 200
+    assert PURCHASE_INSTANCE in {
+        item["processInstanceId"] for item in all_templates.json()["data"]["items"]
+    }
+    assert {PURCHASE_CODE, TRAVEL_PROCESS_CODE} <= set(workflow.queried_codes)

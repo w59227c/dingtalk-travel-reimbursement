@@ -84,6 +84,7 @@ async def get_current_user_general_approvals(
     from_date: Annotated[date | None, Query(alias="from")] = None,
     to_date: Annotated[date | None, Query(alias="to")] = None,
     query: Annotated[str, Query(alias="q", max_length=100)] = "",
+    process_code: Annotated[str, Query(alias="processCode", max_length=256)] = "",
     cursor: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
 ) -> dict[str, object]:
     if current.beneficiary is not None:
@@ -92,6 +93,7 @@ async def get_current_user_general_approvals(
     session_id = current.record.session_id_hash
     user_id = current.reimbursement_user_id
     known_codes = []
+    known_names = {}
     for kind in ("general", "travel"):
         try:
             catalog = (
@@ -101,6 +103,10 @@ async def get_current_user_general_approvals(
             continue
         known_codes.extend(
             (catalog.reimbursement.process_code, *catalog.allowed_travel_process_codes)
+        )
+        known_names[catalog.reimbursement.process_code] = catalog.reimbursement.schema.template_name
+        known_names.update(
+            {item.process_code: item.schema.template_name for item in catalog.travel_profiles}
         )
     database.rollback()
     result = await find_general_approvals(
@@ -112,6 +118,8 @@ async def get_current_user_general_approvals(
         secret=request.app.state.settings.session_secret,
         cursor=cursor,
         known_codes=tuple(known_codes),
+        known_names=known_names,
+        process_code=process_code.strip(),
     )
     require_live_reimbursement_actor(database, current, session_id)
     return success(result)

@@ -25,6 +25,7 @@ def seed_verifying(
     database,
     *,
     version=10,
+    kind="travel",
     mode="excel_only",
     roles=("GENERATED_EXCEL",),
     items=(),
@@ -34,6 +35,7 @@ def seed_verifying(
 ):
     now = utc_now()
     draft = ReimbursementDraft(
+        kind=kind,
         corp_id="synthetic-corp",
         owner_user_id="synthetic-user",
         status="LOCKED",
@@ -60,6 +62,8 @@ def seed_verifying(
         "input": {"items": list(items)},
         "totals": {"subsidyTotal": subsidy},
     }
+    if kind != "travel":
+        raw["kind"] = kind
     if mode is not None:
         raw["attachmentMode"] = mode
     submission = ReimbursementSubmission(
@@ -129,6 +133,28 @@ def mark_submitted(database, submission):
     "case,accepted",
     [
         ({}, True),
+        ({"version": 13}, True),
+        ({"version": 13, "kind": "general"}, False),
+        ({"version": 12, "kind": "general"}, False),
+        (
+            {
+                "version": 13,
+                "mode": "bundle_and_excel",
+                "roles": ("GENERATED_PDF", "GENERATED_EXCEL"),
+                "files": ({"draftFileId": "synthetic-file"},),
+            },
+            True,
+        ),
+        (
+            {
+                "version": 13,
+                "kind": "general",
+                "mode": "bundle_and_excel",
+                "roles": ("GENERATED_PDF", "GENERATED_EXCEL"),
+                "files": ({"draftFileId": "synthetic-file"},),
+            },
+            True,
+        ),
         ({"subsidy": "0.00"}, False),
         ({"items": ({"amount": "1.00"},)}, False),
         ({"files": ({"draftFileId": "synthetic-file"},)}, False),

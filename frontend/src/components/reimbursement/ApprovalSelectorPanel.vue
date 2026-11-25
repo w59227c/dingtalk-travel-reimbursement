@@ -15,6 +15,7 @@ const props = defineProps<{
   emptyDescription: string
   rows: Row[]
   selectedIds: ReadonlySet<string>
+  resultScope?: string
   maxSelections?: number
   unavailableReason?: (row: Row) => string
   selectionHelp?: string
@@ -39,6 +40,7 @@ const filtersId = computed(() => general.value ? 'general-approval-filters' : 'a
 const contentId = computed(() => `${props.kind}-approval-content`)
 const maxReached = computed(() => props.maxSelections !== undefined && props.selectedIds.size >= props.maxSelections)
 watch(() => props.queryNeedsAdjustment, (value) => { if (value) filtersOpen.value = true }, { immediate: true })
+watch(() => props.resultScope, () => { page.value = 1 })
 watch(pageCount, (count) => { page.value = Math.min(page.value, count) })
 
 function search() {
@@ -90,7 +92,13 @@ function search() {
         v-if="mobile && !readonly"
         class="approval-filter-heading"
       >
-        <span>近期已通过的审批</span>
+        <div
+          v-if="$slots['category-filter']"
+          class="approval-filter-category"
+        >
+          <slot name="category-filter" />
+        </div>
+        <span v-else>近期已通过的审批</span>
         <el-button
           link
           type="primary"
@@ -110,8 +118,17 @@ function search() {
       >
         <div
           class="travel-query-grid"
-          :class="{ 'travel-query-grid--mobile': mobile }"
+          :class="{
+            'travel-query-grid--mobile': mobile,
+            'travel-query-grid--category': !mobile && !readonly && Boolean($slots['category-filter']),
+          }"
         >
+          <div
+            v-if="!mobile && !readonly && $slots['category-filter']"
+            class="approval-query-category"
+          >
+            <slot name="category-filter" />
+          </div>
           <el-date-picker
             v-model="fromDate"
             type="date"

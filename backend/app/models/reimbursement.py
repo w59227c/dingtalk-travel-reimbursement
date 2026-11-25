@@ -1234,11 +1234,17 @@ _SQLITE_BUNDLE_MANIFEST_TRIGGERS = tuple(
                      WHERE submission_id = NEW.id AND role = 'GENERATED_EXCEL'
                        AND sort_order = 1 AND upload_status = 'LINKED'
                  )
-             WHEN NEW.snapshot_version IN (10, 11, 12) AND json_valid(NEW.form_snapshot_json) THEN
+             WHEN NEW.snapshot_version IN (10, 11, 12, 13)
+                  AND json_valid(NEW.form_snapshot_json) THEN
                  json_extract(NEW.form_snapshot_json, '$.snapshotVersion') = NEW.snapshot_version
                  AND CASE json_extract(NEW.form_snapshot_json, '$.attachmentMode')
                  WHEN 'excel_only' THEN
-                     NEW.snapshot_version < 12
+                     (NEW.snapshot_version < 12 OR (
+                         NEW.snapshot_version = 13
+                         AND COALESCE(json_extract(
+                             NEW.form_snapshot_json, '$.kind'
+                         ), 'travel') = 'travel'
+                     ))
                      AND json_type(NEW.form_snapshot_json, '$.originalFiles') = 'array'
                      AND json_array_length(NEW.form_snapshot_json, '$.originalFiles') = 0
                      AND json_type(NEW.form_snapshot_json, '$.input.items') = 'array'

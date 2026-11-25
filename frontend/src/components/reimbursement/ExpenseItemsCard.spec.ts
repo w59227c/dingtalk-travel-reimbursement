@@ -204,6 +204,95 @@ describe('ExpenseItemsCard durable files', () => {
     vi.unstubAllGlobals()
   })
 
+  const interactionOrders = [
+    ['amount', 'category', 'payment'], ['amount', 'payment', 'category'],
+    ['category', 'amount', 'payment'], ['category', 'payment', 'amount'],
+    ['payment', 'amount', 'category'], ['payment', 'category', 'amount'],
+  ] as const
+
+  it.each(([false, true] as const).flatMap(mobile =>
+    (['travel', 'general'] as const).flatMap(kind => interactionOrders.map(order => ({
+      mobile, kind, order, sequence: order.join(' → '),
+    }))),
+  ))('preserves row identity and shared proofs through $sequence, cancel, and delete ($kind, mobile=$mobile)', async ({ mobile, kind, order }) => {
+    const expense = useExpenseStore()
+    const drafts = useReimbursementDraftStore()
+    drafts.reimbursementKind = kind
+    drafts.currentDraft = { ...draft(), kind }
+    drafts.reimbursementOptions = {
+      templateConfigVersion: 3, reimbursementProcessCode: 'PROC-SYNTHETIC',
+      companyOptions: [], budgetCodeOptions: [], travelProfiles: [],
+      subjectOptions: [
+        { value: 'synthetic-office', label: '办公费', key: null, categoryId: 'office' },
+        { value: 'synthetic-hotel', label: '住宿费', key: null, categoryId: 'lodging' },
+      ],
+    }
+    expense.categories = [
+      { id: 'office', name: '办公费', order: 1, manualSelectable: true },
+      { id: 'lodging', name: '住宿费', order: 2, manualSelectable: true },
+    ]
+    vi.spyOn(expense, 'refreshCalculations').mockResolvedValue()
+    const payment = serverFile('sequence-payment', '合成付款.png', 'ATTACHMENT_ONLY', { attachmentKind: 'payment_proof' })
+    const hotel = serverFile('sequence-hotel', '合成住宿.png', 'ATTACHMENT_ONLY', { attachmentKind: 'hotel_bill' })
+    drafts.files = [payment, hotel]
+    expense.items = [
+      { id: 'sequence-main', category: 'office', source: 'manual',
+        ...(kind === 'general' ? { subjectValue: 'synthetic-office' } : {}),
+        date: '2026-09-01', displayDate: '9月1日', description: '合成主费用', amount: '600.00', receiptCount: 1 },
+      { id: 'sequence-control', category: 'office', source: 'manual',
+        ...(kind === 'general' ? { subjectValue: 'synthetic-office' } : {}),
+        date: '2026-09-02', displayDate: '9月2日', description: '合成对照费用', amount: '800.00', receiptCount: 1,
+        paymentProofFileIds: [payment.id] },
+    ]
+    const control = JSON.parse(JSON.stringify(expense.buildDraftExpenseItems()[1]!))
+    const wrapper = mount(ExpenseItemsCard, { props: { mobile }, global: { plugins: [pinia, ElementPlus] } })
+    try {
+      await flushPromises()
+      const main = () => wrapper.findAll(mobile ? '.expense-mobile-card' : '.el-table__row')
+        .find(row => row.text().includes('合成主费用'))!
+      for (const action of order) {
+        if (action === 'category') {
+          main().findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', kind === 'general' ? 'synthetic-hotel' : 'lodging')
+        } else if (action === 'payment') {
+          await openProofPicker(wrapper)
+          await confirmProofSelection(wrapper, [payment.id])
+        } else {
+          await main().findAll('button').find(button => button.text() === '编辑')!.trigger('click')
+          const editor = wrapper.findAllComponents({ name: 'ElDialog' }).find(dialog => dialog.props('title') === '编辑费用明细')!
+          expect(main().findComponent({ name: 'ElSelect' }).props('disabled')).toBe(true)
+          const amount = editor.findAllComponents({ name: 'ElFormItem' }).find(item => item.props('label') === '金额（元）')!
+          amount.findComponent({ name: 'ElInput' }).vm.$emit('update:modelValue', '500.01')
+          await editor.findAll('button').find(button => button.text() === '保存')!.trigger('click')
+        }
+        await flushPromises()
+        expect(expense.items[0]!.id).toBe('sequence-main')
+        expect(expense.buildDraftExpenseItems()[1]).toEqual(control)
+        expect(drafts.files.map(file => file.id)).toEqual([payment.id, hotel.id])
+      }
+      expect(expense.items[0]).toMatchObject({ category: 'lodging', amount: '500.01', paymentProofFileIds: [payment.id] })
+      await openProofPicker(wrapper, '住宿明细')
+      await confirmProofSelection(wrapper, [hotel.id], '住宿明细')
+      const accepted = JSON.parse(JSON.stringify(expense.buildDraftExpenseItems()[0]!))
+      await openProofPicker(wrapper)
+      const picker = proofPicker(wrapper)
+      picker.findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', [])
+      await picker.findAll('button').find(button => button.text() === '取消')!.trigger('click')
+      await flushPromises()
+      expect(expense.buildDraftExpenseItems()[0]).toEqual(accepted)
+      for (const category of ['office', 'lodging']) {
+        main().findComponent({ name: 'ElSelect' }).vm.$emit('update:modelValue', kind === 'general'
+          ? category === 'office' ? 'synthetic-office' : 'synthetic-hotel' : category)
+        await flushPromises()
+      }
+      expect(expense.items[0]).toMatchObject({ amount: '500.01', paymentProofFileIds: [payment.id], hotelBillFileIds: [hotel.id] })
+      await main().findAll('button').find(button => button.text() === '删除')!.trigger('click')
+      await flushPromises()
+      expect(expense.buildDraftExpenseItems()).toEqual([control])
+      expect(drafts.files.map(file => file.id)).toEqual([payment.id, hotel.id])
+      expect(deleteReimbursementDraftFile).not.toHaveBeenCalled()
+    } finally { wrapper.unmount() }
+  })
+
   it.each([
     { mobile: false, selector: '.el-table__row' },
     { mobile: true, selector: '.expense-mobile-card' },

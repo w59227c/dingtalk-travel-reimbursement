@@ -1122,7 +1122,9 @@ def test_subsidy_only_submission_manifest_readback_retry_and_cleanup(
             "budgetLabel": snapshot["selections"]["budgetCode"]["label"],
             "travelTypeLabel": snapshot["selections"]["travelType"]["label"],
         }
-        assert snapshot["snapshotVersion"] == 11
+        assert snapshot["snapshotVersion"] == 13
+        assert snapshot["documentNaming"]["sequence"] == 1
+        assert snapshot["excel"]["fileName"].startswith("差旅费报销单-开发测试用户-")
         assert snapshot["attachmentMode"] == (
             "bundle_and_excel" if with_materials else "excel_only"
         )
@@ -2359,10 +2361,12 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
         "remote-file-0",
         "remote-file-1",
     ]
-    assert attachment_values[0]["fileName"] == "票据汇总(1).pdf"
+    assert attachment_values[0]["fileName"] == (
+        storage.put_files[0].file_name.removesuffix(".pdf") + "(1).pdf"
+    )
     assert attachment_values[-1]["fileName"].endswith(".xlsx")
     assert len(storage.put_files) == 2
-    assert storage.put_files[0].file_name == "票据汇总.pdf"
+    assert storage.put_files[0].file_name.startswith("票据汇总-开发测试用户-")
     bundle_pages = PdfReader(io.BytesIO(storage.put_files[0].content)).pages
     assert len(bundle_pages) == 2
     assert bundle_pages[0].extract_text() == "Invoice"
@@ -2402,7 +2406,7 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
             .order_by(ReimbursementUpload.sort_order)
         ).all()
         assert submission is not None
-        assert submission.snapshot_version == 11
+        assert submission.snapshot_version == 13
         frozen = json.loads(submission.form_snapshot_json)
         assert "oaInitiator" not in frozen
         if with_exclusions:
@@ -2417,7 +2421,9 @@ def test_submit_worker_readback_and_cleanup_are_one_durable_local_flow(
             ReimbursementUploadRole.GENERATED_EXCEL.value,
         ]
         assert [item.sort_order for item in uploads] == [0, 1]
-        assert uploads[0].file_name == "票据汇总(1).pdf"
+        assert uploads[0].file_name == (
+            storage.put_files[0].file_name.removesuffix(".pdf") + "(1).pdf"
+        )
         assert all(item.source_draft_file_id is None for item in uploads)
         assert {item.upload_status for item in uploads} == {ReimbursementUploadStatus.LINKED.value}
         assert {item.local_status for item in uploads} == {
@@ -2486,7 +2492,9 @@ def test_transient_put_failure_retries_on_a_later_worker_claim(
             ReimbursementUploadStatus.COMMITTED.value,
             ReimbursementUploadStatus.PUTTING.value,
         ]
-        assert uploads[0].file_name == "票据汇总(1).pdf"
+        assert uploads[0].file_name == (
+            storage.put_files[0].file_name.removesuffix(".pdf") + "(1).pdf"
+        )
         assert uploads[1].put_started_at is not None
         assert uploads[1].commit_started_at is None
         assert submission.status == ReimbursementSubmissionStatus.FAILED_RETRYABLE.value
@@ -2499,11 +2507,11 @@ def test_transient_put_failure_retries_on_a_later_worker_claim(
     assert polled.status_code == 200
     assert polled.json()["data"]["status"] == ReimbursementSubmissionStatus.SUBMITTED.value
     assert storage.commit_calls == 2
-    assert storage.put_files[0].file_name == "票据汇总.pdf"
+    assert storage.put_files[0].file_name.startswith("票据汇总-开发测试用户-")
     assert storage.put_files[1].file_name == storage.put_files[2].file_name
     assert storage.put_files[1].file_name.endswith(".xlsx")
     assert [(item.file_id, item.file_name) for item in storage.probed] == [
-        ("remote-file-0", "票据汇总(1).pdf")
+        ("remote-file-0", storage.put_files[0].file_name.removesuffix(".pdf") + "(1).pdf")
     ]
     assert workflow.create_calls == 1
 
